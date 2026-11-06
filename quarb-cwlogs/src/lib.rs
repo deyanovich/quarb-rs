@@ -285,7 +285,7 @@ impl CwlAdapter {
     fn seed(&self) -> Result<(), CwlError> {
         let root_kids: Vec<NodeId> = match self.t.group.clone() {
             Some(full) => {
-                let events = self.fetch_events(&full)?;
+                let events = self.fetch_events(&full, None)?;
                 self.groups.borrow_mut().push((full, events));
                 let n = self.groups.borrow()[0].1.len();
                 (0..n)
@@ -346,9 +346,19 @@ impl CwlAdapter {
     }
 
     /// One bounded FilterLogEvents sweep of a group, oldest first.
-    fn fetch_events(&self, group: &str) -> Result<Vec<Event>, CwlError> {
+    /// The group's events in the mount's window, `cut` to a prefix
+    /// where a hop keeps one (the pushdown scanning round,
+    /// 2026-11-06): the paging stops at the first `cut` events, the
+    /// mount's `limit=` still the ceiling.
+    fn fetch_events(&self, group: &str, cut: Option<usize>) -> Result<Vec<Event>, CwlError> {
         let mut events: Vec<Event> = Vec::new();
         let mut token: Option<String> = None;
+        let limit = match (self.t.limit, cut) {
+            (Some(l), Some(c)) => Some(l.min(c as u64)),
+            (Some(l), None) => Some(l),
+            (None, Some(c)) => Some(c as u64),
+            (None, None) => None,
+        };
         loop {
             let mut body = json!({ "logGroupName": group });
             if let Some(s) = self.t.since_ms {
@@ -360,7 +370,7 @@ impl CwlAdapter {
             if let Some(f) = &self.t.filter {
                 body["filterPattern"] = json!(f);
             }
-            if let Some(l) = self.t.limit {
+            if let Some(l) = limit {
                 let want = l - (events.len() as u64).min(l);
                 body["limit"] = json!(want.clamp(1, 10_000));
             }
@@ -378,7 +388,7 @@ impl CwlAdapter {
                     events.push(ev);
                 }
             }
-            if let Some(l) = self.t.limit
+            if let Some(l) = limit
                 && events.len() as u64 >= l
             {
                 events.truncate(l as usize);
@@ -451,7 +461,7 @@ impl CwlAdapter {
             Plan::Leaf => Vec::new(),
             Plan::Group(full) => {
                 // Refused and left uncached.
-                let events = match self.fetch_events(&full) {
+                let events = match self.fetch_events(&full, None) {
                     Ok(ev) => ev,
                     Err(e) => {
                         quarb::record_refusal(format!("cwlogs: reading group {full}: {e}"));
@@ -539,6 +549,59 @@ impl AstAdapter for CwlAdapter {
 
     fn children(&self, node: NodeId) -> Vec<NodeId> {
         self.kids_of(node)
+    }
+
+    /// `/group/* @| [..k]` on a group not yet listed fetches k events
+    /// and no more (the pushdown scanning round, 2026-11-06); the
+    /// nodes stand on their own, the group's listing still to come
+    /// when a later hop asks for it whole.
+    fn select(&self, from: NodeId, plan: &quarb::StepPlan<'_>) -> Option<quarb::Selection> {
+        let k = plan.limit?;
+        if plan.axis != quarb::PlanAxis::Child
+            || !plan.conjuncts.is_empty()
+            || !plan.traits.is_empty()
+            || plan.name.is_some_and(|n| n != "entry")
+        {
+            return None;
+        }
+        let full = {
+            let nodes = self.nodes.borrow();
+            let n = &nodes[from.0 as usize];
+            if n.children.borrow().is_some() {
+                return None;
+            }
+            match &n.kind {
+                Kind::Group(full) => full.clone(),
+                _ => return None,
+            }
+        };
+        let events = match self.fetch_events(&full, Some(k)) {
+            Ok(ev) => ev,
+            Err(e) => {
+                quarb::record_refusal(format!("cwlogs: reading group {full}: {e}"));
+                return None;
+            }
+        };
+        let gi = {
+            let mut groups = self.groups.borrow_mut();
+            groups.push((full, events));
+            groups.len() - 1
+        };
+        let n = self.groups.borrow()[gi].1.len();
+        Some(quarb::Selection {
+            nodes: (0..n)
+                .map(|idx| {
+                    let id = self.push(Node {
+                        kind: Kind::Event { group: gi, idx },
+                        name: Some("entry".into()),
+                        parent: Some(from),
+                        children: RefCell::new(None),
+                    });
+                    (id, 1)
+                })
+                .collect(),
+            applied: Vec::new(),
+        })
     }
 
     fn name(&self, node: NodeId) -> Option<String> {

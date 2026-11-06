@@ -415,6 +415,13 @@ impl Record {
     }
 
     /// Field `i` declared `ty` (`None` undeclares it).
+    /// Field `i`'s value replaced, its key and declaration kept.
+    pub fn set_value(&mut self, i: usize, v: Value) {
+        if let Some(f) = self.fields.get_mut(i) {
+            f.1 = v;
+        }
+    }
+
     pub fn declare(&mut self, i: usize, ty: Option<ColumnType>) {
         let d = self
             .declared
@@ -606,10 +613,14 @@ impl<'a> IntoIterator for &'a Record {
 /// column); without one an array (`#(%(1; 2); %(3; 4))`, the positions
 /// its columns). One kind,
 /// two faces: an ndarray and a DataFrame are its two boundary forms.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Table {
     pub header: Option<Vec<String>>,
-    pub rows: Vec<Vec<Value>>,
+    /// The cells by column, each column stored by its kind (the
+    /// columnar round, 2026-11-06): a value is made on read.
+    columns: Vec<Column>,
+    /// How many rows the table holds (its columns are that long).
+    n: usize,
     /// The declared type per column (spec: The Table, "Columns",
     /// draft 166): `Some` where a typed projector declared the
     /// column, which is then fixed to it; `None` where the column
@@ -628,6 +639,697 @@ pub struct Table {
     /// both axes, so `transpose` exchanges it with the index
     /// column's name and undoes itself.
     pub name: Option<String>,
+}
+
+impl PartialEq for Table {
+    /// Two tables are equal cell for cell under the same header,
+    /// declarations, index and name, whatever each column's storage.
+    fn eq(&self, other: &Table) -> bool {
+        self.header == other.header
+            && self.n == other.n
+            && self.width() == other.width()
+            && self.declared == other.declared
+            && self.index == other.index
+            && self.name == other.name
+            && (0..self.width()).all(|j| (0..self.n).all(|i| self.cell(i, j) == other.cell(i, j)))
+    }
+}
+
+/// Which cells of a column are null: a bitmap, empty while none is.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct Nulls {
+    bits: Vec<u64>,
+    len: usize,
+    count: usize,
+}
+
+impl Nulls {
+    fn get(&self, i: usize) -> bool {
+        self.bits
+            .get(i / 64)
+            .is_some_and(|w| (w >> (i % 64)) & 1 == 1)
+    }
+
+    fn push(&mut self, null: bool) {
+        if null {
+            let w = self.len / 64;
+            if self.bits.len() <= w {
+                self.bits.resize(w + 1, 0);
+            }
+            self.bits[w] |= 1 << (self.len % 64);
+            self.count += 1;
+        }
+        self.len += 1;
+    }
+
+    fn nulls(n: usize) -> Nulls {
+        let mut out = Nulls::default();
+        for _ in 0..n {
+            out.push(true);
+        }
+        out
+    }
+}
+
+/// A column's cells, stored by kind: the numbers and booleans as
+/// their vectors, the texts end to end in one arena, anything else
+/// (an instant, a quantity, a node reference, a list cell, or a mix
+/// of kinds) as values. A column's kind is its first value's; a
+/// value of another kind turns it mixed. A table reads a cell by
+/// making the value, so what a reader sees is the row-form table.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Column {
+    /// Nothing but nulls so far.
+    Null(usize),
+    Bool {
+        cells: Vec<bool>,
+        nulls: Nulls,
+    },
+    Int {
+        cells: Vec<i64>,
+        nulls: Nulls,
+    },
+    Float {
+        cells: Vec<f64>,
+        nulls: Nulls,
+    },
+    Text {
+        bytes: Vec<u8>,
+        ends: Vec<u32>,
+        nulls: Nulls,
+    },
+    Mixed(Vec<Value>),
+}
+
+impl Column {
+    fn len(&self) -> usize {
+        match self {
+            Column::Null(n) => *n,
+            Column::Bool { cells, .. } => cells.len(),
+            Column::Int { cells, .. } => cells.len(),
+            Column::Float { cells, .. } => cells.len(),
+            Column::Text { ends, .. } => ends.len(),
+            Column::Mixed(cells) => cells.len(),
+        }
+    }
+
+    /// Cell `i`, null past the end.
+    fn get(&self, i: usize) -> Value {
+        match self {
+            Column::Null(_) => Value::Null,
+            Column::Bool { cells, nulls } => match cells.get(i) {
+                Some(b) if !nulls.get(i) => Value::Bool(*b),
+                _ => Value::Null,
+            },
+            Column::Int { cells, nulls } => match cells.get(i) {
+                Some(x) if !nulls.get(i) => Value::Int(*x),
+                _ => Value::Null,
+            },
+            Column::Float { cells, nulls } => match cells.get(i) {
+                Some(x) if !nulls.get(i) => Value::Float(*x),
+                _ => Value::Null,
+            },
+            Column::Text { bytes, ends, nulls } => match ends.get(i) {
+                Some(&end) if !nulls.get(i) => {
+                    let start = if i == 0 { 0 } else { ends[i - 1] as usize };
+                    Value::Str(String::from_utf8_lossy(&bytes[start..end as usize]).into_owned())
+                }
+                _ => Value::Null,
+            },
+            Column::Mixed(cells) => cells.get(i).cloned().unwrap_or(Value::Null),
+        }
+    }
+
+    /// The column a first value opens, after `n` nulls.
+    fn opened_by(v: &Value, n: usize) -> Column {
+        let nulls = Nulls::nulls(n);
+        match v {
+            Value::Bool(_) => Column::Bool {
+                cells: vec![false; n],
+                nulls,
+            },
+            Value::Int(_) => Column::Int {
+                cells: vec![0; n],
+                nulls,
+            },
+            Value::Float(_) => Column::Float {
+                cells: vec![0.0; n],
+                nulls,
+            },
+            Value::Str(_) => Column::Text {
+                bytes: Vec::new(),
+                ends: vec![0; n],
+                nulls,
+            },
+            _ => Column::Mixed(vec![Value::Null; n]),
+        }
+    }
+
+    /// A cell appended: into the column's kind, or the column turns
+    /// mixed.
+    fn push(&mut self, v: Value) {
+        let v = match self {
+            Column::Null(n) => {
+                if matches!(v, Value::Null) {
+                    *n += 1;
+                    return;
+                }
+                let n = *n;
+                *self = Column::opened_by(&v, n);
+                return self.push(v);
+            }
+            Column::Bool { cells, nulls } => match v {
+                Value::Bool(b) => {
+                    cells.push(b);
+                    nulls.push(false);
+                    return;
+                }
+                Value::Null => {
+                    cells.push(false);
+                    nulls.push(true);
+                    return;
+                }
+                other => other,
+            },
+            Column::Int { cells, nulls } => match v {
+                Value::Int(x) => {
+                    cells.push(x);
+                    nulls.push(false);
+                    return;
+                }
+                Value::Null => {
+                    cells.push(0);
+                    nulls.push(true);
+                    return;
+                }
+                other => other,
+            },
+            Column::Float { cells, nulls } => match v {
+                Value::Float(x) => {
+                    cells.push(x);
+                    nulls.push(false);
+                    return;
+                }
+                Value::Null => {
+                    cells.push(0.0);
+                    nulls.push(true);
+                    return;
+                }
+                other => other,
+            },
+            Column::Text { bytes, ends, nulls } => match v {
+                Value::Str(s) if bytes.len() + s.len() <= u32::MAX as usize => {
+                    bytes.extend_from_slice(s.as_bytes());
+                    ends.push(bytes.len() as u32);
+                    nulls.push(false);
+                    return;
+                }
+                Value::Null => {
+                    ends.push(bytes.len() as u32);
+                    nulls.push(true);
+                    return;
+                }
+                other => other,
+            },
+            Column::Mixed(cells) => {
+                cells.push(v);
+                return;
+            }
+        };
+        *self = Column::Mixed(self.to_values());
+        self.push(v);
+    }
+
+    /// The cells at `idx`, in that order, as a column of the same
+    /// kind: a gather, no value made on the way.
+    fn take(&self, idx: &[usize]) -> Column {
+        match self {
+            Column::Null(_) => Column::Null(idx.len()),
+            Column::Bool { cells, nulls } => {
+                let mut taken = Nulls::default();
+                let cells = idx
+                    .iter()
+                    .map(|&i| {
+                        taken.push(nulls.get(i) || i >= cells.len());
+                        cells.get(i).copied().unwrap_or(false)
+                    })
+                    .collect();
+                Column::Bool {
+                    cells,
+                    nulls: taken,
+                }
+            }
+            Column::Int { cells, nulls } => {
+                let mut taken = Nulls::default();
+                let cells = idx
+                    .iter()
+                    .map(|&i| {
+                        taken.push(nulls.get(i) || i >= cells.len());
+                        cells.get(i).copied().unwrap_or(0)
+                    })
+                    .collect();
+                Column::Int {
+                    cells,
+                    nulls: taken,
+                }
+            }
+            Column::Float { cells, nulls } => {
+                let mut taken = Nulls::default();
+                let cells = idx
+                    .iter()
+                    .map(|&i| {
+                        taken.push(nulls.get(i) || i >= cells.len());
+                        cells.get(i).copied().unwrap_or(0.0)
+                    })
+                    .collect();
+                Column::Float {
+                    cells,
+                    nulls: taken,
+                }
+            }
+            Column::Text { bytes, ends, nulls } => {
+                let mut out_bytes = Vec::new();
+                let mut out_ends = Vec::with_capacity(idx.len());
+                let mut taken = Nulls::default();
+                for &i in idx {
+                    match ends.get(i) {
+                        Some(&end) if !nulls.get(i) => {
+                            let start = if i == 0 { 0 } else { ends[i - 1] as usize };
+                            out_bytes.extend_from_slice(&bytes[start..end as usize]);
+                            taken.push(false);
+                        }
+                        _ => taken.push(true),
+                    }
+                    out_ends.push(out_bytes.len() as u32);
+                }
+                Column::Text {
+                    bytes: out_bytes,
+                    ends: out_ends,
+                    nulls: taken,
+                }
+            }
+            Column::Mixed(cells) => Column::Mixed(
+                idx.iter()
+                    .map(|&i| cells.get(i).cloned().unwrap_or(Value::Null))
+                    .collect(),
+            ),
+        }
+    }
+
+    fn to_values(&self) -> Vec<Value> {
+        (0..self.len()).map(|i| self.get(i)).collect()
+    }
+
+    /// Cells `from..to` as a column of their own.
+    fn slice(&self, from: usize, to: usize) -> Column {
+        let mut out = Column::Null(0);
+        for i in from..to.min(self.len()) {
+            out.push(self.get(i));
+        }
+        out
+    }
+
+    /// Whether any cell holds what a flat table refuses (a list, a
+    /// record, a table): the typed kinds never do.
+    fn any_cell(&self, f: impl Fn(&Value) -> bool) -> bool {
+        match self {
+            Column::Mixed(cells) => cells.iter().any(f),
+            _ => false,
+        }
+    }
+}
+
+/// The rank of text in the type order: the type every cell has.
+const TEXT_RANK: usize = ColumnType::ORDER.len() - 1;
+
+/// A column as it is built (the one-pass typed build, 2026-11-06):
+/// the cells as they arrive, lossless (`raw`: the text in its arena,
+/// a number as a number), and beside them the column typed as the
+/// LEADER types it — the first type of the order every cell so far
+/// coerces to. A cell the leader does not coerce moves the leader
+/// forward: the next type of the order every cell so far coerces to
+/// is found over the raw cells (text stays the last and always
+/// fits), and the typed column is packed again from them — the raw
+/// text is what is re-read, never a lossy parse. When the leader is
+/// text and the raw column is text already the two are one, and
+/// nothing is kept twice.
+#[derive(Debug)]
+struct ColumnBuilder {
+    raw: Column,
+    /// The leader's column; `None` while it is the raw column itself.
+    typed: Option<Column>,
+    /// The leader's rank in the order; past the end: the column
+    /// stays raw (a projector cell was seen).
+    leader: usize,
+    /// The quantity base the leader saw first, while it is quantity.
+    base: Option<String>,
+    /// A declared column: every cell cast to it, or the first row
+    /// that does not, held for the refusal.
+    declared: Option<ColumnType>,
+    failed: Option<(usize, String)>,
+}
+
+impl ColumnBuilder {
+    fn new(n_before: usize, declared: Option<ColumnType>) -> ColumnBuilder {
+        ColumnBuilder {
+            raw: Column::Null(n_before),
+            typed: Some(Column::Null(n_before)),
+            leader: 0,
+            base: None,
+            declared,
+            failed: None,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.raw.len()
+    }
+
+    /// A text cell: the one-pass path of a row read from its bytes.
+    fn push_text(&mut self, s: &str) {
+        if self.declared.is_some() || self.leader > TEXT_RANK {
+            return self.push(Value::Str(s.to_string()));
+        }
+        if self.leader == TEXT_RANK {
+            // text into a text column: nothing to coerce
+            if self.typed.is_none() {
+                self.raw.push(Value::Str(s.to_string()));
+            } else {
+                self.raw.push(Value::Str(s.to_string()));
+                self.typed
+                    .as_mut()
+                    .expect("typed")
+                    .push(Value::Str(s.to_string()));
+            }
+            return;
+        }
+        match coerce_text(s, &ColumnType::ORDER[self.leader]) {
+            Some(v) if self.base_fits(&v) => {
+                self.raw.push(Value::Str(s.to_string()));
+                self.typed
+                    .as_mut()
+                    .expect("a leader below text keeps its column")
+                    .push(v);
+            }
+            _ => {
+                self.raw.push(Value::Str(s.to_string()));
+                self.widen();
+            }
+        }
+    }
+
+    /// Any cell.
+    fn push(&mut self, cell: Value) {
+        if let Some(ty) = &self.declared {
+            let i = self.raw.len();
+            match cast_cell(&cell, ty) {
+                Some(v) => self.typed.as_mut().expect("declared").push(v),
+                None => {
+                    if self.failed.is_none() {
+                        self.failed = Some((i, held_text(&cell)));
+                    }
+                    self.typed.as_mut().expect("declared").push(Value::Null);
+                }
+            }
+            self.raw.push(Value::Null);
+            return;
+        }
+        if self.leader > TEXT_RANK {
+            self.raw.push(cell);
+            return;
+        }
+        // a column of projectors is a projector table's (held, read
+        // where it is applied): its cells stay as they are
+        if matches!(cell, Value::Projection { .. }) {
+            self.leader = TEXT_RANK + 1;
+            self.typed = None;
+            self.raw.push(cell);
+            return;
+        }
+        if self.leader == TEXT_RANK
+            && self.typed.is_none()
+            && !matches!(cell, Value::Str(_) | Value::Null)
+        {
+            // the raw column stops being the text column: the text
+            // column is made from it
+            self.typed = Some(
+                Self::coerced_all(&self.raw, &ColumnType::Text, &mut None)
+                    .expect("every cell has a text form"),
+            );
+        }
+        let coerced = match &cell {
+            Value::Null => Some(Value::Null),
+            other => coerce_cell(other, &ColumnType::ORDER[self.leader]),
+        };
+        match coerced {
+            Some(v) if self.base_fits(&v) => {
+                if let Some(t) = self.typed.as_mut() {
+                    t.push(v);
+                }
+                self.raw.push(cell);
+            }
+            _ => {
+                self.raw.push(cell);
+                self.widen();
+            }
+        }
+    }
+
+    /// A quantity leader holds one dimension: the first base seen.
+    fn base_fits(&mut self, v: &Value) -> bool {
+        if ColumnType::ORDER[self.leader] != ColumnType::Quantity {
+            return true;
+        }
+        match (v, &self.base) {
+            (Value::Quantity { base, .. }, Some(first)) => base == first,
+            (Value::Quantity { base, .. }, None) => {
+                self.base = Some(base.clone());
+                true
+            }
+            _ => true,
+        }
+    }
+
+    /// The next type of the order every raw cell coerces to becomes
+    /// the leader, its column packed from the raw cells.
+    fn widen(&mut self) {
+        for rank in self.leader + 1..=TEXT_RANK {
+            let t = &ColumnType::ORDER[rank];
+            let mut base = None;
+            if let Some(col) = Self::coerced_all(&self.raw, t, &mut base) {
+                self.leader = rank;
+                self.base = base;
+                self.typed = if rank == TEXT_RANK
+                    && matches!(self.raw, Column::Text { .. } | Column::Null(_))
+                {
+                    None
+                } else {
+                    Some(col)
+                };
+                return;
+            }
+        }
+        unreachable!("text is the top: every scalar has a text form")
+    }
+
+    /// Every raw cell coerced to `t` and packed, `None` where one
+    /// does not coerce or the quantity bases differ.
+    fn coerced_all(raw: &Column, t: &ColumnType, base: &mut Option<String>) -> Option<Column> {
+        let mut out = Column::Null(0);
+        for i in 0..raw.len() {
+            let v = coerce_cell(&raw.get(i), t)?;
+            if *t == ColumnType::Quantity
+                && let Value::Quantity { base: b, .. } = &v
+            {
+                match base {
+                    Some(first) if first != b => return None,
+                    Some(_) => {}
+                    None => *base = Some(b.clone()),
+                }
+            }
+            out.push(v);
+        }
+        Some(out)
+    }
+
+    fn finish(self) -> Result<Column, (usize, String)> {
+        if let Some(failed) = self.failed {
+            return Err(failed);
+        }
+        Ok(match self.typed {
+            Some(t) => t,
+            None => self.raw,
+        })
+    }
+}
+
+/// A table built a row at a time (the columnar round, 2026-11-06),
+/// typed as it is built: the streamed table build's store — a
+/// record per node, or a row of cells in the columns' order, pushed
+/// as it is read, each column keeping its leading type as the cells
+/// arrive — and every `Table::typed` call's path. No row is held in
+/// row form at any point, and no second pass types the table.
+#[derive(Debug)]
+pub struct TableBuilder {
+    header: Option<Vec<String>>,
+    at: std::collections::HashMap<String, usize>,
+    columns: Vec<ColumnBuilder>,
+    declared: Vec<Option<ColumnType>>,
+    n: usize,
+}
+
+impl Default for TableBuilder {
+    fn default() -> Self {
+        TableBuilder::new()
+    }
+}
+
+impl TableBuilder {
+    /// A builder whose header grows with the records pushed.
+    pub fn new() -> TableBuilder {
+        TableBuilder {
+            header: Some(Vec::new()),
+            at: std::collections::HashMap::new(),
+            columns: Vec::new(),
+            declared: Vec::new(),
+            n: 0,
+        }
+    }
+
+    /// A builder of a known shape: the rows pushed by position under
+    /// `header` (`None`: an array, as wide as its first row), the
+    /// columns declared as `declared` says (empty: none).
+    pub fn shaped(header: Option<Vec<String>>, declared: Vec<Option<ColumnType>>) -> TableBuilder {
+        let columns = header
+            .as_ref()
+            .map(|h| {
+                (0..h.len())
+                    .map(|j| ColumnBuilder::new(0, declared.get(j).cloned().flatten()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let at = header
+            .as_ref()
+            .map(|h| h.iter().cloned().enumerate().map(|(j, k)| (k, j)).collect())
+            .unwrap_or_default();
+        TableBuilder {
+            header,
+            at,
+            columns,
+            declared,
+            n: 0,
+        }
+    }
+
+    pub fn n_rows(&self) -> usize {
+        self.n
+    }
+
+    fn open_width(&mut self, w: usize) {
+        while self.columns.len() < w {
+            let j = self.columns.len();
+            self.columns.push(ColumnBuilder::new(
+                self.n,
+                self.declared.get(j).cloned().flatten(),
+            ));
+        }
+    }
+
+    /// A row by position: a cell past the width is dropped, a width
+    /// the row lacks is null; an array's first row sets its width.
+    pub fn push_row(&mut self, row: Vec<Value>) {
+        if self.header.is_none() && self.n == 0 {
+            self.open_width(row.len());
+        }
+        let w = self.columns.len();
+        let mut cells = row.into_iter();
+        for col in self.columns.iter_mut() {
+            col.push(cells.next().unwrap_or(Value::Null));
+        }
+        debug_assert!(w == self.columns.len());
+        self.n += 1;
+    }
+
+    /// A row of text cells by position (a CSV record): an empty text
+    /// is a cell the row lacks, null.
+    pub fn push_text_row(&mut self, row: &[&str]) {
+        if self.header.is_none() && self.n == 0 {
+            self.open_width(row.len());
+        }
+        for (j, col) in self.columns.iter_mut().enumerate() {
+            match row.get(j) {
+                Some(s) if !s.is_empty() => col.push_text(s),
+                _ => col.push(Value::Null),
+            }
+        }
+        self.n += 1;
+    }
+
+    /// A record's fields as the next row: a new name opens a column
+    /// (null above), a name the record lacks is null here.
+    pub fn push_record(&mut self, fields: impl IntoIterator<Item = (String, Value)>) {
+        let mut row: Vec<Option<Value>> = vec![None; self.columns.len()];
+        for (k, v) in fields {
+            let j = match self.at.get(&k) {
+                Some(&j) => j,
+                None => {
+                    let j = self.columns.len();
+                    self.at.insert(k.clone(), j);
+                    self.header.get_or_insert_with(Vec::new).push(k);
+                    self.columns.push(ColumnBuilder::new(self.n, None));
+                    row.push(None);
+                    j
+                }
+            };
+            row[j] = Some(v);
+        }
+        for (j, c) in row.into_iter().enumerate() {
+            self.columns[j].push(c.unwrap_or(Value::Null));
+        }
+        self.n += 1;
+    }
+
+    /// The table: typed as every table is, or the refusal of a
+    /// declared column's cell.
+    pub fn finish(self) -> Result<Table, String> {
+        let header = self.header;
+        let name_of = |j: usize| -> String {
+            match &header {
+                Some(h) => h.get(j).cloned().unwrap_or_else(|| (j + 1).to_string()),
+                None => (j + 1).to_string(),
+            }
+        };
+        let mut columns = Vec::with_capacity(self.columns.len());
+        for (j, col) in self.columns.into_iter().enumerate() {
+            let ty = col.declared.clone();
+            match col.finish() {
+                Ok(c) => columns.push(c),
+                Err((i, held)) => {
+                    return Err(format!(
+                        "column '{}' is declared {}, and row {} holds {}, which does not cast to it",
+                        name_of(j),
+                        ty.map(|t| t.word()).unwrap_or_default(),
+                        i + 1,
+                        held,
+                    ));
+                }
+            }
+        }
+        let mut declared = self.declared;
+        let w = columns.len();
+        declared.resize(w, None);
+        if declared.iter().all(Option::is_none) {
+            declared.clear();
+        }
+        Ok(Table {
+            header,
+            columns,
+            n: self.n,
+            declared,
+            index: 0,
+            name: None,
+        })
+    }
 }
 
 /// The keys a list of two or more records share in one order, when
@@ -835,10 +1537,69 @@ pub(crate) fn held_text(c: &Value) -> String {
 /// reading. Text that reads as a type counts as that type; a
 /// boolean reads as 1 and 0 among integers, an integer as a float;
 /// every scalar has a text form.
+/// A text cell coerced to a column type (spec: The Table): what
+/// `coerce_cell` does for a text value, read off the text itself —
+/// the one-pass typed build parses a cell from its bytes, no value
+/// made first.
+pub(crate) fn coerce_text(s: &str, t: &ColumnType) -> Option<Value> {
+    use ColumnType as T;
+    match t {
+        T::Tuple(_) => None,
+        T::Boolean => match s {
+            "true" => Some(Value::Bool(true)),
+            "false" => Some(Value::Bool(false)),
+            _ => None,
+        },
+        T::Integer => match crate::value::number::read(s, crate::value::number::Decimal::Point) {
+            Some(n @ Value::Int(_)) => Some(n),
+            _ => None,
+        },
+        T::Float => match crate::value::number::read(s, crate::value::number::Decimal::Point) {
+            Some(Value::Int(n)) => Some(Value::Float(n as f64)),
+            Some(f @ Value::Float(_)) => Some(f),
+            _ => None,
+        },
+        T::Instant => {
+            crate::temporal::parse_iso(s).map(|(secs, nanos, offset_min)| Value::Instant {
+                secs,
+                nanos,
+                offset_min,
+                calendar: Default::default(),
+            })
+        }
+        T::Duration => crate::temporal::parse_span(s)
+            .map(|(secs, nanos)| Value::seconds(secs, nanos))
+            .or_else(|| {
+                crate::value::quantity::parse_unit_text(s)
+                    .filter(|(_, base, ..)| base == "s")
+                    .map(|(value, base, wv, wu)| Value::Quantity {
+                        value,
+                        base,
+                        written: Some((wv, wu)),
+                    })
+            }),
+        T::Period => crate::period::Period::parse(s).map(Value::period),
+        T::Quantity => {
+            crate::value::quantity::parse_unit_text(s).map(|(value, base, mag, unit)| {
+                Value::Quantity {
+                    value,
+                    base,
+                    written: Some((mag, unit)),
+                }
+            })
+        }
+        T::Node => None,
+        T::Text => Some(Value::Str(s.to_string())),
+    }
+}
+
 fn coerce_cell(v: &Value, t: &ColumnType) -> Option<Value> {
     use ColumnType as T;
     if matches!(v, Value::Null) {
         return Some(Value::Null);
+    }
+    if let Value::Str(s) = v {
+        return coerce_text(s, t);
     }
     match t {
         // a tuple is cast, never coerced: see `cast_cell`
@@ -926,6 +1687,34 @@ fn coerce_cell(v: &Value, t: &ColumnType) -> Option<Value> {
     }
 }
 
+/// The column typed as `type_column` types a vector of cells — the
+/// least type in order every non-null cell coerces to, the cells
+/// stored coerced — read off the column as held, one cell at a time.
+fn type_raw(col: &Column) -> Column {
+    let n = col.len();
+    'types: for t in ColumnType::ORDER {
+        let mut out = Column::Null(0);
+        let mut base: Option<String> = None;
+        for i in 0..n {
+            let Some(v) = coerce_cell(&col.get(i), &t) else {
+                continue 'types;
+            };
+            if t == ColumnType::Quantity
+                && let Value::Quantity { base: b, .. } = &v
+            {
+                match &base {
+                    Some(first) if first != b => continue 'types,
+                    Some(_) => {}
+                    None => base = Some(b.clone()),
+                }
+            }
+            out.push(v);
+        }
+        return out;
+    }
+    unreachable!("text is the top: every scalar has a text form")
+}
+
 /// One column typed: the first type of the order every non-null
 /// cell coerces to, and the cells coerced. A quantity column is of
 /// one dimension; cells of several fall through to text. An
@@ -948,6 +1737,240 @@ pub(crate) fn type_column(cells: Vec<Value>) -> (ColumnType, Vec<Value>) {
         return (t, coerced);
     }
     unreachable!("text is the top: every scalar has a text form")
+}
+
+/// One row of a table, read by position (the columnar round,
+/// 2026-11-06): a view, its cells made on read, so a row costs
+/// nothing to hand out whatever the table's storage.
+#[derive(Clone, Copy)]
+pub struct Row<'a> {
+    table: &'a Table,
+    i: usize,
+}
+
+impl<'a> Row<'a> {
+    /// The cell in column `j`, null past the row's end.
+    pub fn get(&self, j: usize) -> Value {
+        self.table.cell(self.i, j)
+    }
+
+    /// The row's position (0-based).
+    pub fn index(&self) -> usize {
+        self.i
+    }
+
+    /// The cells of the row, as many as the table is wide.
+    pub fn cells(&self) -> Vec<Value> {
+        (0..self.table.width()).map(|j| self.get(j)).collect()
+    }
+
+    /// The row's cells in order.
+    pub fn iter(&self) -> impl Iterator<Item = Value> + use<'a> {
+        let (t, i) = (self.table, self.i);
+        (0..t.width()).map(move |j| t.cell(i, j))
+    }
+
+    pub fn len(&self) -> usize {
+        self.table.width()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.table.width() == 0
+    }
+}
+
+impl Table {
+    /// A table assembled from its parts as given — the cells kept
+    /// as they are, no typing pass (the builders that carry a
+    /// table's own cells and declarations over to a new shape).
+    pub fn assemble(
+        header: Option<Vec<String>>,
+        rows: Vec<Vec<Value>>,
+        declared: Vec<Option<ColumnType>>,
+        index: usize,
+        name: Option<String>,
+    ) -> Table {
+        let w = match &header {
+            Some(h) => h.len(),
+            None => rows.first().map_or(0, Vec::len),
+        };
+        let mut columns = vec![Column::Null(0); w];
+        let mut n = 0;
+        for row in rows {
+            let mut cells = row.into_iter();
+            for col in columns.iter_mut() {
+                col.push(cells.next().unwrap_or(Value::Null));
+            }
+            n += 1;
+        }
+        Table {
+            header,
+            columns,
+            n,
+            declared,
+            index,
+            name,
+        }
+    }
+
+    /// How many rows the table holds.
+    pub fn n_rows(&self) -> usize {
+        self.n
+    }
+
+    /// The cell at row `i`, column `j` (0-based), null where the
+    /// table has none.
+    pub fn cell(&self, i: usize, j: usize) -> Value {
+        self.columns.get(j).map_or(Value::Null, |c| c.get(i))
+    }
+
+    /// The rows in order, each a view.
+    pub fn rows(&self) -> impl Iterator<Item = Row<'_>> + '_ {
+        (0..self.n_rows()).map(move |i| Row { table: self, i })
+    }
+
+    /// Row `i` (0-based) as a view, `None` past the end.
+    pub fn row_at(&self, i: usize) -> Option<Row<'_>> {
+        (i < self.n_rows()).then_some(Row { table: self, i })
+    }
+
+    /// Row `i`'s cells, owned, as many as the table is wide.
+    pub fn row_cells(&self, i: usize) -> Vec<Value> {
+        self.row_at(i).map(|r| r.cells()).unwrap_or_default()
+    }
+
+    /// Every row's cells, owned: the row-form copy of the table.
+    pub fn rows_vec(&self) -> Vec<Vec<Value>> {
+        self.rows().map(|r| r.cells()).collect()
+    }
+
+    /// The rows at `idx`, in that order, under the same header,
+    /// declarations, index and name: a gather per column. A selection
+    /// of rows keeps every column's type (ruling 2026-11-06): the
+    /// typing pass ran when the table was built, and runs again only
+    /// under `autocast`.
+    pub fn take_rows(&self, idx: &[usize]) -> Table {
+        Table {
+            header: self.header.clone(),
+            columns: self.columns.iter().map(|c| c.take(idx)).collect(),
+            n: idx.len(),
+            declared: self.declared.clone(),
+            index: self.index,
+            name: self.name.clone(),
+        }
+    }
+
+    /// Rows kept from this table, in row form, under the same header,
+    /// declarations, index and name, the columns' types kept (ruling
+    /// 2026-11-06): the row-selecting commands' rebuild.
+    pub fn keep_rows(&self, rows: Vec<Vec<Value>>) -> Table {
+        Table::assemble(
+            self.header.clone(),
+            rows,
+            self.declared.clone(),
+            self.index,
+            self.name.clone(),
+        )
+    }
+
+    /// `-c|--cast=:col<type>` (ruling 2026-11-06): the named columns
+    /// declared and their cells cast into the declaration, as
+    /// `map(<type>; --to=:col)` casts them after the build; a cell
+    /// that does not cast refuses naming the column and the row.
+    pub fn cast_columns(&self, casts: &[(String, ColumnType)]) -> Result<Table, String> {
+        let mut t = self.clone();
+        for (name, ty) in casts {
+            let Some(j) = (0..t.width()).find(|&j| t.column_name(j) == *name) else {
+                return Err(format!(
+                    "--cast names column '{name}', and the table has no such column (its columns: {})",
+                    (0..t.width())
+                        .map(|j| t.column_name(j))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            };
+            let mut b = ColumnBuilder::new(0, Some(ty.clone()));
+            for i in 0..t.n {
+                b.push(t.columns[j].get(i));
+            }
+            match b.finish() {
+                Ok(col) => t.columns[j] = col,
+                Err((i, held)) => {
+                    return Err(format!(
+                        "column '{name}' is declared {}, and row {} holds {held}, which does not cast to it",
+                        ty.word(),
+                        i + 1
+                    ));
+                }
+            }
+            if t.declared.len() < t.width() {
+                t.declared.resize(t.width(), None);
+            }
+            t.declared[j] = Some(ty.clone());
+        }
+        Ok(t)
+    }
+
+    /// A column prepended to the table as it stands — `autoindex`'s
+    /// labels, `-a`'s positions — the other columns untouched (an index
+    /// the table had becomes a plain column, as before: the caller sets
+    /// the index), the new column declared as `declared` says.
+    pub fn prepend_column(
+        &self,
+        name: String,
+        cells: Vec<Value>,
+        declared: Option<ColumnType>,
+    ) -> Table {
+        let mut col = Column::Null(0);
+        for c in cells {
+            col.push(c);
+        }
+        let mut columns = Vec::with_capacity(self.columns.len() + 1);
+        columns.push(col);
+        columns.extend(self.columns.iter().cloned());
+        let mut header: Vec<String> = Vec::with_capacity(columns.len());
+        header.push(name);
+        header.extend((0..self.width()).map(|j| self.column_name(j)));
+        let mut decl: Vec<Option<ColumnType>> = Vec::with_capacity(columns.len());
+        decl.push(declared);
+        decl.extend((0..self.width()).map(|j| self.declaration(j)));
+        if decl.iter().all(Option::is_none) {
+            decl.clear();
+        }
+        Table {
+            header: Some(header),
+            columns,
+            n: self.n,
+            declared: decl,
+            index: 0,
+            name: self.name.clone(),
+        }
+    }
+
+    /// `autocast` (ruling 2026-11-06): the undeclared columns typed
+    /// again from the cells present, by the rule of the build — every
+    /// one, or those at `only`; a declared column stays as declared,
+    /// a column of projectors stays.
+    pub fn autocast(&self, only: Option<&[usize]>) -> Table {
+        let mut t = self.clone();
+        for j in 0..t.columns.len() {
+            if only.is_some_and(|o| !o.contains(&j))
+                || t.declaration(j).is_some()
+                || t.columns[j].any_cell(|c| matches!(c, Value::Projection { .. }))
+            {
+                continue;
+            }
+            t.columns[j] = type_raw(&t.columns[j]);
+        }
+        t
+    }
+
+    /// Column `j`'s cells, owned, one per row.
+    pub fn column_cells(&self, j: usize) -> Vec<Value> {
+        self.columns
+            .get(j)
+            .map_or_else(|| vec![Value::Null; self.n], Column::to_values)
+    }
 }
 
 impl Table {
@@ -990,43 +2013,45 @@ impl Table {
         rows: Vec<Vec<Value>>,
         mut declared: Vec<Option<ColumnType>>,
     ) -> Result<Table, String> {
-        let mut t = Table {
-            header,
-            rows,
-            declared: Vec::new(),
-            index: 0,
-            name: None,
+        let w = match &header {
+            Some(h) => h.len(),
+            None => rows.first().map_or(0, Vec::len),
         };
-        let w = t.width();
         declared.resize(w, None);
         if declared.iter().all(Option::is_none) {
             declared.clear();
         }
-        t.declared = declared;
-        if w == 0 {
-            return Ok(t);
+        let mut b = TableBuilder::shaped(header, declared);
+        for row in rows {
+            b.push_row(row);
         }
-        for r in &mut t.rows {
-            r.resize(w, Value::Null);
+        b.finish()
+    }
+
+    /// The typing pass over the columns as held (spec: The Table):
+    /// a declared column casts every cell to its declaration or
+    /// refuses naming the row; a column of projectors stays; any
+    /// other column takes the least type every non-null cell
+    /// coerces to, its cells stored coerced.
+    pub(crate) fn retyped(mut self) -> Result<Table, String> {
+        if self.n == 0 {
+            return Ok(self);
         }
-        if t.rows.is_empty() {
-            return Ok(t);
-        }
-        for j in 0..w {
-            let cells: Vec<Value> = t.rows.iter().map(|r| r[j].clone()).collect();
-            let coerced = match t.declared.get(j).cloned().flatten() {
+        for j in 0..self.columns.len() {
+            let coerced = match self.declared.get(j).cloned().flatten() {
                 Some(ty) => {
-                    let mut out = Vec::with_capacity(cells.len());
-                    for (i, c) in cells.iter().enumerate() {
-                        match cast_cell(c, &ty) {
+                    let mut out = Column::Null(0);
+                    for i in 0..self.n {
+                        let c = self.columns[j].get(i);
+                        match cast_cell(&c, &ty) {
                             Some(v) => out.push(v),
                             None => {
                                 return Err(format!(
                                     "column '{}' is declared {}, and row {} holds {}, which does not cast to it",
-                                    t.column_name(j),
+                                    self.column_name(j),
                                     ty.word(),
                                     i + 1,
-                                    held_text(c),
+                                    held_text(&c),
                                 ));
                             }
                         }
@@ -1035,14 +2060,14 @@ impl Table {
                 }
                 // a column of projectors is a projector table's (held,
                 // read where it is applied): its cells stay projectors
-                None if cells.iter().any(|c| matches!(c, Value::Projection { .. })) => cells,
-                None => type_column(cells).1,
+                None if self.columns[j].any_cell(|c| matches!(c, Value::Projection { .. })) => {
+                    continue;
+                }
+                None => type_raw(&self.columns[j]),
             };
-            for (r, c) in t.rows.iter_mut().zip(coerced) {
-                r[j] = c;
-            }
+            self.columns[j] = coerced;
         }
-        Ok(t)
+        Ok(self)
     }
 
     /// The table with new rows under the same header and the same
@@ -1116,14 +2141,8 @@ impl Table {
             }
         }
         let rows = self
-            .rows
-            .iter()
-            .map(|r| {
-                order
-                    .iter()
-                    .map(|k| r.get(*k).cloned().unwrap_or(Value::Null))
-                    .collect()
-            })
+            .rows()
+            .map(|r| order.iter().map(|k| r.get(*k)).collect())
             .collect();
         Ok(Table::typed(header, rows, declared)?.with_index(n))
     }
@@ -1136,23 +2155,17 @@ impl Table {
             return None;
         }
         if self.index == 1 {
-            return Some(
-                self.rows
-                    .iter()
-                    .map(|r| r.first().cloned().unwrap_or(Value::Null))
-                    .collect(),
-            );
+            return Some(self.rows().map(|r| r.get(0)).collect());
         }
         let names: Vec<String> = (0..self.index).map(|j| self.column_name(j)).collect();
         Some(
-            self.rows
-                .iter()
+            self.rows()
                 .map(|r| {
                     Value::record(
                         names
                             .iter()
                             .enumerate()
-                            .map(|(j, n)| (n.clone(), r.get(j).cloned().unwrap_or(Value::Null)))
+                            .map(|(j, n)| (n.clone(), r.get(j)))
                             .collect(),
                     )
                 })
@@ -1187,10 +2200,9 @@ impl Table {
                 None => l.clone(),
             })
             .collect();
-        self.rows
-            .iter()
+        self.rows()
             .enumerate()
-            .filter(|(_, r)| wanted.iter().enumerate().all(|(j, w)| r.get(j) == Some(w)))
+            .filter(|(_, r)| wanted.iter().enumerate().all(|(j, w)| r.get(j) == *w))
             .map(|(i, _)| i)
             .collect()
     }
@@ -1222,14 +2234,8 @@ impl Table {
         let declared: Vec<Option<ColumnType>> =
             order.iter().map(|&j| self.declaration(j)).collect();
         let rows: Vec<Vec<Value>> = self
-            .rows
-            .iter()
-            .map(|r| {
-                order
-                    .iter()
-                    .map(|&j| r.get(j).cloned().unwrap_or(Value::Null))
-                    .collect()
-            })
+            .rows()
+            .map(|r| order.iter().map(|&j| r.get(j)).collect())
             .collect();
         Some(
             Table::typed(Some(header), rows, declared)
@@ -1287,9 +2293,9 @@ impl Table {
                 .map(|o| o.clone().unwrap_or_else(|| "value".to_string())),
         );
         let mut rows: Vec<Vec<Value>> = Vec::new();
-        for r in &self.rows {
+        for r in self.rows() {
             for inner in &inner_values {
-                let mut row: Vec<Value> = r[..self.index].to_vec();
+                let mut row: Vec<Value> = (0..self.index).map(|j| r.get(j)).collect();
                 row.push(Value::Str(inner.clone()));
                 for outer in &new_cols {
                     let name = match outer {
@@ -1299,7 +2305,7 @@ impl Table {
                     let cell = h
                         .iter()
                         .position(|n| *n == name)
-                        .and_then(|j| r.get(j).cloned())
+                        .map(|j| r.get(j))
                         .unwrap_or(Value::Null);
                     row.push(cell);
                 }
@@ -1324,8 +2330,8 @@ impl Table {
         let k = self.index - 1;
         let data: Vec<usize> = (self.index..self.width()).collect();
         let mut values: Vec<Value> = Vec::new();
-        for r in &self.rows {
-            let v = r.get(k).cloned().unwrap_or(Value::Null);
+        for r in self.rows() {
+            let v = r.get(k);
             if !values.contains(&v) {
                 values.push(v);
             }
@@ -1333,13 +2339,13 @@ impl Table {
         // a label standing on several rows has no one cell to put
         // under its column: refused naming it, as a column read is
         // (ruling 2026-11-05)
-        let mut seen: Vec<&[Value]> = Vec::with_capacity(self.rows.len());
-        for r in &self.rows {
-            let key = &r[..self.index];
+        let mut seen: Vec<Vec<Value>> = Vec::with_capacity(self.n_rows());
+        for r in self.rows() {
+            let key: Vec<Value> = (0..self.index).map(|j| r.get(j)).collect();
             if seen.contains(&key) {
                 return Err(format!(
                     "the label {} stands on several rows, so it has no one cell to put under its column: aggregate the rows first (| mean(--by=:col)), or read them with | @",
-                    self.label_name(r)
+                    self.label_name(&r.cells())
                 ));
             }
             seen.push(key);
@@ -1356,8 +2362,8 @@ impl Table {
         }
         // one row per distinct outer label, in first-met order
         let mut keys: Vec<Vec<Value>> = Vec::new();
-        for r in &self.rows {
-            let key = r[..k].to_vec();
+        for r in self.rows() {
+            let key: Vec<Value> = (0..k).map(|j| r.get(j)).collect();
             if !keys.contains(&key) {
                 keys.push(key);
             }
@@ -1369,10 +2375,9 @@ impl Table {
                 for &j in &data {
                     for v in &values {
                         let cell = self
-                            .rows
-                            .iter()
-                            .find(|r| r[..k] == key[..] && r.get(k) == Some(v))
-                            .and_then(|r| r.get(j).cloned())
+                            .rows()
+                            .find(|r| (0..k).all(|i| r.get(i) == key[i]) && r.get(k) == *v)
+                            .map(|r| r.get(j))
                             .unwrap_or(Value::Null);
                         row.push(cell);
                     }
@@ -1390,12 +2395,17 @@ impl Table {
         let header = self.header.as_ref().map(|h| h[k..].to_vec());
         let declared: Vec<Option<ColumnType>> =
             (k..self.width()).map(|j| self.declaration(j)).collect();
-        let body: Vec<Vec<Value>> = rows.iter().map(|&i| self.rows[i][k..].to_vec()).collect();
+        let body: Vec<Vec<Value>> = rows
+            .iter()
+            .map(|&i| self.row_cells(i)[k..].to_vec())
+            .collect();
         Table::typed(header, body, declared)
             .unwrap_or_else(|_| {
                 Table::new(
                     self.header.as_ref().map(|h| h[k..].to_vec()),
-                    rows.iter().map(|&i| self.rows[i][k..].to_vec()).collect(),
+                    rows.iter()
+                        .map(|&i| self.row_cells(i)[k..].to_vec())
+                        .collect(),
                 )
             })
             .with_index(self.index.saturating_sub(k))
@@ -1453,7 +2463,10 @@ impl Table {
             )));
         }
         // a composite index nests the record level by level
-        let levels: Vec<Vec<Value>> = self.rows.iter().map(|r| r[..self.index].to_vec()).collect();
+        let levels: Vec<Vec<Value>> = self
+            .rows()
+            .map(|r| (0..self.index).map(|j| r.get(j)).collect())
+            .collect();
         Ok(nest_levels(&levels, &cells, 0))
     }
 
@@ -1527,13 +2540,7 @@ impl Table {
         } else {
             coerced.chunks(w).map(|c| c.to_vec()).collect()
         };
-        Table {
-            header: None,
-            rows,
-            declared: Vec::new(),
-            index: 0,
-            name: None,
-        }
+        Table::assemble(None, rows, Vec::new(), 0, None)
     }
 
     /// The column types, one per column: the type of the cells as
@@ -1546,9 +2553,8 @@ impl Table {
                 if let Some(ty) = self.declaration(j) {
                     return ty;
                 }
-                self.rows
-                    .iter()
-                    .find_map(|r| r.get(j).and_then(ColumnType::of))
+                self.rows()
+                    .find_map(|r| ColumnType::of(&r.get(j)))
                     .unwrap_or(ColumnType::Text)
             })
             .collect()
@@ -1567,7 +2573,7 @@ impl Table {
     /// Whether every cell holds a scalar or null — what a table
     /// promises (spec: The Table).
     pub fn is_flat(&self) -> bool {
-        self.rows.iter().flatten().all(|c| {
+        self.rows().flat_map(|r| r.iter()).all(|c| {
             !matches!(
                 c,
                 Value::List(_) | Value::Record(_) | Value::Table(_) | Value::Foreign(_)
@@ -1578,12 +2584,14 @@ impl Table {
     /// The rows as the list of records a frame stands for (positional
     /// lists on the array face).
     pub fn into_records(self) -> Value {
-        let Table { header, rows, .. } = self;
         Value::list(
-            rows.into_iter()
-                .map(|r| match &header {
-                    Some(h) => Value::Record(h.iter().cloned().zip(r).collect()),
-                    None => Value::list(r),
+            (0..self.n)
+                .map(|i| {
+                    let r = self.row_cells(i);
+                    match &self.header {
+                        Some(h) => Value::Record(h.iter().cloned().zip(r).collect()),
+                        None => Value::list(r),
+                    }
                 })
                 .collect(),
         )
@@ -1594,14 +2602,14 @@ impl Table {
     pub fn width(&self) -> usize {
         match &self.header {
             Some(h) => h.len(),
-            None => self.rows.first().map_or(0, Vec::len),
+            None => self.columns.len(),
         }
     }
 
     /// `@(rows; columns)`.
     pub fn shape(&self) -> Value {
         Value::list(vec![
-            Value::Int(self.rows.len() as i64),
+            Value::Int(self.n_rows() as i64),
             Value::Int(self.width() as i64),
         ])
     }
@@ -1615,7 +2623,7 @@ impl Table {
             } else {
                 "an array"
             },
-            self.rows.len(),
+            self.n_rows(),
             self.width()
         )
     }
@@ -1629,7 +2637,7 @@ impl Table {
     /// The row reading: a frame's rows as records, an array's as
     /// lists, a sample's as its values.
     pub fn rows_value(&self) -> Value {
-        Value::list(self.rows.iter().map(|r| self.row_value(r)).collect())
+        Value::list(self.rows().map(|r| self.row_value(&r.cells())).collect())
     }
 
     fn row_value(&self, row: &[Value]) -> Value {
@@ -1646,9 +2654,9 @@ impl Table {
     /// The row at `i` (1-based), as the row reading gives it.
     pub fn row(&self, i: usize) -> Option<Value> {
         (i >= 1)
-            .then(|| self.rows.get(i - 1))
+            .then(|| self.row_at(i - 1))
             .flatten()
-            .map(|r| self.row_value(r))
+            .map(|r| self.row_value(&r.cells()))
     }
 
     /// The column reading: a record of lists, keyed by the header,
@@ -1687,16 +2695,18 @@ impl Table {
     /// The rows `a..b` (1-based, inclusive, either end open) as a
     /// table under the same header.
     pub fn slice(&self, a: Option<i64>, b: Option<i64>) -> Table {
-        let n = self.rows.len() as i64;
+        let n = self.n as i64;
         let from = a.unwrap_or(1).clamp(1, n + 1) - 1;
         let to = b.unwrap_or(n).clamp(0, n);
+        let (from, to) = if from < to {
+            (from as usize, to as usize)
+        } else {
+            (0, 0)
+        };
         Table {
             header: self.header.clone(),
-            rows: if from < to {
-                self.rows[from as usize..to as usize].to_vec()
-            } else {
-                Vec::new()
-            },
+            columns: self.columns.iter().map(|c| c.slice(from, to)).collect(),
+            n: to - from,
             declared: self.declared.clone(),
             index: self.index,
             name: self.name.clone(),
@@ -1706,7 +2716,7 @@ impl Table {
     /// The output form: the literal with the header and each row on
     /// a line of its own, so it pastes back as the constructor.
     pub fn to_quarb_lines(&self) -> String {
-        let mut parts: Vec<String> = Vec::with_capacity(self.rows.len() + 1);
+        let mut parts: Vec<String> = Vec::with_capacity(self.n_rows() + 1);
         if let Some(h) = &self.header {
             let names: Vec<String> = h.iter().map(|k| quarb_key(k)).collect();
             parts.push(format!("@({})", names.join("; ")));
@@ -1714,8 +2724,8 @@ impl Table {
         // a headerless table is the matrix: its rows print as lists
         // (spec: Table Construction, draft 166); a frame's as records
         let sigil = if self.header.is_some() { '%' } else { '@' };
-        for r in &self.rows {
-            let cells: Vec<String> = r.iter().map(Value::to_quarb).collect();
+        for r in self.rows() {
+            let cells: Vec<String> = r.iter().map(|v| v.to_quarb()).collect();
             parts.push(format!("{sigil}({})", cells.join("; ")));
         }
         if parts.len() <= 1 {
@@ -1725,12 +2735,7 @@ impl Table {
     }
 
     fn column_at(&self, j: usize) -> Value {
-        Value::list(
-            self.rows
-                .iter()
-                .map(|r| r.get(j).cloned().unwrap_or(Value::Null))
-                .collect(),
-        )
+        Value::list(self.rows().map(|r| r.get(j)).collect())
     }
 
     /// A column by name, as a list: the header's name on a frame, the
@@ -1765,12 +2770,7 @@ impl Table {
         Table::new(
             None,
             (0..w)
-                .map(|j| {
-                    self.rows
-                        .iter()
-                        .map(|r| r.get(j).cloned().unwrap_or(Value::Null))
-                        .collect()
-                })
+                .map(|j| self.rows().map(|r| r.get(j)).collect())
                 .collect(),
         )
     }
@@ -1779,14 +2779,14 @@ impl Table {
     /// 22))` for a frame, `#(%(1; 2); %(3; 4))` for an array: every row a
     /// record, the header the one list.
     pub fn to_quarb(&self) -> String {
-        let mut parts: Vec<String> = Vec::with_capacity(self.rows.len() + 1);
+        let mut parts: Vec<String> = Vec::with_capacity(self.n_rows() + 1);
         if let Some(h) = &self.header {
             let names: Vec<String> = h.iter().map(|k| quarb_key(k)).collect();
             parts.push(format!("@({})", names.join("; ")));
         }
         let sigil = if self.header.is_some() { '%' } else { '@' };
-        for r in &self.rows {
-            let cells: Vec<String> = r.iter().map(Value::to_quarb).collect();
+        for r in self.rows() {
+            let cells: Vec<String> = r.iter().map(|v| v.to_quarb()).collect();
             parts.push(format!("{sigil}({})", cells.join("; ")));
         }
         format!("#({})", parts.join("; "))
@@ -1952,7 +2952,7 @@ impl Value {
             Value::Projection { .. } => true,
             Value::List(items) => items.iter().any(Value::holds_projector),
             Value::Record(fields) => fields.iter().any(|(_, v)| v.holds_projector()),
-            Value::Table(t) => t.rows.iter().flatten().any(Value::holds_projector),
+            Value::Table(t) => t.rows().flat_map(|r| r.iter()).any(|v| v.holds_projector()),
             _ => false,
         }
     }
@@ -2032,7 +3032,7 @@ impl Value {
             Value::Str(s) => !s.is_empty(),
             Value::List(l) => !l.is_empty(),
             Value::Record(o) => !o.is_empty(),
-            Value::Table(t) => !t.rows.is_empty(),
+            Value::Table(t) => t.n_rows() != 0,
             Value::Instant { .. } => true,
             Value::Period { .. } => true,
             Value::Quantity { value, .. } => *value != 0.0,
@@ -2242,15 +3242,12 @@ impl Value {
     /// keep their shape as a list of records. The flatness is read
     /// off the raw rows: `Table::new` would coerce the lists to text.
     pub fn table_or_records(header: Option<Vec<String>>, rows: Vec<Vec<Value>>) -> Value {
-        let raw = Table {
-            header,
-            rows,
-            declared: Vec::new(),
-            index: 0,
-            name: None,
-        };
+        let raw = Table::assemble(header, rows, Vec::new(), 0, None);
         if raw.is_flat() {
-            Value::table(Table::new(raw.header, raw.rows))
+            Value::table(
+                raw.retyped()
+                    .unwrap_or_else(|_| unreachable!("no column is declared")),
+            )
         } else {
             raw.into_records()
         }
@@ -3058,4 +4055,139 @@ pub fn is_bare_key(k: &str) -> bool {
         && !k.contains("--")
         && !is_bool_word(k)
         && !matches!(k, "true" | "false" | "null" | "nan" | "inf")
+}
+
+#[cfg(test)]
+mod one_pass_typing_tests {
+    //! The builder types a column as the pass over the held cells
+    //! types it: the same rule, met one cell at a time.
+    use super::*;
+
+    fn s(x: &str) -> Value {
+        Value::Str(x.to_string())
+    }
+
+    fn both(rows: Vec<Vec<Value>>) -> (Table, Table) {
+        let header = Some((0..rows[0].len()).map(|j| format!("c{j}")).collect());
+        let one = Table::typed(header.clone(), rows.clone(), Vec::new()).unwrap();
+        let two = Table::assemble(header, rows, Vec::new(), 0, None)
+            .retyped()
+            .unwrap();
+        (one, two)
+    }
+
+    #[test]
+    fn the_leader_meets_the_pass() {
+        let rows = vec![
+            vec![
+                s("1"),
+                s("1.50"),
+                s("1.50"),
+                s("3 kg"),
+                s("true"),
+                Value::Null,
+                s("2024-01-02"),
+                s("x"),
+            ],
+            vec![
+                s("2"),
+                s("2"),
+                s("x"),
+                s("4 kg"),
+                s("false"),
+                Value::Null,
+                s("2024-01-03T04:05:06Z"),
+                Value::Int(1),
+            ],
+            vec![
+                s("3"),
+                Value::Null,
+                s("2.5"),
+                s("5 m"),
+                s("1"),
+                Value::Null,
+                s("nope"),
+                Value::Float(2.5),
+            ],
+        ];
+        let (one, two) = both(rows);
+        assert_eq!(one, two);
+        assert_eq!(
+            one.types(),
+            vec![
+                ColumnType::Integer,
+                ColumnType::Float,
+                ColumnType::Text,
+                ColumnType::Text,
+                ColumnType::Text,
+                ColumnType::Text,
+                ColumnType::Text,
+                ColumnType::Text,
+            ]
+        );
+        // the text that looked numeric first keeps its spelling
+        assert_eq!(one.cell(0, 2), s("1.50"));
+        assert_eq!(one.cell(1, 7), s("1"));
+    }
+
+    #[test]
+    fn the_late_widenings() {
+        // ints for a long run, then a float; then a word
+        let mut rows: Vec<Vec<Value>> = (0..200)
+            .map(|i| vec![s(&i.to_string()), s(&i.to_string())])
+            .collect();
+        rows.push(vec![s("0.5"), s("w")]);
+        let (one, two) = both(rows);
+        assert_eq!(one, two);
+        assert_eq!(one.types(), vec![ColumnType::Float, ColumnType::Text]);
+        assert_eq!(one.cell(3, 0), Value::Float(3.0));
+        assert_eq!(one.cell(3, 1), s("3"));
+        // quantities of one dimension, then of two
+        let (one, two) = both(vec![vec![s("3 kg"), s("3 kg")], vec![s("4 kg"), s("4 m")]]);
+        assert_eq!(one, two);
+        assert_eq!(one.types(), vec![ColumnType::Quantity, ColumnType::Text]);
+        // a projector cell keeps the column raw
+        let p = Value::projection(1, "k".to_string());
+        let (one, two) = both(vec![vec![p.clone(), s("1")], vec![s("2"), s("2")]]);
+        assert_eq!(one, two);
+        assert_eq!(one.cell(0, 0), p);
+        assert_eq!(one.cell(1, 1), Value::Int(2));
+    }
+
+    #[test]
+    fn a_declared_column_casts_or_refuses_as_before() {
+        let header = Some(vec!["n".to_string(), "t".to_string()]);
+        let declared = vec![Some(ColumnType::Integer), Some(ColumnType::Text)];
+        let rows = vec![vec![s("1"), Value::Int(5)], vec![Value::Null, s("x")]];
+        let one = Table::typed(header.clone(), rows.clone(), declared.clone()).unwrap();
+        let two = Table::assemble(header.clone(), rows, declared.clone(), 0, None)
+            .retyped()
+            .unwrap();
+        assert_eq!(one, two);
+        assert_eq!(one.cell(0, 1), s("5"));
+        let bad = vec![vec![s("1"), s("a")], vec![s("x"), s("b")]];
+        let e1 = Table::typed(header.clone(), bad.clone(), declared.clone()).unwrap_err();
+        let e2 = Table::assemble(header, bad, declared, 0, None)
+            .retyped()
+            .unwrap_err();
+        assert_eq!(e1, e2);
+        assert!(
+            e1.contains("column 'n' is declared int, and row 2 holds \"x\""),
+            "{e1}"
+        );
+    }
+
+    #[test]
+    fn text_rows_read_as_records_do() {
+        let cols = vec!["a".to_string(), "b".to_string()];
+        let mut by_text = TableBuilder::shaped(Some(cols.clone()), Vec::new());
+        by_text.push_text_row(&["1", ""]);
+        by_text.push_text_row(&["2", "x", "extra"]);
+        by_text.push_text_row(&["3"]);
+        let mut by_record = TableBuilder::shaped(Some(cols), Vec::new());
+        by_record.push_record(vec![("a".to_string(), s("1"))]);
+        by_record.push_record(vec![("a".to_string(), s("2")), ("b".to_string(), s("x"))]);
+        by_record.push_record(vec![("a".to_string(), s("3"))]);
+        assert_eq!(by_text.finish().unwrap(), by_record.finish().unwrap());
+    }
 }

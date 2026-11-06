@@ -98,7 +98,7 @@ pub use value::ambient::{
     SentenceBonds, fetched, fetched_opt, invocation_instant, now_secs, record_refusal,
     sentence_bonds, set_invocation_instant, set_sentence_bonds,
 };
-pub use value::{ColumnType, Foreign, ForeignValue, NodeRef, Table, Typing, Value};
+pub use value::{ColumnType, Foreign, ForeignValue, NodeRef, Table, TableBuilder, Typing, Value};
 
 /// The universal search over a step body: `*//BODY`, with the
 /// wildcard supplied when the body opens with a trait expression or
@@ -540,9 +540,9 @@ pub fn run_traced_prov(query: &str, adapter: &impl AstAdapter) -> Result<Vec<gra
 /// Parse a definitions file — `def &name(params): body;` statements
 /// only — into a fragment table for [`run_with_defs`]. Lines whose
 /// first non-blank character is `#` are comments: a defs file is a
-/// library, and a library wants a header. (Query text proper has no
-/// comment syntax — queries are one-liners; the annotation lives in
-/// the defs file.)
+/// library, and a library wants a header. The block comment
+/// `(!! … )` stands anywhere in it as in query text (ruling
+/// 2026-11-06); the lexer reads it as whitespace.
 pub fn parse_defs(text: &str) -> Result<Defs> {
     let tokens = lexer::lex(&strip_defs_comments(text))?;
     parser::parse_defs(&tokens)

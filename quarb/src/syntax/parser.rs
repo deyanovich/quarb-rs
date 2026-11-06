@@ -214,6 +214,14 @@ pub struct Defs {
     entries: Vec<(String, Def)>,
 }
 
+/// Whether an option of `command` takes several values (ruling
+/// 2026-11-06): as a list (in parentheses, the literal, or held) or
+/// the option repeated — the inventory marks the value `col…`.
+fn many_valued(command: &str, name: &str) -> bool {
+    crate::syntax::man::options_of(command)
+        .is_some_and(|opts| opts.iter().any(|o| o.many && o.answers_to(name)))
+}
+
 impl Defs {
     fn get(&self, name: &str) -> Option<&Def> {
         self.entries.iter().find(|(n, _)| n == name).map(|(_, d)| d)
@@ -790,7 +798,7 @@ fn rename_in_operand(o: &mut Operand, f: &mut dyn FnMut(&str) -> String) {
             rename_in_operand(base, f);
             match shape {
                 ProjShape::Value(v) => rename_in_operand(v, f),
-                ProjShape::Columns { items, index } => {
+                ProjShape::Columns { items, index, .. } => {
                     for (_, item) in items {
                         rename_in_operand(item, f);
                     }
@@ -4713,12 +4721,28 @@ impl Parser<'_> {
                     Some(Token::Field | Token::ColonColon)
                 ))
         {
-            let ProjShape::Columns { items, index } = self.shape_columns()? else {
+            let ProjShape::Columns {
+                items,
+                index,
+                autoindex,
+                casts,
+            } = self.shape_columns()?
+            else {
                 unreachable!("the columns shape")
             };
             if index.is_some() {
                 return Err(QuarbError::parse(
                     "the index option stands on the table shape the colon applies (t:#(:A; -i=:A)), not in a nested one",
+                ));
+            }
+            if autoindex {
+                return Err(QuarbError::parse(
+                    "the autoindex option stands on the table shape the colon applies (t:#(:A; -a)), not in a nested one",
+                ));
+            }
+            if !casts.is_empty() {
+                return Err(QuarbError::parse(
+                    "the cast option stands on the table shape the colon applies (t:#(:A; -c=:A<int>)), not in a nested one",
                 ));
             }
             let mut header = Vec::with_capacity(items.len());
@@ -4737,6 +4761,7 @@ impl Parser<'_> {
             }
             return Ok(Operand::Table {
                 header: Some(header),
+                declared: Vec::new(),
                 rows: vec![TableRow::Record(items)],
             });
         }
@@ -4745,6 +4770,11 @@ impl Parser<'_> {
         // the first list, held until the next item says whether it
         // is the header (records follow) or a matrix row
         let mut held: Option<Vec<Operand>> = None;
+        // the first list read as a header of names, a name carrying a
+        // trait (`n<int>`, ruling 2026-11-06); `None` where an item is
+        // no name, and the list is read again as a row
+        let mut held_typed: Option<Vec<Option<crate::value::ColumnType>>> = None;
+        let mut declared: Vec<Option<crate::value::ColumnType>> = Vec::new();
         let mut first = true;
         let header_of = |items: Vec<Operand>| -> Result<Vec<String>> {
             let mut names = Vec::with_capacity(items.len());
@@ -4776,10 +4806,27 @@ impl Parser<'_> {
                         ));
                     }
                     self.pos += 2;
-                    let (items, _) = self.list_items(true)?;
+                    let items = match (first, self.header_names()?) {
+                        (true, Some((names, typed))) => {
+                            held_typed = Some(typed);
+                            names
+                                .into_iter()
+                                .map(|n| Operand::Lit(Value::Str(n)))
+                                .collect()
+                        }
+                        _ => self.list_items(true)?.0,
+                    };
                     if first {
                         held = Some(items);
                     } else {
+                        if held_typed
+                            .as_ref()
+                            .is_some_and(|t| t.iter().any(Option::is_some))
+                        {
+                            return Err(QuarbError::parse(
+                                "a header whose names carry a trait names the columns of record rows: #(@(n<int>; s); %(1; \"a\"))",
+                            ));
+                        }
                         // a second list: the held one was a matrix row
                         if let Some(h) = held.take() {
                             rows.push(TableRow::List(h));
@@ -4795,6 +4842,9 @@ impl Parser<'_> {
                     }
                     if let Some(h) = held.take() {
                         header = Some(header_of(h)?);
+                        if let Some(t) = held_typed.take() {
+                            declared = t;
+                        }
                     }
                     self.pos += 2;
                     rows.push(TableRow::Record(self.record_row()?));
@@ -4847,7 +4897,71 @@ impl Parser<'_> {
             }
             rows.push(TableRow::List(h));
         }
-        Ok(Operand::Table { header, rows })
+        if declared.iter().all(Option::is_none) {
+            declared.clear();
+        }
+        Ok(Operand::Table {
+            header,
+            declared,
+            rows,
+        })
+    }
+
+    /// The items of a header list as names, a name carrying a trait
+    /// (`@(n<int>; s)`): `Some` where every item is a name, the
+    /// position restored and `None` where one is not (the list is a
+    /// row then, or a value).
+    fn header_names(
+        &mut self,
+    ) -> Result<Option<(Vec<String>, Vec<Option<crate::value::ColumnType>>)>> {
+        let start = self.pos;
+        let mut names = Vec::new();
+        let mut typed = Vec::new();
+        loop {
+            if matches!(self.peek(), Some(Token::RParen)) {
+                self.pos += 1;
+                break;
+            }
+            let text = match self.peek() {
+                Some(Token::Name { text, .. }) => text.clone(),
+                _ => {
+                    self.pos = start;
+                    return Ok(None);
+                }
+            };
+            if text.parse::<f64>().is_ok() {
+                self.pos = start;
+                return Ok(None);
+            }
+            self.pos += 1;
+            let declared = if matches!(self.peek(), Some(Token::Lt { spaced: false, .. })) {
+                match self.typing_brackets() {
+                    Ok(Some(t)) => t.declared(),
+                    Ok(None) => None,
+                    Err(_) => {
+                        self.pos = start;
+                        return Ok(None);
+                    }
+                }
+            } else {
+                None
+            };
+            names.push(text);
+            typed.push(declared);
+            match self.peek() {
+                Some(Token::Comma | Token::Semi) => self.pos += 1,
+                Some(Token::RParen) => {}
+                _ => {
+                    self.pos = start;
+                    return Ok(None);
+                }
+            }
+        }
+        if names.is_empty() {
+            self.pos = start;
+            return Ok(None);
+        }
+        Ok(Some((names, typed)))
     }
 
     /// Whether `#` is followed by a parenthesized integer, which the
@@ -4894,6 +5008,43 @@ impl Parser<'_> {
     /// separator keeps its operand reading (`@(--author;)`, the
     /// hop's targets; `@((--author))` likewise, a group being no
     /// dash-led field). The spelling, for the refusal.
+    /// Whether the parenthesis ahead opens SEVERAL option values —
+    /// `(a; b)`, a `;` or `,` at its own depth before its close —
+    /// rather than one parenthesized value (ruling 2026-11-06: a
+    /// many-valued option takes a list, in parentheses, as the
+    /// literal or held, or the option repeated).
+    fn option_tuple_ahead(&self) -> bool {
+        let mut depth = 0usize;
+        let mut i = self.pos;
+        while let Some(t) = self.toks.get(i) {
+            match t {
+                Token::LParen | Token::LBracket => depth += 1,
+                Token::RParen | Token::RBracket => {
+                    if depth <= 1 {
+                        return false;
+                    }
+                    depth -= 1;
+                }
+                Token::Semi | Token::Comma if depth == 1 => return true,
+                _ => {}
+            }
+            i += 1;
+        }
+        false
+    }
+
+    /// `(a; b; …)`, an option's several values, read as the list.
+    fn option_tuple(&mut self) -> Result<Operand> {
+        self.expect(Token::LParen, "'(' to open the option's values")?;
+        let mut items = vec![self.additive()?];
+        while matches!(self.peek(), Some(Token::Semi | Token::Comma)) {
+            self.pos += 1;
+            items.push(self.additive()?);
+        }
+        self.expect(Token::RParen, "')' to close the option's values")?;
+        Ok(Operand::List(items))
+    }
+
     fn option_item(&self) -> Option<String> {
         if !self.option_ahead() || self.trailing_separator_ahead() {
             return None;
@@ -5025,12 +5176,34 @@ impl Parser<'_> {
                     // `-i=(:first; :second)` — the composite index, the
                     // levels outer first (spec: The Table, "The index")
                     Some(self.projector_list()?)
+                } else if matches!(self.peek(), Some(Token::LParen)) && self.option_tuple_ahead() {
+                    Some(self.option_tuple()?)
                 } else {
                     Some(self.unary()?)
                 }
             } else {
                 None
             };
+            // one value, written twice: refused (ruling 2026-11-06)
+            let long = match name.as_str() {
+                "-w" => "--width",
+                "-h" => "--header",
+                "-n" => "--name",
+                "-a" => "--autoindex",
+                other => other,
+            };
+            if matches!(long, "--width" | "--header" | "--name" | "--autoindex")
+                && opts.iter().any(|(n, _)| {
+                    matches!(n.as_str(), "-w" | "--width") && long == "--width"
+                        || matches!(n.as_str(), "-h" | "--header") && long == "--header"
+                        || matches!(n.as_str(), "-n" | "--name") && long == "--name"
+                        || matches!(n.as_str(), "-a" | "--autoindex") && long == "--autoindex"
+                })
+            {
+                return Err(QuarbError::parse(format!(
+                    "'{name}' takes one value, and is written twice in '#(…)'"
+                )));
+            }
             opts.push((name, value));
         }
         enum Header {
@@ -5041,8 +5214,77 @@ impl Parser<'_> {
         let mut header: Option<Header> = None;
         let mut index: Option<Operand> = None;
         let mut header_name: Option<String> = None;
+        let mut autoindex = false;
+        let mut casts: Vec<Operand> = Vec::new();
         for (name, value) in opts {
             match name.as_str() {
+                // `-c|--cast=:col<type>` (ruling 2026-11-06): the column
+                // declared and cast after the build, as `map(<type>;
+                // --to=:col)` does; several as a list or repeated
+                "--cast" | "-c" => {
+                    let Some(mut op) = value else {
+                        return Err(QuarbError::parse(
+                            "'#(-c=:col<type>)' names the column cast and its type",
+                        ));
+                    };
+                    head_projections(&mut op);
+                    if let Operand::List(items) = &mut op {
+                        for item in items.iter_mut() {
+                            head_projections(item);
+                        }
+                        // several written values read as the one list
+                        if items.iter().all(|i| matches!(i, Operand::Lit(_))) {
+                            let values: Vec<Value> = items
+                                .iter()
+                                .map(|i| match i {
+                                    Operand::Lit(v) => v.clone(),
+                                    _ => Value::Null,
+                                })
+                                .collect();
+                            op = Operand::Lit(Value::list(values));
+                        }
+                    }
+                    let typed = |v: &Value| {
+                        matches!(
+                            v,
+                            Value::Projection {
+                                typing: Some(_),
+                                ..
+                            }
+                        )
+                    };
+                    let good = match &op {
+                        Operand::Lit(v @ Value::Projection { .. }) => typed(v),
+                        Operand::Lit(Value::List(items)) => {
+                            !items.is_empty() && items.iter().all(typed)
+                        }
+                        Operand::List(items) => {
+                            !items.is_empty()
+                                && items
+                                    .iter()
+                                    .all(|i| matches!(i, Operand::Lit(v) if typed(v)))
+                        }
+                        // held: any expression answering a list, read at the build
+                        Operand::Lit(_) => false,
+                        _ => true,
+                    };
+                    if !good {
+                        return Err(QuarbError::parse(
+                            "'#(-c=…)' casts a column to a type, a typed projector or a list of them: -c=:year<int>, -c=(:year<int>; :price<float>)",
+                        ));
+                    }
+                    casts.push(op);
+                }
+                // `-a|--autoindex` (ruling 2026-11-06): the positions
+                // prepended as the index, as `| autoindex` does
+                "--autoindex" | "-a" => {
+                    if value.is_some() {
+                        return Err(QuarbError::parse(
+                            "'#(-a)' takes no value: it prepends the positions as the index; a start or a step is the command's, '| autoindex(--start=0)'",
+                        ));
+                    }
+                    autoindex = true;
+                }
                 // `--name=word` — the header's name (draft 166), beside
                 // `--header` or alone on an existing table
                 "--name" | "-n" => {
@@ -5065,6 +5307,21 @@ impl Parser<'_> {
                         )));
                     };
                     head_projections(&mut op);
+                    // repeated: the levels gathered in the order written
+                    if let Some(Operand::Lit(have)) = &index
+                        && let Operand::Lit(more) = &op
+                    {
+                        let mut levels: Vec<Value> = match have {
+                            Value::List(l) => l.to_vec(),
+                            one => vec![one.clone()],
+                        };
+                        match more {
+                            Value::List(l) => levels.extend(l.iter().cloned()),
+                            one => levels.push(one.clone()),
+                        }
+                        index = Some(Operand::Lit(Value::list(levels)));
+                        continue;
+                    }
                     match &op {
                         Operand::Lit(Value::Projection { .. }) | Operand::Lit(Value::List(_)) => {
                             index = Some(op)
@@ -5164,7 +5421,7 @@ impl Parser<'_> {
                 other => {
                     return Err(QuarbError::parse(format!(
                         "'#(…)' takes '--width=n' ('-w=n'), '--header=list' ('-h=list'), \
-                         '--index=:col' ('-i=:col') or '--name=word' ('-n=word'); '{other}' given"
+                         '--index=:col' ('-i=:col'), '--name=word' ('-n=word'), '--autoindex' ('-a') or '--cast=:col<type>' ('-c=…'); '{other}' given"
                     )));
                 }
             }
@@ -5179,7 +5436,11 @@ impl Parser<'_> {
             (Some(n), None) => Some(Arg::Lit(Value::Int(n))),
             (None, Some(Header::Names(h))) => Some(Arg::Lit(Value::list(h))),
             (None, Some(Header::Computed(op))) => Some(Arg::Expr(op)),
-            (None, None) if index.is_some() || header_name.is_some() => None,
+            (None, None)
+                if index.is_some() || header_name.is_some() || autoindex || !casts.is_empty() =>
+            {
+                None
+            }
             (None, None) => {
                 return Err(QuarbError::parse(
                     "'#(…)' names no option: '#(--width=n)' ('-w=n') lays the list in rows \
@@ -5199,6 +5460,18 @@ impl Parser<'_> {
             args.push(Arg::Opt {
                 name: "--name".into(),
                 value: Some(Operand::Lit(Value::Str(n))),
+            });
+        }
+        if autoindex {
+            args.push(Arg::Opt {
+                name: "--autoindex".into(),
+                value: None,
+            });
+        }
+        for op in casts {
+            args.push(Arg::Opt {
+                name: "--cast".into(),
+                value: Some(op),
             });
         }
         Ok(FnCall {
@@ -5395,6 +5668,7 @@ impl Parser<'_> {
             if let Operand::Table {
                 header: Some(h),
                 rows,
+                ..
             } = &expr
                 && rows.is_empty()
             {
@@ -5427,16 +5701,40 @@ impl Parser<'_> {
         Ok(Command::Func(call))
     }
 
-    /// Whether the constructor at the head (`#(` or `%(`) opens on a
-    /// projection — `:name`, `::prop` — so it is the projector on
-    /// the topic rather than a literal (a literal's first item is a
-    /// row or a value).
+    /// Whether the constructor at the head (`#(` or `%(`) holds a
+    /// projection item — `:name`, `::prop`, the rest `:*` — anywhere
+    /// among its items (ruling 2026-11-05: one such item makes the
+    /// structure the projector on the topic whatever stands first,
+    /// `| #(BETR801 = :station_antwerp; :*)`), so it is the
+    /// projector rather than a literal (a literal's items are rows or
+    /// values, none of them a bare projection).
     fn projector_items_ahead(&self) -> bool {
-        matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
-            && matches!(
-                self.toks.get(self.pos + 2),
-                Some(Token::Field | Token::ColonColon)
-            )
+        if !matches!(self.toks.get(self.pos + 1), Some(Token::LParen)) {
+            return false;
+        }
+        let mut depth = 0usize;
+        let mut at_item = true;
+        let mut k = self.pos + 2;
+        while let Some(t) = self.toks.get(k) {
+            match t {
+                Token::LParen | Token::LBracket => {
+                    depth += 1;
+                    at_item = false;
+                }
+                Token::RParen | Token::RBracket => {
+                    if depth == 0 {
+                        return false;
+                    }
+                    depth -= 1;
+                    at_item = false;
+                }
+                Token::Semi | Token::Comma if depth == 0 => at_item = true,
+                Token::Field | Token::ColonColon if depth == 0 && at_item => return true,
+                _ => at_item = false,
+            }
+            k += 1;
+        }
+        false
     }
 
     /// A table row's items after its `%(`, through the `)`: each
@@ -5526,15 +5824,99 @@ impl Parser<'_> {
     fn shape_columns(&mut self) -> Result<ProjShape> {
         let mut items: Vec<(Option<String>, Operand)> = Vec::new();
         let mut index: Option<Box<Operand>> = None;
+        let mut autoindex = false;
+        let mut casts: Vec<Operand> = Vec::new();
         loop {
             if matches!(self.peek(), Some(Token::RParen)) {
                 self.pos += 1;
                 break;
             }
             if let Some(opt) = self.option_item() {
+                // `-c|--cast=:col<type>` (ruling 2026-11-06): the column
+                // cast after the build, as the pipe form takes it
+                if matches!(opt.as_str(), "--cast" | "-c") {
+                    self.pos += if opt.starts_with("--") { 2 } else { 1 };
+                    if !matches!(self.peek(), Some(Token::OptEq)) {
+                        return Err(QuarbError::parse(
+                            "'-c=:col<type>' names the column cast and its type",
+                        ));
+                    }
+                    self.pos += 1;
+                    let mut op = if matches!(self.peek(), Some(Token::LParen)) {
+                        self.projector_list()?
+                    } else {
+                        self.unary()?
+                    };
+                    head_projections(&mut op);
+                    if let Operand::List(items) = &mut op {
+                        for item in items.iter_mut() {
+                            head_projections(item);
+                        }
+                    }
+                    let typed = |v: &Value| {
+                        matches!(
+                            v,
+                            Value::Projection {
+                                typing: Some(_),
+                                ..
+                            }
+                        )
+                    };
+                    let good = match &op {
+                        Operand::Lit(v @ Value::Projection { .. }) => typed(v),
+                        Operand::Lit(Value::List(items)) => {
+                            !items.is_empty() && items.iter().all(typed)
+                        }
+                        Operand::List(items) => {
+                            !items.is_empty()
+                                && items
+                                    .iter()
+                                    .all(|i| matches!(i, Operand::Lit(v) if typed(v)))
+                        }
+                        Operand::Lit(_) => false,
+                        _ => true,
+                    };
+                    if !good {
+                        return Err(QuarbError::parse(
+                            "'-c=…' casts a column to a type, a typed projector or a list of them: -c=:year<int>, -c=(:year<int>; :price<float>)",
+                        ));
+                    }
+                    casts.push(op);
+                    match self.peek() {
+                        Some(Token::Comma | Token::Semi) => self.pos += 1,
+                        Some(Token::RParen) => {}
+                        _ => {
+                            return Err(QuarbError::parse(
+                                "the table shape separates its items with ';': t:#(:A; :B)",
+                            ));
+                        }
+                    }
+                    continue;
+                }
+                // `-a|--autoindex` (ruling 2026-11-06): a flag, the
+                // positions prepended as the index
+                if matches!(opt.as_str(), "--autoindex" | "-a") {
+                    self.pos += if opt.starts_with("--") { 2 } else { 1 };
+                    if matches!(self.peek(), Some(Token::OptEq)) {
+                        return Err(QuarbError::parse(
+                            "'-a' takes no value: it prepends the positions as the index; a start or a step is the command's, '| autoindex(--start=0)'",
+                        ));
+                    }
+                    autoindex = true;
+                    match self.peek() {
+                        Some(Token::Comma | Token::Semi) => self.pos += 1,
+                        Some(Token::RParen) => {}
+                        _ => {
+                            return Err(QuarbError::parse(
+                                "the table shape separates its items with ';': t:#(:A; :B)",
+                            ));
+                        }
+                    }
+                    continue;
+                }
                 if !matches!(opt.as_str(), "--index" | "-i") {
                     return Err(QuarbError::parse(format!(
-                        "the table shape takes one option, '--index=:col' ('-i=:col'); '{opt}' given"
+                        "the table shape takes the options '--index=:col' ('-i=:col'), '--autoindex' ('-a') and '--cast=:col<type>' ('-c=…'); '{opt}' given"
                     )));
                 }
                 self.pos += if opt.starts_with("--") { 2 } else { 1 };
@@ -5550,7 +5932,29 @@ impl Parser<'_> {
                     self.unary()?
                 };
                 head_projections(&mut op);
-                index = Some(Box::new(op));
+                // repeated: the levels gathered in the order written
+                index = Some(Box::new(match (index.take(), op) {
+                    (Some(have), Operand::Lit(more)) if matches!(*have, Operand::Lit(_)) => {
+                        let Operand::Lit(have) = *have else {
+                            unreachable!()
+                        };
+                        let mut levels: Vec<Value> = match have {
+                            Value::List(l) => l.to_vec(),
+                            one => vec![one],
+                        };
+                        match more {
+                            Value::List(l) => levels.extend(l.iter().cloned()),
+                            one => levels.push(one),
+                        }
+                        Operand::Lit(Value::list(levels))
+                    }
+                    (Some(_), _) => {
+                        return Err(QuarbError::parse(
+                            "'-i' written twice mixes a computed index with a written one: write the levels as one list, -i=(:a; :b)",
+                        ));
+                    }
+                    (None, op) => op,
+                }));
             } else {
                 let name = match (self.peek(), self.toks.get(self.pos + 1)) {
                     (Some(Token::Name { text, .. }), Some(Token::Eq)) => {
@@ -5584,13 +5988,18 @@ impl Parser<'_> {
                 }
             }
         }
-        Ok(ProjShape::Columns { items, index })
+        Ok(ProjShape::Columns {
+            items,
+            index,
+            autoindex,
+            casts,
+        })
     }
 
     /// `@%(…)` after its `@%`: the table literal's shape read as a
     /// record array — the header required, every row a record.
     fn record_array(&mut self) -> Result<Operand> {
-        let Operand::Table { header, rows } = self.table_literal()? else {
+        let Operand::Table { header, rows, .. } = self.table_literal()? else {
             unreachable!("the table literal parses to a table operand")
         };
         let Some(header) = header else {
@@ -6241,15 +6650,8 @@ impl Parser<'_> {
                 // `--by=(:Sex; :Pclass)` — the key columns as a tuple
                 // of projectors (ruling 2026-11-05), as `-i=(:a; :b)`
                 // names an index
-                if name == "--by" && matches!(self.peek(), Some(Token::LParen)) {
-                    self.pos += 1;
-                    let mut items = vec![self.additive()?];
-                    while matches!(self.peek(), Some(Token::Semi | Token::Comma)) {
-                        self.pos += 1;
-                        items.push(self.additive()?);
-                    }
-                    self.expect(Token::RParen, "')' to close the key tuple of --by")?;
-                    Some(Operand::List(items))
+                if matches!(self.peek(), Some(Token::LParen)) && self.option_tuple_ahead() {
+                    Some(self.option_tuple()?)
                 } else if command == "map"
                     && name == "--to"
                     && matches!(self.peek(), Some(Token::LBracket))
@@ -6284,6 +6686,7 @@ impl Parser<'_> {
                         o = Operand::Field {
                             base: Box::new(o),
                             name,
+                            bare: false,
                         };
                     }
                     Some(o)
@@ -6318,6 +6721,17 @@ impl Parser<'_> {
                 return Err(QuarbError::parse(format!(
                     "a lone '-' in the option segment of '{command}' is no option; a numeric \
                      option follows ';;' ('{command}(a;; -9)')"
+                )));
+            }
+            // an option that takes one value, written twice, is refused
+            // (ruling 2026-11-06); a many-valued one gathers its repeats
+            if !many_valued(command, &name)
+                && args
+                    .iter()
+                    .any(|a| matches!(a, Arg::Opt { name: n, .. } if *n == name))
+            {
+                return Err(QuarbError::parse(format!(
+                    "'{name}' takes one value, and is written twice in '{command}'; an option that takes several takes them as a list: in parentheses (--x=(a; b)), as @(a; b) or any expression answering one, or the option repeated"
                 )));
             }
             args.push(Arg::Opt { name, value });
@@ -8372,7 +8786,11 @@ impl Parser<'_> {
     fn unary_inner(&mut self) -> Result<Operand> {
         // `base:name` — a record's field, chained for
         // nested records; a leading `:name` reads the topic's field.
-        let mut o = if matches!(self.peek(), Some(Token::Field)) {
+        // a leading colon reads the topic's field bare; `$_:name`
+        // writes the topic out (the flag tells them apart under a
+        // row in reach, ruling 2026-11-05)
+        let leading_colon = matches!(self.peek(), Some(Token::Field));
+        let mut o = if leading_colon {
             Operand::Topic
         } else if let Some(Token::Capsa(body)) = self.peek() {
             // `:.name` / `:%.` alone — the node read of the current
@@ -8479,9 +8897,11 @@ impl Parser<'_> {
                         };
                         continue;
                     }
+                    let bare = leading_colon && matches!(o, Operand::Topic);
                     o = Operand::Field {
                         base: Box::new(o),
                         name,
+                        bare,
                     };
                 }
                 // `t[[label]]`, `t[[x; y]]`, `t[[a..b]]`, `r[[k]]` — the
@@ -8880,6 +9300,7 @@ impl Parser<'_> {
             return Ok(Operand::Desc(Box::new(Operand::Field {
                 base: Box::new(Operand::Topic),
                 name,
+                bare: true,
             })));
         }
         if matches!(self.peek(), Some(Token::MarkOpen)) {
@@ -10095,7 +10516,10 @@ impl Parser<'_> {
                 // as its stdin: the pipe form `($_ | max(--by=:Sex))`
                 // (the stdin-slot ruling 2026-11-02; ruling
                 // 2026-11-05: `min(--by=:Sex) ++ max(--by=:Sex)`).
-                if matches!(call.args.first(), None | Some(Arg::Opt { .. })) {
+                // `map(body)` rides the topic too: its first argument
+                // is the command it applies, never a topic to ride
+                // (finding 2026-11-05: `(x | map(datetime) | min)`).
+                if call.name == "map" || matches!(call.args.first(), None | Some(Arg::Opt { .. })) {
                     return Ok(Operand::Piped {
                         expr: Box::new(Operand::Topic),
                         commands: vec![Command::Func(call)],
@@ -13124,7 +13548,7 @@ fn subst_operand(o: &mut Operand, map: &Subst<'_>) {
             subst_operand(base, map);
             match shape {
                 ProjShape::Value(v) => subst_operand(v, map),
-                ProjShape::Columns { items, index } => {
+                ProjShape::Columns { items, index, .. } => {
                     for (_, item) in items {
                         subst_operand(item, map);
                     }
@@ -13585,7 +14009,7 @@ fn head_projections(op: &mut Operand) {
         return;
     }
     let spelled = match op {
-        Operand::Field { base, name } if matches!(**base, Operand::Topic) => {
+        Operand::Field { base, name, .. } if matches!(**base, Operand::Topic) => {
             Some(Value::projection(1, name.clone()))
         }
         Operand::Rel {

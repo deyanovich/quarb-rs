@@ -484,7 +484,7 @@ fn autoindex_labels_the_rows() {
     let d = fixture();
     assert_eq!(
         ok(&d, &format!("{T} | $_:#(:Sex; :Age) | [..2] | autoindex")),
-        "#(@(index; Sex; Age);\n  %(1; \"male\"; 22);\n  %(2; \"female\"; 38))"
+        "#(@(ix; Sex; Age);\n  %(1; \"male\"; 22);\n  %(2; \"female\"; 38))"
     );
     assert_eq!(
         ok(&d, &format!("{T} | autoindex(--start=0) | $_:::index")),
@@ -517,7 +517,7 @@ fn autoindex_labels_the_rows() {
             &d,
             &format!("{T} | #(-i=:Sex) | autoindex(--start=0) | [[1]]")
         ),
-        "%(index = 1; Sex = \"female\"; Class = 1; Age = 38; Fare = 71.5)"
+        "%(ix = 1; Sex = \"female\"; Class = 1; Age = 38; Fare = 71.5)"
     );
     let e = err(&d, &format!("{T} | autoindex(--start=1_m)"));
     assert!(e.contains("the start 1_m takes a step"), "{e}");

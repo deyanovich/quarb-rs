@@ -1880,6 +1880,29 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
         }
     }
 
+    /// The rows' shape and a row's text come from the base for its
+    /// own nodes (a model's `mount` of a CSV builds in the file's
+    /// order as the command line's does; lang's finding 2026-11-06);
+    /// a model's node has neither.
+    fn row_columns(&self, node: NodeId) -> Option<Vec<String>> {
+        match self.decode(node) {
+            Some((_, v)) if v > 0 => self.aliased(node).and_then(|b| self.base.row_columns(b)),
+            Some(_) => None,
+            None => self.base.row_columns(node),
+        }
+    }
+
+    fn row_text(&self, node: NodeId, f: &mut dyn FnMut(&[&str])) -> bool {
+        match self.decode(node) {
+            Some((_, v)) if v > 0 => match self.aliased(node) {
+                Some(b) => self.base.row_text(b, f),
+                None => false,
+            },
+            Some(_) => false,
+            None => self.base.row_text(node, f),
+        }
+    }
+
     fn default_value(&self, node: NodeId) -> Option<Value> {
         match self.decode(node) {
             Some((_, v)) if v > 0 => match self.aliased(node) {
@@ -2234,6 +2257,17 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
         self.base.descendants_where(node, name, property, value)
     }
 
+    /// A count under a source's own node is the source's to answer
+    /// (its `count(*)`, its listing's length); a model's node counts
+    /// by the walk.
+    fn count(&self, from: NodeId, plan: &quarb::StepPlan<'_>) -> Option<usize> {
+        if self.decode(from).is_some() || from == self.base.root() || !self.model.aliases.is_empty()
+        {
+            return None;
+        }
+        self.base.count(from, plan)
+    }
+
     fn select_plan(&self, scope: &[&str], plan: &quarb::StepPlan<'_>) -> Option<Vec<bool>> {
         // A derived container or an alias is the model's to walk.
         if !self.model.aliases.is_empty()
@@ -2263,7 +2297,20 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
         // root, from a derived node, or under aliases, where the
         // walk answers.
         match plan.axis {
-            quarb::PlanAxis::Child => quarb::adapter::select_by_hooks(self, from, plan),
+            // A prefix a child hop keeps under a source's own node
+            // (`/t/* @| [..k]`, the pushdown scanning round,
+            // 2026-11-06) is the source's to cut, as under a
+            // descendant search; the model's own hooks answer the rest.
+            quarb::PlanAxis::Child => plan
+                .limit
+                .filter(|_| {
+                    plan.conjuncts.is_empty()
+                        && self.decode(from).is_none()
+                        && from != self.base.root()
+                        && self.model.aliases.is_empty()
+                })
+                .and_then(|_| self.base.select(from, plan))
+                .or_else(|| quarb::adapter::select_by_hooks(self, from, plan)),
             quarb::PlanAxis::Descendant => {
                 if self.decode(from).is_some()
                     || from == self.base.root()

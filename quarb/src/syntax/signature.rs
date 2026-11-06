@@ -45,6 +45,9 @@ pub struct OptSpec {
     /// A valued option written bare is required; `?` makes it
     /// optional. A flag is never required.
     pub required: bool,
+    /// `--by=col…`: the value takes several — a list, or the option
+    /// repeated (ruling 2026-11-06); zero or more, never `…?`.
+    pub many: bool,
 }
 
 impl OptSpec {
@@ -63,7 +66,9 @@ impl OptSpec {
         if let Some(v) = &self.value {
             s.push('=');
             s.push_str(v);
-            if !self.required {
+            if self.many {
+                s.push('…');
+            } else if !self.required {
                 s.push('?');
             }
         }
@@ -241,13 +246,28 @@ fn parse_option(word: &str) -> Result<OptSpec, String> {
         Some(eq) => (&word[..eq], Some(&word[eq + 1..])),
         None => (word, None),
     };
-    let (value, required) = match value {
-        None => (None, false),
-        Some(v) => match v.strip_suffix('?') {
-            Some(v) => (Some(v), false),
-            None => (Some(v), true),
+    let (value, required, many) = match value {
+        None => (None, false, false),
+        Some(v) => match (v.strip_suffix('…'), v.strip_suffix('?')) {
+            (Some(v), _) => {
+                if v.ends_with('?') {
+                    return Err(format!(
+                        "'{word}': a many-valued option is marked '…' alone, never '…?' or '?…'"
+                    ));
+                }
+                (Some(v), false, true)
+            }
+            (None, Some(v)) => (Some(v), false, false),
+            (None, None) => (Some(v), true, false),
         },
     };
+    if let Some(v) = value
+        && v.ends_with("…")
+    {
+        return Err(format!(
+            "'{word}': a many-valued option is marked '…' alone, never '?…'"
+        ));
+    }
     if let Some(v) = value
         && v.is_empty()
     {
@@ -291,12 +311,33 @@ fn parse_option(word: &str) -> Result<OptSpec, String> {
         short,
         value: value.map(str::to_string),
         required,
+        many,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_many_valued_option_carries_the_mark() {
+        let f = parse_form("sum{stream}(--of=expr? -b|--by=col…)").unwrap();
+        let by = f
+            .options
+            .iter()
+            .find(|o| o.long.as_deref() == Some("--by"))
+            .unwrap();
+        assert!(by.many && !by.required);
+        let of = f
+            .options
+            .iter()
+            .find(|o| o.long.as_deref() == Some("--of"))
+            .unwrap();
+        assert!(!of.many && !of.required);
+        assert_eq!(by.spelled(), "-b|--by=col…");
+        assert!(parse_form("x{stream}(--by=col…?)").is_err());
+        assert!(parse_form("x{stream}(--by=col?…)").is_err());
+    }
 
     #[test]
     fn the_examples_of_the_notation_parse() {

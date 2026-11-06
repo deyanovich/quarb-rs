@@ -141,14 +141,27 @@ impl DuckdbAdapter {
         // the keyed read a hop makes (`WHERE key IN (…)`).
         let conn = std::rc::Rc::new(conn);
         let conn2 = conn.clone();
+        let conn3 = conn.clone();
         let model = RelationalModel::lazy_where(
             specs,
-            std::rc::Rc::new(move |_: usize, spec: &TableSpec, w: Option<&str>| {
-                fetch_rows(&conn, spec, w).map_err(|e| e.to_string())
-            }),
+            std::rc::Rc::new(
+                move |_: usize, spec: &TableSpec, w: Option<&str>, k: Option<usize>| {
+                    fetch_rows(&conn, spec, w, k).map_err(|e| e.to_string())
+                },
+            ),
             None,
             quarb_relational::quote_double,
         )
+        // the exact count of a table not read (the pushdown scanning
+        // round, 2026-11-06)
+        .with_counter(Box::new(move |_, spec| {
+            conn3
+                .query_row(&format!("SELECT count(*) FROM {}", spec.name), [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .map(|n| n.max(0) as usize)
+                .map_err(|e| e.to_string())
+        }))
         // The catalog's own estimate of the table's rows, read
         // without a scan.
         .with_estimator(std::rc::Rc::new(move |_, spec, equals| {
@@ -275,7 +288,10 @@ fn fetch_rows(
     conn: &Connection,
     spec: &TableSpec,
     where_sql: Option<&str>,
+    limit: Option<usize>,
 ) -> Result<Vec<RowSpec>, DuckdbError> {
+    // a prefix: the first rows in the order the whole read uses
+    let cut = limit.map(|k| format!(" LIMIT {k}")).unwrap_or_default();
     let cols = spec
         .columns
         .iter()
@@ -293,7 +309,10 @@ fn fetch_rows(
         Some(w) => format!(" WHERE {w}"),
         None => String::new(),
     };
-    let mut stmt = conn.prepare(&format!("SELECT {cols} FROM {}{filter}{order}", spec.name))?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {cols} FROM {}{filter}{order}{cut}",
+        spec.name
+    ))?;
     let mut rows = stmt.query([])?;
     let mut out = Vec::new();
     let mut i = 0i64;

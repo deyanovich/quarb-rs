@@ -598,6 +598,14 @@ pub const SPECS: &[FnSpec] = &[
         "how many; --values (-v) the non-null values alone, --nulls (-n) the nulls alone",
     ),
     reducing("sum", "the sum"),
+    reducing(
+        "any",
+        "true when any element is true (false on an empty list; null counts false)",
+    ),
+    reducing(
+        "all",
+        "true when every element is true (true on an empty list; null counts false)",
+    ),
     reducing("product", "the product"),
     reducing("min", "the least"),
     reducing("max", "the greatest"),
@@ -624,6 +632,10 @@ pub const SPECS: &[FnSpec] = &[
     scalar(
         "autoindex",
         "the implicit index made explicit: a column `index` of consecutive labels, one per row, prepended and named the index; --start=x where to begin (a number, a quantity, an instant), --step=d the step (1 for a number; required for a quantity of the start's dimension, a duration for an instant)",
+    ),
+    scalar(
+        "autocast",
+        "the columns typed again from the cells present, by the rule of the build: every undeclared column, or the columns named (autocast(:a; :b)); a declared column stays as declared",
     ),
     reducing("avg", "mean, alias"),
     reducing("median", "the median"),

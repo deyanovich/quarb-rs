@@ -202,7 +202,7 @@ pub fn walk_operand<V: Visitor + ?Sized>(v: &mut V, o: &Operand) {
             v.operand(base);
             match shape {
                 crate::syntax::ast::ProjShape::Value(x) => v.operand(x),
-                crate::syntax::ast::ProjShape::Columns { items, index } => {
+                crate::syntax::ast::ProjShape::Columns { items, index, .. } => {
                     for (_, item) in items {
                         v.operand(item);
                     }

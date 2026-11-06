@@ -207,11 +207,29 @@ pub type Fetcher = Box<dyn Fn(usize, &TableSpec) -> Result<Vec<RowSpec>, String>
 pub type KeyFetcher =
     Box<dyn Fn(usize, &TableSpec, Option<usize>, &[Value]) -> Result<Vec<RowSpec>, String>>;
 
-/// A driver's row source with an optional WHERE: the one function
-/// from which [`RelationalModel::lazy_where`] derives the whole
-/// read, the filtered listing and the keyed read.
-pub type WhereFetcher =
-    std::rc::Rc<dyn Fn(usize, &TableSpec, Option<&str>) -> Result<Vec<RowSpec>, String>>;
+/// A driver's row source with an optional WHERE and an optional
+/// row limit: the one function from which
+/// [`RelationalModel::lazy_where`] derives the whole read, the
+/// filtered listing, the keyed read and the prefix read. The limit
+/// cuts the statement in the table's own order (the order the whole
+/// read uses), so the rows it answers are the whole read's first.
+pub type WhereFetcher = std::rc::Rc<
+    dyn Fn(usize, &TableSpec, Option<&str>, Option<usize>) -> Result<Vec<RowSpec>, String>,
+>;
+
+/// The driver-supplied prefix source (the pushdown scanning round,
+/// 2026-11-06): the first `k` rows of a table in the table's own
+/// order — the order the whole read uses, so `/t/* @| [..k]` reads
+/// k rows and answers what the whole read's first k are. A driver
+/// with no order to back the cut (a table without a key on a server
+/// that orders nothing by itself) answers `Err`, and the table is
+/// read whole as before.
+pub type PrefixFetcher = Box<dyn Fn(usize, &TableSpec, usize) -> Result<Vec<RowSpec>, String>>;
+
+/// The driver-supplied row counter (`SELECT count(*)`): `/t/* @|
+/// count` on a table not yet read answers it exactly without loading
+/// the table.
+pub type Counter = Box<dyn Fn(usize, &TableSpec) -> Result<usize, String>>;
 
 /// The `WHERE` text for a list of column equalities, each column
 /// quoted by `quote`, each value as a portable SQL literal
@@ -343,6 +361,10 @@ struct TableData {
     /// whole table: lookups still go by key, and a need for the
     /// whole table reads it.
     filtered: bool,
+    /// `order` holds a prefix of the table (its first k rows), not
+    /// a listing: a later listing reads the table whole and finds
+    /// these rows again by key.
+    prefix: bool,
 }
 
 struct LazyTable {
@@ -370,6 +392,10 @@ pub struct RelationalModel {
     tables: Vec<LazyTable>,
     fetcher: Fetcher,
     key_fetcher: Option<KeyFetcher>,
+    /// The first k rows of a table, for a hop that keeps a prefix.
+    prefix_fetcher: Option<PrefixFetcher>,
+    /// The exact row count of a table not read.
+    counter: Option<Counter>,
     /// One table's listing under a pushed-down WHERE: (table index,
     /// reader).
     listing: Option<(usize, Fetcher)>,
@@ -438,6 +464,8 @@ impl RelationalModel {
                 unreachable!("eager model refetched table '{}'", spec.name)
             }),
             key_fetcher: None,
+            prefix_fetcher: None,
+            counter: None,
             listing: None,
             listing_off: std::cell::Cell::new(false),
             estimator: None,
@@ -462,6 +490,8 @@ impl RelationalModel {
                 .collect(),
             fetcher,
             key_fetcher: None,
+            prefix_fetcher: None,
+            counter: None,
             listing: None,
             listing_off: std::cell::Cell::new(false),
             estimator: None,
@@ -491,29 +521,43 @@ impl RelationalModel {
         filter: Option<(String, String)>,
         quote: fn(&str) -> String,
     ) -> Self {
-        let (whole, keyed) = (fetch.clone(), fetch.clone());
-        let mut model = RelationalModel::lazy(specs, Box::new(move |t, spec| whole(t, spec, None)))
-            .with_key_fetcher(Box::new(move |t, spec, col, values| {
-                let Some(pk) = spec.pk else {
-                    return Err("rows are named by position".to_string());
-                };
-                let column = quote(&spec.columns[col.unwrap_or(pk)]);
-                let literals: Option<Vec<String>> = values.iter().map(sql_literal).collect();
-                let literals = literals.ok_or("a value with no portable SQL literal")?;
-                if literals.is_empty() {
-                    return Ok(Vec::new());
-                }
-                let where_sql = format!("{column} IN ({})", literals.join(", "));
-                let mut rows = keyed(t, spec, Some(&where_sql))?;
-                for r in &mut rows {
-                    r.rowid = None;
-                }
-                Ok(rows)
-            }));
+        let (whole, keyed, prefix) = (fetch.clone(), fetch.clone(), fetch.clone());
+        let mut model =
+            RelationalModel::lazy(specs, Box::new(move |t, spec| whole(t, spec, None, None)))
+                .with_prefix_fetcher(Box::new(move |t, spec, k| {
+                    // the whole read orders by the primary key alone: without
+                    // one the server orders nothing, and a cut of an unordered
+                    // scan is no prefix of the whole read
+                    if spec.pk.is_none() {
+                        return Err("rows have no order to back a prefix".to_string());
+                    }
+                    let mut rows = prefix(t, spec, None, Some(k))?;
+                    for r in &mut rows {
+                        r.rowid = None;
+                    }
+                    Ok(rows)
+                }))
+                .with_key_fetcher(Box::new(move |t, spec, col, values| {
+                    let Some(pk) = spec.pk else {
+                        return Err("rows are named by position".to_string());
+                    };
+                    let column = quote(&spec.columns[col.unwrap_or(pk)]);
+                    let literals: Option<Vec<String>> = values.iter().map(sql_literal).collect();
+                    let literals = literals.ok_or("a value with no portable SQL literal")?;
+                    if literals.is_empty() {
+                        return Ok(Vec::new());
+                    }
+                    let where_sql = format!("{column} IN ({})", literals.join(", "));
+                    let mut rows = keyed(t, spec, Some(&where_sql), None)?;
+                    for r in &mut rows {
+                        r.rowid = None;
+                    }
+                    Ok(rows)
+                }));
         if let Some((table, where_sql)) = filter {
             model = model.with_filtered_listing(
                 &table,
-                Box::new(move |t, spec| fetch(t, spec, Some(&where_sql))),
+                Box::new(move |t, spec| fetch(t, spec, Some(&where_sql), None)),
             );
         }
         model
@@ -524,6 +568,16 @@ impl RelationalModel {
     /// read whole only when a query asks for all of it.
     pub fn with_key_fetcher(mut self, key_fetcher: KeyFetcher) -> Self {
         self.key_fetcher = Some(key_fetcher);
+        self
+    }
+
+    pub fn with_prefix_fetcher(mut self, prefix_fetcher: PrefixFetcher) -> Self {
+        self.prefix_fetcher = Some(prefix_fetcher);
+        self
+    }
+
+    pub fn with_counter(mut self, counter: Counter) -> Self {
+        self.counter = Some(counter);
         self
     }
 
@@ -559,8 +613,11 @@ impl RelationalModel {
         if self.listing_off.get() {
             return self.whole(t);
         }
-        if let Some(order) = self.tables[t].data.borrow().order.clone() {
-            return order;
+        {
+            let d = self.tables[t].data.borrow();
+            if let (Some(order), false) = (&d.order, d.prefix) {
+                return order.clone();
+            }
         }
         // A table without a single-column primary key names its
         // rows by position, and a filtered listing's positions are
@@ -597,6 +654,13 @@ impl RelationalModel {
         self.absorb(t, rows, false)
     }
 
+    /// Take the first k rows of the table, in the table's order: no
+    /// listing, the rows kept by key for the whole read to find.
+    fn absorb_prefix(&self, t: usize, rows: Vec<RowSpec>) {
+        self.absorb(t, rows, false);
+        self.tables[t].data.borrow_mut().prefix = true;
+    }
+
     /// Take a listing of the table — whole, or under a filter — in
     /// the table's order.
     fn absorb(&self, t: usize, rows: Vec<RowSpec>, filtered: bool) {
@@ -621,6 +685,7 @@ impl RelationalModel {
         }
         d.order = Some(std::rc::Rc::new(order));
         d.filtered = filtered;
+        d.prefix = false;
         if !filtered {
             // The per-column indexes are rebuilt on demand, complete
             // and in the table's order.
@@ -632,7 +697,7 @@ impl RelationalModel {
     /// Whether `t` has been read whole.
     fn is_whole(&self, t: usize) -> bool {
         let d = self.tables[t].data.borrow();
-        d.order.is_some() && !d.filtered
+        d.order.is_some() && !d.filtered && !d.prefix
     }
 
     /// Whether `t` may still be read by key.
@@ -678,7 +743,7 @@ impl RelationalModel {
     fn whole(&self, t: usize) -> std::rc::Rc<Vec<usize>> {
         {
             let d = self.tables[t].data.borrow();
-            if let (Some(order), false) = (&d.order, d.filtered) {
+            if let (Some(order), false, false) = (&d.order, d.filtered, d.prefix) {
                 return order.clone();
             }
         }
@@ -695,6 +760,42 @@ impl RelationalModel {
             .order
             .clone()
             .expect("just absorbed")
+    }
+
+    /// The first `k` rows of `t` for a child hop that keeps a prefix
+    /// (`/t/* @| [..k]`, `@| first(k)`): from the rows already here
+    /// when the table is read whole or a prefix at least as long is
+    /// cached, else through the driver's prefix read; `None` where
+    /// the walk must do it (a filtered listing in force for the
+    /// table, a driver without the read, a driver declining it).
+    fn prefix(&self, t: usize, k: usize) -> Option<Vec<usize>> {
+        {
+            let d = self.tables[t].data.borrow();
+            if let Some(order) = &d.order
+                && !d.filtered
+                && (!d.prefix || order.len() >= k)
+            {
+                return Some(order.iter().copied().take(k).collect());
+            }
+        }
+        if !self.listing_off.get()
+            && let Some((lt, _)) = &self.listing
+            && *lt == t
+        {
+            return None;
+        }
+        let fetcher = self.prefix_fetcher.as_ref()?;
+        let rows = fetcher(t, &self.tables[t].spec, k).ok()?;
+        self.absorb_prefix(t, rows);
+        let d = self.tables[t].data.borrow();
+        Some(
+            d.order
+                .as_ref()
+                .expect("just absorbed")
+                .iter()
+                .copied()
+                .collect(),
+        )
     }
 
     /// One row of the arena.
@@ -1026,6 +1127,18 @@ impl AstAdapter for RelationalModel {
         if plan.axis != quarb::PlanAxis::Child || plan.name.is_some() {
             return quarb::adapter::select_by_hooks(self, from, plan);
         }
+        // A hop that keeps a prefix and tests nothing reads k rows
+        // (the pushdown scanning round, 2026-11-06).
+        if plan.conjuncts.is_empty() {
+            let rows = self.prefix(t, plan.limit?)?;
+            return Some(quarb::Selection {
+                nodes: rows
+                    .into_iter()
+                    .map(|r| (Self::row_node(t, r), 1))
+                    .collect(),
+                applied: Vec::new(),
+            });
+        }
         let [quarb::Conjunct::Equals(prop, value)] = plan.conjuncts.as_slice() else {
             return None;
         };
@@ -1166,19 +1279,29 @@ impl AstAdapter for RelationalModel {
         })
     }
 
-    /// `/table/* @| count` on a table already read whole: its length.
+    /// `/table/* @| count` on a table already read whole: its
+    /// length; on a table not read, the driver's `SELECT count(*)`
+    /// (the pushdown scanning round, 2026-11-06), unless a filtered
+    /// listing stands for the table.
     fn count(&self, from: NodeId, plan: &quarb::StepPlan<'_>) -> Option<usize> {
         let Some((t, None)) = self.entry(from) else {
             return None;
         };
-        if plan.axis != quarb::PlanAxis::Child
-            || plan.name.is_some()
-            || !plan.conjuncts.is_empty()
-            || !self.is_whole(t)
+        if plan.axis != quarb::PlanAxis::Child || plan.name.is_some() || !plan.conjuncts.is_empty()
         {
             return None;
         }
-        Some(self.whole(t).len())
+        if self.is_whole(t) {
+            return Some(self.whole(t).len());
+        }
+        if !self.listing_off.get()
+            && let Some((lt, _)) = &self.listing
+            && *lt == t
+        {
+            return None;
+        }
+        let counter = self.counter.as_ref()?;
+        counter(t, &self.tables[t].spec).ok()
     }
 
     fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {

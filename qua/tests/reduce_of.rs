@@ -156,7 +156,7 @@ fn a_key_written_as_an_operand_is_refused_with_the_signature() {
     let e = refuse("/rows/* @| sum(--foo=1)");
     assert!(
         e.contains(
-            "'sum' has no option '--foo'; the signature: sum{stream}(-o|--of=expr? -b|--by=col?)"
+            "'sum' has no option '--foo'; the signature: sum{stream}(-o|--of=expr? -b|--by=col…)"
         ),
         "{e}"
     );

@@ -109,7 +109,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.52.0"
+version = "0.53.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["Bojan Durickovic <dev@deyanovich.org>"]
@@ -131,6 +131,7 @@ tar = "0.4"
 flate2 = "1"
 tokio = "1"
 tokio-postgres = "0.7"
+futures-util = "0.3"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "mysql"] }
 mongodb = { version = "3", features = ["sync"] }
 tiberius = { version = "0.12", default-features = false, features = ["rustls"] }

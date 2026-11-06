@@ -52,6 +52,8 @@ impl Options {
             no_graft: self.no_graft,
             refs: self.refs.clone(),
             allow_shell: self.allow_shell,
+            // a session mounts the file whole (ruling 2026-11-05)
+            stream_rows: false,
         }
     }
 }

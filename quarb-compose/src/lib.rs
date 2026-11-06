@@ -1594,9 +1594,17 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
             // Outside: the outer adapter's descendants may cross
             // into grafts, which the walk handles; a child hop is
             // this adapter's own `children_named`.
+            // A prefix the plan asks for (`@| [..n]` right after the
+            // hop, ruling 2026-11-05) is the outer source's to cut
+            // where it lists its rows lazily; its nodes are its own.
             None => match plan.axis {
-                quarb::PlanAxis::Child => quarb::adapter::select_by_hooks(self, from, plan),
-                quarb::PlanAxis::Descendant => None,
+                quarb::PlanAxis::Child => plan
+                    .limit
+                    .and_then(|_| self.outer.select(from, plan))
+                    .or_else(|| quarb::adapter::select_by_hooks(self, from, plan)),
+                quarb::PlanAxis::Descendant => {
+                    plan.limit.and_then(|_| self.outer.select(from, plan))
+                }
             },
         }
     }
@@ -1754,6 +1762,20 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
         match self.split(from) {
             Some(_) => None,
             None => self.outer.count(from, plan),
+        }
+    }
+
+    fn row_columns(&self, node: NodeId) -> Option<Vec<String>> {
+        match self.split(node) {
+            Some((g, inner)) => self.grafts.borrow()[g].inner.adapter().row_columns(inner),
+            None => self.outer.row_columns(node),
+        }
+    }
+
+    fn row_text(&self, node: NodeId, f: &mut dyn FnMut(&[&str])) -> bool {
+        match self.split(node) {
+            Some(_) => false,
+            None => self.outer.row_text(node, f),
         }
     }
 

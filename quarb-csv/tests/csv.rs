@@ -597,8 +597,27 @@ fn tsv_and_errors() {
         quarb::QueryResult::Values(vs) => assert_eq!(vs.len(), 1),
         _ => panic!("expected values"),
     }
-    // a ragged record is an error
-    assert!(CsvAdapter::parse("a,b\n1,2,3\n").is_err());
+    // a ragged record reads (ruling 2026-11-06): a long row drops the
+    // fields past the header, a short one fills its tail with null
+    let ragged = CsvAdapter::parse("a,b\n1,2,3\n4\n").unwrap();
+    match quarb::run("/row | ::b", &ragged).unwrap() {
+        // the short row's b is null, the long row's extra field gone
+        quarb::QueryResult::Values(vs) => {
+            assert_eq!(vs.len(), 2);
+            assert_eq!(vs[0].to_string(), "2");
+            assert!(matches!(vs[1], quarb::Value::Null));
+        }
+        _ => panic!("expected values"),
+    }
+    match quarb::run("/row | :::n-fields", &ragged).unwrap() {
+        quarb::QueryResult::Values(vs) => {
+            assert_eq!(
+                vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+                vec!["3", "1"]
+            )
+        }
+        _ => panic!("expected values"),
+    }
 }
 
 /// Correlated subqueries: `$$` steps a capsa-scope operand out to

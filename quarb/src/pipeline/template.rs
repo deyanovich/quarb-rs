@@ -593,7 +593,7 @@ impl Filler<'_> {
                 self.operand(base);
                 match shape {
                     ProjShape::Value(v) => self.operand(v),
-                    ProjShape::Columns { items, index } => {
+                    ProjShape::Columns { items, index, .. } => {
                         for (_, item) in items {
                             self.operand(item);
                         }

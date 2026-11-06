@@ -50,6 +50,8 @@ pub enum CsvError {
     DelimiterLabel(String),
     #[error("unknown decimal convention {0:?} (point or comma)")]
     DecimalLabel(String),
+    #[error("reading the file: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 /// How a delimited file is read: the options a mount carries
@@ -111,6 +113,9 @@ pub struct CsvAdapter {
     columns: Vec<String>,
     /// One entry per record, each with one cell per column.
     rows: Vec<Vec<String>>,
+    /// Each record's own field count, before the header's width
+    /// was imposed (`:::n-fields`).
+    fields: Vec<u32>,
     /// The delimiter as decided.
     delimiter: u8,
     /// The decimal convention the source declared.
@@ -173,22 +178,32 @@ impl CsvAdapter {
     }
 
     fn read(text: &str, delimiter: u8, decimal: Decimal) -> Result<Self, csv::Error> {
+        // a ragged row reads as the stream reads it (ruling
+        // 2026-11-06): a short one fills its tail with null, a long
+        // one drops the fields past the header
         let mut reader = csv::ReaderBuilder::new()
             .delimiter(delimiter)
+            .flexible(true)
             .from_reader(text.as_bytes());
         let columns: Vec<String> = reader
             .headers()?
             .iter()
             .map(|h| h.trim().to_string())
             .collect();
+        let width = columns.len();
         let mut rows = Vec::new();
+        let mut fields = Vec::new();
         for record in reader.records() {
             let record = record?;
-            rows.push(record.iter().map(|c| c.to_string()).collect());
+            fields.push(record.len() as u32);
+            let mut row: Vec<String> = record.iter().take(width).map(|c| c.to_string()).collect();
+            row.resize(width, String::new());
+            rows.push(row);
         }
         Ok(CsvAdapter {
             columns,
             rows,
+            fields,
             delimiter,
             decimal,
         })
@@ -297,6 +312,28 @@ impl AstAdapter for CsvAdapter {
             .collect()
     }
 
+    fn row_columns(&self, _node: NodeId) -> Option<Vec<String>> {
+        Some(self.columns.clone())
+    }
+
+    fn row_text(&self, node: NodeId, f: &mut dyn FnMut(&[&str])) -> bool {
+        let Some(row) = (node.0 as usize)
+            .checked_sub(1)
+            .and_then(|i| self.rows.get(i))
+        else {
+            return false;
+        };
+        if self.decimal == Decimal::Comma {
+            let owned: Vec<String> = row.iter().map(|c| self.canonical(c)).collect();
+            let cells: Vec<&str> = owned.iter().map(String::as_str).collect();
+            f(&cells);
+        } else {
+            let cells: Vec<&str> = row.iter().map(String::as_str).collect();
+            f(&cells);
+        }
+        true
+    }
+
     /// `:::columns` (root), `:::n-rows` (root), `:::delimiter` and
     /// `:::decimal` (root, as decided), `:::n-fields` (row), and any
     /// column by name.
@@ -330,10 +367,10 @@ impl AstAdapter for CsvAdapter {
             };
         }
         match key {
-            "n-fields" => self
-                .rows
-                .get(node.0 as usize - 1)
-                .map(|r| Value::Int(r.len() as i64)),
+            "n-fields" => (node.0 as usize)
+                .checked_sub(1)
+                .and_then(|i| self.fields.get(i))
+                .map(|n| Value::Int(*n as i64)),
             other => self.property(node, other),
         }
     }
@@ -350,4 +387,463 @@ fn sep_line(text: &str) -> Option<(u8, &str)> {
         .strip_prefix("\r\n")
         .or_else(|| after.strip_prefix('\n'))?;
     (d.is_ascii() && d != '\n').then_some((d as u8, after))
+}
+
+/// The streaming reading of a CSV file (ruling 2026-11-05: under
+/// `qua QUERY file.csv` the file is not held). The header is read at
+/// the open and one scan records where every record starts — the
+/// offset index, eight bytes a row — so the row count and the rows'
+/// ids cost no cells; a row is parsed from its offset when a cell of
+/// it is read, the last row parsed kept for the next read. Every
+/// answer is the in-memory [`CsvAdapter`]'s: the same ids, locators,
+/// metadata, cells (text, the decimal comma canonicalized) and
+/// traits, so a query reads alike whichever mounts the file.
+pub struct CsvStream {
+    path: std::path::PathBuf,
+    columns: Vec<String>,
+    /// The byte offset of each record, in order: row `k` (1-based)
+    /// starts at `offsets[k - 1]`.
+    offsets: Vec<u64>,
+    size: u64,
+    delimiter: u8,
+    decimal: Decimal,
+    reader: std::cell::RefCell<csv::Reader<std::io::BufReader<std::fs::File>>>,
+    /// The row last parsed, by id, as the record the reader filled —
+    /// one buffer, reused: a cell is read off it, nothing allocated
+    /// per row beyond the parse.
+    last: std::cell::RefCell<(u64, csv::StringRecord)>,
+    /// The row the reader would parse next without a seek: the one
+    /// after the row last parsed from the stream (a sequential read
+    /// — a predicate over every row, the table reading — seeks once).
+    next: std::cell::Cell<u64>,
+}
+
+impl CsvStream {
+    /// Open the file: the delimiter decided as [`CsvAdapter::parse_declared`]
+    /// decides it (the option, a `sep=` line, the extension; a header
+    /// without the delimiter but with another that every sampled line
+    /// carries is refused naming both), the header read, the offsets
+    /// scanned.
+    pub fn open(
+        path: &std::path::Path,
+        by_extension: u8,
+        options: CsvOptions,
+    ) -> Result<Self, CsvError> {
+        use std::io::{Read, Seek};
+        let size = std::fs::metadata(path)?.len();
+        // the head of the file: the `sep=` line and the delimiter check
+        let head = {
+            let f = std::fs::File::open(path)?;
+            let mut r = std::io::BufReader::new(f).take(64 * 1024);
+            let mut bytes = Vec::new();
+            r.read_to_end(&mut bytes)?;
+            let bytes = match bytes.strip_prefix(b"\xEF\xBB\xBF") {
+                Some(rest) => rest.to_vec(),
+                None => bytes,
+            };
+            String::from_utf8_lossy(&bytes).into_owned()
+        };
+        let bom = std::fs::File::open(path).and_then(|mut f| {
+            let mut b = [0u8; 3];
+            let n = f.read(&mut b)?;
+            Ok(if n == 3 && b == [0xEF, 0xBB, 0xBF] {
+                3u64
+            } else {
+                0
+            })
+        })?;
+        let (data_start, declared) = match sep_line(&head) {
+            Some((d, rest)) => (bom + (head.len() - rest.len()) as u64, Some(d)),
+            None => (bom, None),
+        };
+        let delimiter = options.delimiter.or(declared).unwrap_or(by_extension);
+        let body = &head[(data_start - bom) as usize..];
+        let header_line = body.lines().next().unwrap_or("");
+        if !header_line.as_bytes().contains(&delimiter) {
+            for candidate in [b',', b';', b'\t', b'|'] {
+                if candidate != delimiter
+                    && header_line.as_bytes().contains(&candidate)
+                    && body
+                        .lines()
+                        .take(32)
+                        .filter(|l| !l.trim().is_empty())
+                        .all(|l| l.as_bytes().contains(&candidate))
+                {
+                    return Err(CsvError::Delimiter {
+                        decided: delimiter as char,
+                        found: candidate as char,
+                        name: delimiter_name(candidate),
+                    });
+                }
+            }
+        }
+        let mut file = std::fs::File::open(path)?;
+        file.seek(std::io::SeekFrom::Start(data_start))?;
+        let mut reader = csv::ReaderBuilder::new()
+            .delimiter(delimiter)
+            .flexible(true)
+            .from_reader(std::io::BufReader::with_capacity(1 << 16, file));
+        let columns: Vec<String> = reader
+            .headers()?
+            .iter()
+            .map(|h| h.trim().to_string())
+            .collect();
+        let mut offsets = Vec::new();
+        let mut record = csv::ByteRecord::new();
+        while reader.read_byte_record(&mut record)? {
+            if let Some(pos) = record.position() {
+                offsets.push(data_start + pos.byte());
+            }
+        }
+        // the reader stands at the end; every read seeks first
+        Ok(CsvStream {
+            path: path.to_path_buf(),
+            columns,
+            offsets,
+            size,
+            delimiter,
+            decimal: options.decimal,
+            reader: std::cell::RefCell::new(reader),
+            last: std::cell::RefCell::new((0, csv::StringRecord::new())),
+            next: std::cell::Cell::new(0),
+        })
+    }
+
+    pub fn locator(&self, node: NodeId) -> String {
+        if node.0 == 0 {
+            "/".to_string()
+        } else {
+            format!("/row[{}]", node.0)
+        }
+    }
+
+    fn canonical(&self, cell: &str) -> String {
+        if self.decimal == Decimal::Comma
+            && let Some(c) = quarb::number::canonical(cell.trim(), Decimal::Comma)
+        {
+            return c;
+        }
+        cell.to_string()
+    }
+
+    /// Row `id` (1-based) parsed into the one record — from its
+    /// offset, or as the stream's next record when it follows the
+    /// row last parsed — and `f` read on it; `None` past the end.
+    fn with_row<T>(&self, id: u64, f: impl FnOnce(&csv::StringRecord) -> T) -> Option<T> {
+        {
+            let last = self.last.borrow();
+            if last.0 == id {
+                return Some(f(&last.1));
+            }
+        }
+        let offset = *self.offsets.get((id as usize).checked_sub(1)?)?;
+        let mut last = self.last.borrow_mut();
+        let mut reader = self.reader.borrow_mut();
+        // the row after the one last parsed is the stream's next
+        // record; any other, the reader seeks the file to its offset
+        // (the file's, whatever the open skipped — a BOM, a `sep=`
+        // line) and reads the one record there
+        if self.next.get() != id {
+            let mut pos = csv::Position::new();
+            pos.set_byte(offset);
+            reader.seek(pos).ok()?;
+        }
+        if !reader.read_record(&mut last.1).ok()? {
+            self.next.set(0);
+            last.0 = 0;
+            return None;
+        }
+        self.next.set(id + 1);
+        last.0 = id;
+        Some(f(&last.1))
+    }
+
+    fn cell(&self, node: NodeId, column: &str) -> Option<String> {
+        let idx = self.columns.iter().position(|c| c == column)?;
+        self.with_row(node.0, |r| {
+            r.get(idx)
+                .filter(|c| !c.is_empty())
+                .map(|c| self.canonical(c))
+        })?
+    }
+
+    fn rows_plan(&self, from: NodeId, plan: &quarb::StepPlan<'_>) -> bool {
+        from.0 == 0
+            && plan.conjuncts.is_empty()
+            && plan.traits.is_empty()
+            && plan.name.is_none_or(|n| n == "row")
+            && matches!(
+                plan.axis,
+                quarb::PlanAxis::Child | quarb::PlanAxis::Descendant
+            )
+    }
+}
+
+impl AstAdapter for CsvStream {
+    fn estimate(&self, _scope: &[&str], plan: &quarb::StepPlan<'_>) -> Option<quarb::Estimate> {
+        let n = self.offsets.len() as u64;
+        let nodes = match plan.limit {
+            Some(k) if self.rows_plan(NodeId(0), plan) => (n.min(k as u64), n.min(k as u64)),
+            _ => (n, n),
+        };
+        Some(quarb::Estimate {
+            nodes,
+            bytes: Some((self.size, self.size)),
+            requests: None,
+            latency: quarb::Latency::Local,
+            confidence: quarb::Confidence::Exact,
+        })
+    }
+
+    fn resolves_references(&self) -> bool {
+        false
+    }
+
+    fn root(&self) -> NodeId {
+        NodeId(0)
+    }
+
+    fn walks_for_references(&self) -> bool {
+        true
+    }
+
+    fn children(&self, node: NodeId) -> Vec<NodeId> {
+        if node.0 == 0 {
+            (1..=self.offsets.len() as u64).map(NodeId).collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
+        if node.0 == 0 && name == "row" {
+            self.children(node)
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// The row count without a walk: `/row @| count` on the plain
+    /// path (the engine's counted step) is the index's length.
+    fn count(&self, from: NodeId, plan: &quarb::StepPlan<'_>) -> Option<usize> {
+        self.rows_plan(from, plan).then_some(self.offsets.len())
+    }
+
+    /// A prefix the plan asks for (`@| [..n]`, `first(n)` right after
+    /// the hop): the first n rows' ids, nothing read.
+    fn select(&self, from: NodeId, plan: &quarb::StepPlan<'_>) -> Option<quarb::Selection> {
+        let k = plan.limit?;
+        if !self.rows_plan(from, plan) {
+            return None;
+        }
+        let n = self.offsets.len().min(k);
+        Some(quarb::Selection {
+            nodes: (1..=n as u64).map(|i| (NodeId(i), 1)).collect(),
+            applied: Vec::new(),
+        })
+    }
+
+    fn name(&self, node: NodeId) -> Option<String> {
+        if node.0 == 0 {
+            None
+        } else {
+            Some("row".to_string())
+        }
+    }
+
+    fn parent(&self, node: NodeId) -> Option<NodeId> {
+        if node.0 == 0 { None } else { Some(NodeId(0)) }
+    }
+
+    fn traits(&self, node: NodeId) -> Vec<String> {
+        vec![if node.0 == 0 { "table" } else { "row" }.to_string()]
+    }
+
+    fn property(&self, node: NodeId, name: &str) -> Option<Value> {
+        if node.0 == 0 {
+            return None;
+        }
+        self.cell(node, name).map(Value::Str)
+    }
+
+    fn properties(&self, node: NodeId) -> Vec<(String, Value)> {
+        if node.0 == 0 {
+            return Vec::new();
+        }
+        self.with_row(node.0, |r| {
+            self.columns
+                .iter()
+                .zip(r.iter())
+                .filter(|(_, v)| !v.is_empty())
+                .map(|(c, v)| (c.clone(), Value::Str(self.canonical(v))))
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    fn row_columns(&self, _node: NodeId) -> Option<Vec<String>> {
+        Some(self.columns.clone())
+    }
+
+    /// The row's cells from the record as parsed, borrowed — the
+    /// canonical form made only under a declared decimal comma.
+    fn row_text(&self, node: NodeId, f: &mut dyn FnMut(&[&str])) -> bool {
+        if node.0 == 0 {
+            return false;
+        }
+        self.with_row(node.0, |r| {
+            if self.decimal == Decimal::Comma {
+                let owned: Vec<String> = r.iter().map(|c| self.canonical(c)).collect();
+                let cells: Vec<&str> = owned.iter().map(String::as_str).collect();
+                f(&cells);
+            } else {
+                let cells: Vec<&str> = r.iter().collect();
+                f(&cells);
+            }
+        })
+        .is_some()
+    }
+
+    fn metadata_catalogue(&self) -> &'static [&'static str] {
+        &[
+            "delimiter",
+            "decimal",
+            "columns",
+            "n-rows",
+            "n-fields",
+            "path",
+            "size",
+        ]
+    }
+
+    fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
+        if node.0 == 0 {
+            return match key {
+                "delimiter" => Some(Value::Str((self.delimiter as char).to_string())),
+                "decimal" => Some(Value::Str(
+                    match self.decimal {
+                        Decimal::Point => "point",
+                        Decimal::Comma => "comma",
+                    }
+                    .into(),
+                )),
+                "columns" => Some(Value::list(
+                    self.columns.iter().map(|c| Value::Str(c.clone())).collect(),
+                )),
+                "n-rows" => Some(Value::Int(self.offsets.len() as i64)),
+                "path" => Some(Value::Str(self.path.display().to_string())),
+                "size" => Some(Value::Int(self.size as i64)),
+                _ => None,
+            };
+        }
+        match key {
+            "n-fields" => self.with_row(node.0, |r| Value::Int(r.len() as i64)),
+            other => self.property(node, other),
+        }
+    }
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+
+    fn file(name: &str, text: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("quarb-csv-stream-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join(name);
+        std::fs::write(&p, text).unwrap();
+        p
+    }
+
+    const TEXT: &str = "Name,Age,Note\nBraund,22,\"a, b\"\nCumings,38,\"line one\nline two\"\nHeikkinen,26,\nFutrelle,35,x\n";
+
+    /// The streamed reading answers what the whole reading answers:
+    /// the ids, the cells (a quoted newline, an empty cell missing),
+    /// the names, the metadata.
+    #[test]
+    fn the_stream_reads_as_the_whole_file_does() {
+        let p = file("t.csv", TEXT);
+        let s = CsvStream::open(&p, b',', CsvOptions::default()).unwrap();
+        let w = CsvAdapter::parse(TEXT).unwrap();
+        assert_eq!(s.children(NodeId(0)), w.children(NodeId(0)));
+        assert_eq!(s.children(NodeId(0)).len(), 4);
+        for id in 1..=4u64 {
+            let n = NodeId(id);
+            assert_eq!(s.name(n), w.name(n));
+            assert_eq!(s.properties(n), w.properties(n), "row {id}");
+            for col in ["Name", "Age", "Note"] {
+                assert_eq!(s.property(n, col), w.property(n, col), "row {id} {col}");
+            }
+            assert_eq!(s.locator(n), w.locator(n));
+        }
+        // out of order, and the same row twice
+        assert_eq!(
+            s.property(NodeId(4), "Name"),
+            Some(Value::Str("Futrelle".into()))
+        );
+        assert_eq!(
+            s.property(NodeId(2), "Note"),
+            Some(Value::Str("line one\nline two".into()))
+        );
+        assert_eq!(s.property(NodeId(2), "Age"), Some(Value::Str("38".into())));
+        assert_eq!(s.property(NodeId(3), "Note"), None);
+        assert_eq!(s.metadata(NodeId(0), "n-rows"), Some(Value::Int(4)));
+        assert_eq!(
+            s.metadata(NodeId(0), "columns"),
+            w.metadata(NodeId(0), "columns")
+        );
+        assert_eq!(s.metadata(NodeId(2), "n-fields"), Some(Value::Int(3)));
+    }
+
+    /// A `sep=` line behind a BOM, and the decimal comma, read as the
+    /// whole reading reads them.
+    #[test]
+    fn the_stream_takes_the_sep_line_and_the_decimal() {
+        let text = "\u{feff}sep=;\nName;Val\nA;1,5\nB;2,25\n";
+        let p = file("sep.csv", text);
+        let opts = CsvOptions {
+            delimiter: None,
+            decimal: Decimal::Comma,
+        };
+        let s = CsvStream::open(&p, b',', opts).unwrap();
+        let w =
+            CsvAdapter::parse_declared(text.trim_start_matches('\u{feff}'), b',', opts).unwrap();
+        assert_eq!(
+            s.metadata(NodeId(0), "delimiter"),
+            Some(Value::Str(";".into()))
+        );
+        assert_eq!(s.children(NodeId(0)).len(), 2);
+        for id in 1..=2u64 {
+            assert_eq!(
+                s.properties(NodeId(id)),
+                w.properties(NodeId(id)),
+                "row {id}"
+            );
+        }
+    }
+
+    /// The row count and a prefix come from the index, nothing read;
+    /// the estimate is the file's size.
+    #[test]
+    fn the_stream_counts_and_cuts_a_prefix_from_its_index() {
+        let p = file("n.csv", TEXT);
+        let s = CsvStream::open(&p, b',', CsvOptions::default()).unwrap();
+        let plan = |limit: Option<usize>| quarb::StepPlan {
+            traits: Vec::new(),
+            cap: Default::default(),
+            axis: quarb::PlanAxis::Child,
+            name: Some("row"),
+            conjuncts: Vec::new(),
+            limit,
+            order: None,
+        };
+        assert_eq!(s.count(NodeId(0), &plan(None)), Some(4));
+        assert_eq!(s.count(NodeId(1), &plan(None)), None);
+        let sel = s.select(NodeId(0), &plan(Some(2))).unwrap();
+        assert_eq!(sel.nodes, vec![(NodeId(1), 1), (NodeId(2), 1)]);
+        assert!(s.select(NodeId(0), &plan(None)).is_none());
+        let e = s.estimate(&[], &plan(None)).unwrap();
+        assert_eq!(e.nodes, (4, 4));
+        assert_eq!(e.bytes, Some((TEXT.len() as u64, TEXT.len() as u64)));
+    }
 }

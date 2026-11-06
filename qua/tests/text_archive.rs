@@ -6,7 +6,14 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 fn fixture() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("quarb-text-archive-{}", std::process::id()));
+    // one directory per test: the file's tests run in one process
+    // and each removes and recreates its fixture
+    let test = std::thread::current()
+        .name()
+        .unwrap_or("t")
+        .replace(':', "-");
+    let dir =
+        std::env::temp_dir().join(format!("quarb-text-archive-{}-{test}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let mut cursor = std::io::Cursor::new(Vec::new());

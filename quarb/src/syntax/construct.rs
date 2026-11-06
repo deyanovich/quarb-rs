@@ -544,6 +544,7 @@ impl Form {
             "field" => Form::Operand(Operand::Field {
                 base: Box::new(Operand::Topic),
                 name: String::new(),
+                bare: true,
             }),
             other => {
                 return Err(format!(
@@ -911,9 +912,12 @@ impl Form {
             Form::Operand(Operand::Field { name, .. }) => {
                 count(1, "one operand")?;
                 let c = children.into_iter().next().expect("one");
+                let base = c.into_operand()?;
+                let bare = matches!(base, Operand::Topic);
                 Form::Operand(Operand::Field {
-                    base: Box::new(c.into_operand()?),
+                    base: Box::new(base),
                     name,
+                    bare,
                 })
             }
             other => {

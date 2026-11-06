@@ -131,15 +131,35 @@ impl PostgresAdapter {
         let rt = std::rc::Rc::new(rt);
         let client = std::rc::Rc::new(client);
         let (rt2, client2) = (rt.clone(), client.clone());
+        let (rt3, client3) = (rt.clone(), client.clone());
         let model = RelationalModel::lazy_where(
             specs,
-            std::rc::Rc::new(move |t: usize, spec: &TableSpec, w: Option<&str>| {
-                rt.block_on(Self::fetch_rows(&client, spec, &types[t], w))
-                    .map_err(|e| e.to_string())
-            }),
+            std::rc::Rc::new(
+                move |t: usize, spec: &TableSpec, w: Option<&str>, k: Option<usize>| {
+                    rt.block_on(Self::fetch_rows(&client, spec, &types[t], w, k))
+                        .map_err(|e| e.to_string())
+                },
+            ),
             filter,
             quarb_relational::quote_double,
         )
+        // the exact count of a table not read (the pushdown scanning
+        // round, 2026-11-06)
+        .with_counter(Box::new(move |_, spec| {
+            rt3.block_on(async {
+                let row = client3
+                    .query_one(
+                        &format!(
+                            "SELECT count(*) FROM {}",
+                            quarb_relational::quote_double(&spec.name)
+                        ),
+                        &[],
+                    )
+                    .await?;
+                Ok::<_, tokio_postgres::Error>(row.get::<_, i64>(0).max(0) as usize)
+            })
+            .map_err(|e| e.to_string())
+        }))
         // The planner's estimate, with nothing run: `EXPLAIN` gives
         // the rows it expects and their average width.
         .with_estimator(std::rc::Rc::new(move |_, spec, equals| {
@@ -288,6 +308,7 @@ impl PostgresAdapter {
         spec: &TableSpec,
         types: &[String],
         where_sql: Option<&str>,
+        limit: Option<usize>,
     ) -> Result<Vec<RowSpec>, tokio_postgres::Error> {
         let select: Vec<String> = spec
             .columns
@@ -315,28 +336,33 @@ impl PostgresAdapter {
             Some(w) => format!(" WHERE {w}"),
             None => String::new(),
         };
-        let rows = client
-            .query(
+        // a prefix: the first rows in the order the whole read uses
+        let cut = limit.map(|k| format!(" LIMIT {k}")).unwrap_or_default();
+        // a row cursor: the rows arrive one at a time and are kept
+        // only in the model's own shape
+        let stream = client
+            .query_raw(
                 &format!(
-                    "SELECT {} FROM {}{filter}{order}",
+                    "SELECT {} FROM {}{filter}{order}{cut}",
                     select.join(", "),
                     quarb_relational::quote_double(&spec.name)
                 ),
-                &[],
+                std::iter::empty::<&(dyn tokio_postgres::types::ToSql + Sync)>(),
             )
             .await?;
-        rows.iter()
-            .enumerate()
-            .map(|(i, r)| {
-                let values = (0..spec.columns.len())
-                    .map(|c| cell(r, c))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(RowSpec {
-                    rowid: Some(i as i64 + 1),
-                    values,
-                })
-            })
-            .collect()
+        futures_util::pin_mut!(stream);
+        let mut out = Vec::new();
+        while let Some(r) = futures_util::TryStreamExt::try_next(&mut stream).await? {
+            let values = (0..spec.columns.len())
+                .map(|c| cell(&r, c))
+                .collect::<Result<Vec<_>, _>>()?;
+            let i = out.len() as i64 + 1;
+            out.push(RowSpec {
+                rowid: Some(i),
+                values,
+            });
+        }
+        Ok(out)
     }
 
     /// A human-readable locator: `/table/key` for rows.

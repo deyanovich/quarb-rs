@@ -787,6 +787,29 @@ impl AstAdapter for MountAdapter {
         Some(v.into_iter().map(|(t, d)| (self.encode(m, t), d)).collect())
     }
 
+    /// The rows' shape, from the source holding `node` (a model's
+    /// `mount` of a CSV builds in the file's order as the command
+    /// line's does; lang's finding 2026-11-06).
+    fn row_columns(&self, node: NodeId) -> Option<Vec<String>> {
+        let (m, inner) = self.decode(node)?;
+        self.adapter(m).row_columns(inner)
+    }
+
+    fn row_text(&self, node: NodeId, f: &mut dyn FnMut(&[&str])) -> bool {
+        match self.decode(node) {
+            Some((m, inner)) => self.adapter(m).row_text(inner, f),
+            None => false,
+        }
+    }
+
+    /// A count under a mount's node is the source's to answer (the
+    /// pushdown scanning round, 2026-11-06); the mount root's
+    /// children are the mounts, counted by the walk.
+    fn count(&self, from: NodeId, plan: &quarb::StepPlan<'_>) -> Option<usize> {
+        let (m, inner) = self.decode(from)?;
+        self.adapter(m).count(inner, plan)
+    }
+
     fn select(&self, from: NodeId, plan: &quarb::StepPlan<'_>) -> Option<quarb::Selection> {
         // The mount root's children are the mounts themselves.
         let Some((m, inner)) = self.decode(from) else {

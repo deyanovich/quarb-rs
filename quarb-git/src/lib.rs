@@ -405,6 +405,32 @@ impl GitAdapter {
 
     /// Enumerate every commit reachable from any ref: one
     /// `rev-list --all` with the header format, parsed in bulk.
+    /// The first `k` commits of `rev-list --all`, for a hop that keeps
+    /// a prefix (the pushdown scanning round, 2026-11-06): the walk
+    /// stops at k, the nodes keyed by hash so the full enumeration
+    /// finds them again; nothing cached as the listing.
+    fn commits_prefix(&self, k: usize) -> Vec<NodeId> {
+        let n = k.to_string();
+        let out = self
+            .git(&[
+                "rev-list",
+                "--encoding=UTF-8",
+                "--all",
+                "-n",
+                &n,
+                "--format=%an%x00%ae%x00%at%x00%cn%x00%s%x00%B%x00%T%x00%P%x00%ai%x1e",
+            ])
+            .unwrap_or_default();
+        let mut ids = Vec::new();
+        for (hash, body) in split_commit_records(&out) {
+            if let Some(info) = parse_info(body) {
+                self.commits.borrow_mut().insert(hash.to_string(), info);
+            }
+            ids.push(self.commit_node(hash));
+        }
+        ids
+    }
+
     fn enumerate_commits(&self) -> Vec<NodeId> {
         if let Some(c) = self.nodes.borrow()[COMMITS.0 as usize]
             .children
@@ -664,6 +690,30 @@ fn parse_info(body: &str) -> Option<CommitInfo> {
 impl AstAdapter for GitAdapter {
     fn root(&self) -> NodeId {
         ROOT
+    }
+
+    /// `/commits/* @| [..k]` before the history is enumerated walks
+    /// k commits and no more (the pushdown scanning round,
+    /// 2026-11-06).
+    fn select(&self, from: NodeId, plan: &quarb::StepPlan<'_>) -> Option<quarb::Selection> {
+        let k = plan.limit?;
+        if from != COMMITS
+            || plan.axis != quarb::PlanAxis::Child
+            || plan.name.is_some()
+            || !plan.conjuncts.is_empty()
+            || !plan.traits.is_empty()
+            || *self.enumerated.borrow()
+        {
+            return None;
+        }
+        Some(quarb::Selection {
+            nodes: self
+                .commits_prefix(k)
+                .into_iter()
+                .map(|id| (id, 1))
+                .collect(),
+            applied: Vec::new(),
+        })
     }
 
     fn children(&self, node: NodeId) -> Vec<NodeId> {

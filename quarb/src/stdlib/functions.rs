@@ -632,8 +632,7 @@ pub fn apply_scalar(
             Value::Record(r) => return vec![Value::Record(r.map_values(one))],
             Value::Table(t) => {
                 let rows: Vec<Vec<Value>> = t
-                    .rows
-                    .iter()
+                    .rows()
                     .map(|row| {
                         row.iter()
                             .enumerate()
@@ -678,10 +677,15 @@ fn apply_scalar_inner(
         "types" => return vec![refusing(call, Err(TYPES_RETIRED.into()))],
         "@" | "rows" | "%" | "columns" | "#" | "transpose" | "header" | "dim" | "[]" | "cell"
         | "row-to-header" | "header-to-row" | "flatten" | "keys" | "values" | "stack"
-        | "unstack" | "autoindex" => {
+        | "unstack" | "autoindex" | "autocast" => {
             return vec![refusing(
                 call,
                 match call.name.as_str() {
+                    // the columns typed again from the cells present
+                    // (ruling 2026-11-06): the explicit form of what a
+                    // rebuild did implicitly before a selection kept
+                    // the columns' types
+                    "autocast" => autocast(call, topic),
                     // the implicit index made explicit (ruling
                     // 2026-11-05)
                     "autoindex" => match topic {
@@ -1939,28 +1943,21 @@ fn apply_scalar_inner(
             // a table: one entry per column in header order, null
             // where the column is no quantity
             Value::Table(t) => {
-                let width = t
-                    .header
-                    .as_ref()
-                    .map_or_else(|| t.rows.first().map_or(0, Vec::len), Vec::len);
+                let width = t.header.as_ref().map_or_else(|| t.width(), Vec::len);
                 Value::list(
                     (0..width)
                         .map(|i| {
-                            t.rows
-                                .iter()
+                            t.rows()
                                 .find_map(|r| match r.get(i) {
-                                    Some(Value::Quantity { base, .. }) => {
-                                        Some(Value::Str(crate::value::quantity::dimension_of(base)))
-                                    }
-                                    Some(Value::Str(s)) => {
-                                        crate::value::quantity::parse_unit_text_with(s, scale).map(
-                                            |(_, base, ..)| {
-                                                Value::Str(crate::value::quantity::dimension_of(
-                                                    &base,
-                                                ))
-                                            },
-                                        )
-                                    }
+                                    Value::Quantity { base, .. } => Some(Value::Str(
+                                        crate::value::quantity::dimension_of(&base),
+                                    )),
+                                    Value::Str(s) => crate::value::quantity::parse_unit_text_with(
+                                        &s, scale,
+                                    )
+                                    .map(|(_, base, ..)| {
+                                        Value::Str(crate::value::quantity::dimension_of(&base))
+                                    }),
                                     _ => None,
                                 })
                                 .unwrap_or(Value::Null)
@@ -2593,11 +2590,12 @@ fn round_to(n: f64, d: i64) -> f64 {
 /// The table reshapers `stack` and `unstack` and `map` itself take
 /// `|` alone (the inventory's kind `scalar` since its 0.43.0 rows) and
 /// read the structure whole.
-const BROADCAST_EXEMPT: [&str; 17] = [
+const BROADCAST_EXEMPT: [&str; 18] = [
     "map",
     "stack",
     "unstack",
     "autoindex",
+    "autocast",
     "record",
     "rec",
     "xml",
@@ -2816,6 +2814,34 @@ fn apply_inner(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
                 input.len() as i64
             })]
         }
+        // `any` / `all` (ruling 2026-11-05): over a list of booleans,
+        // `any` true when any element is true (false on an empty
+        // list), `all` true when every element is (true on an empty
+        // list); a null element counts as false; any other element
+        // refuses naming it.
+        "any" | "all" => {
+            let want = call.name == "any";
+            let mut verdict = !want;
+            for v in &input {
+                let b = match v {
+                    Value::Bool(b) => *b,
+                    Value::Null => false,
+                    other => {
+                        crate::value::ambient::record_refusal(format!(
+                            "{}: {} is no boolean; the reducer reads a list of booleans (a comparison over a list)",
+                            call.name,
+                            kind_of(other)
+                        ));
+                        return vec![Value::Null];
+                    }
+                };
+                if b == want {
+                    verdict = want;
+                    break;
+                }
+            }
+            vec![Value::Bool(verdict)]
+        }
         // `nulls` (draft 166): the count of a record's null fields;
         // on a table one count per row; over records one per record
         // (so `[nulls = 0]` over a table keeps the complete rows)
@@ -2833,7 +2859,9 @@ fn apply_inner(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
             };
             match input.as_slice() {
                 [Value::Record(r)] => vec![of_fields(r)],
-                [Value::Table(t)] => vec![Value::list(t.rows.iter().map(|r| of_row(r)).collect())],
+                [Value::Table(t)] => {
+                    vec![Value::list(t.rows().map(|r| of_row(&r.cells())).collect())]
+                }
                 [Value::List(items)] if items.iter().all(|i| matches!(i, Value::Record(_))) => {
                     vec![Value::list(
                         items
@@ -3571,6 +3599,95 @@ fn describe_values(input: &[Value], scale: Scale) -> Value {
 /// of the start's dimension, a duration for an instant — a step of
 /// another dimension, or missing where required, refused naming the
 /// start. An index the table had stays a plain column.
+/// `autocast` (ruling 2026-11-06): a table's undeclared columns typed
+/// again from the cells present, by the rule of the build — every
+/// one, or the columns named bare (`autocast(:a; :b)`) — the named
+/// form of `map(<*>)` / `map(<*>; --to=(:a; :b))`; a declared column
+/// is left as declared, named or not. A list reads as one column; a
+/// record's fields are not one column.
+fn autocast(call: &FnCall, topic: Value) -> Result<Value, String> {
+    match topic {
+        Value::Table(t) => {
+            let names: Vec<String> = (0..t.width()).map(|j| t.column_name(j)).collect();
+            let mut only: Vec<usize> = Vec::new();
+            for a in &call.args {
+                // `:col` in an argument is the projector literal; the
+                // field form is taken too
+                let name: &str = match a {
+                    Arg::Lit(Value::Projection {
+                        key, typing: None, ..
+                    }) => key.as_str(),
+                    Arg::Lit(Value::Projection { key, .. }) => {
+                        return Err(format!(
+                            "autocast names a column bare (:{key}); it re-types from the cells, it declares nothing — declare a type with a typed projector instead"
+                        ));
+                    }
+                    Arg::Expr(crate::syntax::ast::Operand::Field {
+                        base,
+                        name,
+                        bare: true,
+                    }) if matches!(**base, crate::syntax::ast::Operand::Topic) => name.as_str(),
+                    _ => {
+                        return Err(
+                            "autocast names its columns bare: autocast(:a; :b), or alone for every undeclared column"
+                                .into(),
+                        );
+                    }
+                };
+                let Some(j) = names.iter().position(|n| n == name) else {
+                    return Err(format!(
+                        "autocast names column '{name}', and the table has no such column (its columns: {})",
+                        names.join(", ")
+                    ));
+                };
+                // a declared column is left as declared (the final
+                // word of 2026-11-06): the promise stands
+                only.push(j);
+            }
+            Ok(Value::table(t.autocast(
+                (!call.args.is_empty()).then_some(only.as_slice()),
+            )))
+        }
+        Value::List(items) => {
+            if !call.args.is_empty() {
+                return Err(
+                    "autocast names columns on a table; a list is one column, autocast alone"
+                        .into(),
+                );
+            }
+            let cells: Vec<Value> = items.iter().cloned().collect();
+            if cells.iter().any(|c| !crate::stdlib::flat_cell(c)) {
+                return Err(
+                    "autocast reads a list as one column of scalars; this list holds a structure"
+                        .into(),
+                );
+            }
+            Ok(Value::list(crate::value::type_column(cells).1))
+        }
+        other => Err(format!(
+            "autocast re-types a table's columns, or a list as one column; {} is neither",
+            kind_of(&other)
+        )),
+    }
+}
+
+/// `-a|--autoindex` on the table constructor (ruling 2026-11-06):
+/// what `| autoindex` does with no option.
+pub(crate) fn autoindex_bare(t: &crate::Table) -> Result<crate::Table, String> {
+    let bare = FnCall {
+        headless: false,
+        name: "autoindex".into(),
+        args: Vec::new(),
+    };
+    match autoindex(&bare, t, &|_| None)? {
+        Value::Table(t) => Ok(std::sync::Arc::try_unwrap(t).unwrap_or_else(|a| (*a).clone())),
+        other => Err(format!(
+            "autoindex answered {}, not a table",
+            kind_of(&other)
+        )),
+    }
+}
+
 fn autoindex(call: &FnCall, t: &crate::Table, scale: Scale) -> Result<Value, String> {
     let option = |name: &str| -> Option<Value> {
         call.args.iter().find_map(|a| match a {
@@ -3631,24 +3748,19 @@ fn autoindex(call: &FnCall, t: &crate::Table, scale: Scale) -> Result<Value, Str
             ));
         }
     };
-    let names: Vec<String> = (0..t.width()).map(|j| t.column_name(j)).collect();
-    let mut header = vec!["index".to_string()];
-    header.extend(names);
-    let mut declared: Vec<Option<crate::ColumnType>> = vec![None];
-    declared.extend((0..t.width()).map(|j| t.declaration(j)));
+    // the labels, one per row, as a column of their own, named `ix`
+    // (ruling 2026-11-06: unambiguous against `:::index` the concept,
+    // short to type as `:ix`), prepended to the table as it stands —
+    // no row made on the way
+    let mut labels: Vec<Value> = Vec::with_capacity(t.n_rows());
     let mut label = start;
-    let mut rows: Vec<Vec<Value>> = Vec::with_capacity(t.rows.len());
-    for r in &t.rows {
-        let mut row = Vec::with_capacity(r.len() + 1);
-        row.push(label.clone());
-        row.extend(r.iter().cloned());
-        rows.push(row);
+    for _ in 0..t.n_rows() {
+        labels.push(label.clone());
         label = crate::stdlib::arith::arith(crate::syntax::ast::ArithOp::Add, &label, &step, scale);
     }
     Ok(Value::table(
-        crate::Table::typed(Some(header), rows, declared)?
-            .with_index(1)
-            .with_name(t.name.clone()),
+        t.prepend_column("ix".to_string(), labels, None)
+            .with_index(1),
     ))
 }
 
@@ -3670,11 +3782,7 @@ fn describe_table(t: &crate::Table, scale: Scale) -> Result<Value, String> {
     let columns: Vec<Value> = numeric
         .iter()
         .map(|&j| {
-            let cells: Vec<Value> = t
-                .rows
-                .iter()
-                .map(|r| r.get(j).cloned().unwrap_or(Value::Null))
-                .collect();
+            let cells: Vec<Value> = t.rows().map(|r| r.get(j)).collect();
             describe_values(&cells, scale)
         })
         .collect();
@@ -4607,13 +4715,12 @@ pub(crate) fn tabulate_table(
         None => (1..=t.width()).map(|j| j.to_string()).collect(),
     };
     let rows: Vec<Value> = t
-        .rows
-        .iter()
+        .rows()
         .map(|r| {
             Value::Record(
                 keys.iter()
                     .cloned()
-                    .zip(r.iter().cloned().chain(std::iter::repeat(Value::Null)))
+                    .zip(r.iter().chain(std::iter::repeat(Value::Null)))
                     .collect(),
             )
         })
@@ -4650,13 +4757,12 @@ fn table_records(t: &crate::Table) -> Vec<Value> {
         Some(h) => h.clone(),
         None => (1..=t.width()).map(|j| j.to_string()).collect(),
     };
-    t.rows
-        .iter()
+    t.rows()
         .map(|r| {
             Value::Record(
                 keys.iter()
                     .cloned()
-                    .zip(r.iter().cloned().chain(std::iter::repeat(Value::Null)))
+                    .zip(r.iter().chain(std::iter::repeat(Value::Null)))
                     .collect(),
             )
         })
@@ -4773,7 +4879,7 @@ pub(crate) fn table_order_reading(
     t: &crate::Table,
     scale: &dyn Fn(&str) -> Option<(f64, String)>,
 ) -> Option<Value> {
-    let rows_table = |rows: Vec<Vec<Value>>| Value::table(t.with_rows(rows));
+    let rows_table = |rows: Vec<Vec<Value>>| Value::table(t.keep_rows(rows));
     let row_record = |row: &[Value]| {
         Value::Record(match &t.header {
             Some(h) => h.iter().cloned().zip(row.iter().cloned()).collect(),
@@ -4787,7 +4893,7 @@ pub(crate) fn table_order_reading(
     };
     Some(match call.name.as_str() {
         "reverse" => {
-            let mut rows = t.rows.clone();
+            let mut rows = t.rows_vec();
             rows.reverse();
             rows_table(rows)
         }
@@ -4795,10 +4901,9 @@ pub(crate) fn table_order_reading(
             let mut seen: std::collections::HashSet<Vec<crate::value::SortKey>> =
                 std::collections::HashSet::new();
             let rows = t
-                .rows
-                .iter()
+                .rows()
                 .filter(|r| seen.insert(r.iter().map(|v| v.sort_key_with(scale)).collect()))
-                .cloned()
+                .map(|r| r.cells())
                 .collect();
             rows_table(rows)
         }
@@ -4806,16 +4911,51 @@ pub(crate) fn table_order_reading(
             let from_end = call.name == "last";
             match call.args.first() {
                 None => match if from_end {
-                    t.rows.last()
+                    t.n_rows().checked_sub(1).and_then(|i| t.row_at(i))
                 } else {
-                    t.rows.first()
+                    t.row_at(0)
                 } {
-                    Some(row) => row_record(row),
+                    Some(row) => row_record(&row.cells()),
                     None => Value::Null,
                 },
                 arg => {
-                    let (s, e) = rank_span(arg, t.rows.len(), from_end).unwrap_or((0, 0));
-                    rows_table(t.rows[s..e].to_vec())
+                    let (s, e) = rank_span(arg, t.n_rows(), from_end).unwrap_or((0, 0));
+                    rows_table((s..e).map(|i| t.row_cells(i)).collect())
+                }
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// The ordering reductions on one record (ruling 2026-11-05: a
+/// record takes positions as a list of its fields does, keys kept):
+/// `first` / `last` the first / last VALUE, with a count or a rank
+/// band the record of those fields; `reverse` the fields reversed.
+/// `None` for any other command.
+pub(crate) fn record_order_reading(call: &FnCall, r: &crate::value::Record) -> Option<Value> {
+    let fields: Vec<(String, Value)> = r.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let slice = |s: usize, e: usize| Value::Record(fields[s..e].to_vec().into());
+    Some(match call.name.as_str() {
+        "reverse" => {
+            let mut f = fields.clone();
+            f.reverse();
+            Value::Record(f.into())
+        }
+        "first" | "last" => {
+            let from_end = call.name == "last";
+            match call.args.first() {
+                None => match if from_end {
+                    fields.last()
+                } else {
+                    fields.first()
+                } {
+                    Some((_, v)) => v.clone(),
+                    None => Value::Null,
+                },
+                arg => {
+                    let (s, e) = rank_span(arg, fields.len(), from_end).unwrap_or((0, 0));
+                    slice(s, e)
                 }
             }
         }
@@ -4884,11 +5024,32 @@ pub(crate) fn table_reading(v: Value) -> Result<Value, String> {
             }
             if items.iter().all(|v| matches!(v, Value::Record(_))) {
                 let mut header: Vec<String> = Vec::new();
+                // the keys' declarations ride into the columns (ruling
+                // 2026-11-06): a key declared on some records and bare on
+                // others takes the declaration, two different ones refuse
+                let mut declared: Vec<Option<crate::value::ColumnType>> = Vec::new();
                 for (i, v) in items.iter().enumerate() {
                     if let Value::Record(f) = v {
-                        for (k, v) in f {
-                            if !header.contains(k) {
-                                header.push(k.clone());
+                        for (fi, (k, v)) in f.iter().enumerate() {
+                            let j = match header.iter().position(|h| h == k) {
+                                Some(j) => j,
+                                None => {
+                                    header.push(k.clone());
+                                    declared.push(None);
+                                    header.len() - 1
+                                }
+                            };
+                            if let Some(ty) = f.declaration(fi) {
+                                match &declared[j] {
+                                    Some(have) if *have != ty => {
+                                        return Err(format!(
+                                            "key '{k}' is declared {} on one record and {} on another: the records must agree",
+                                            have.word(),
+                                            ty.word()
+                                        ));
+                                    }
+                                    _ => declared[j] = Some(ty),
+                                }
                             }
                             // The table is flat: a record whose
                             // field holds a structure keeps its
@@ -4918,7 +5079,7 @@ pub(crate) fn table_reading(v: Value) -> Result<Value, String> {
                         _ => unreachable!("records"),
                     })
                     .collect();
-                return Ok(Value::table(crate::Table::new(Some(header), rows)));
+                return crate::Table::typed(Some(header), rows, declared).map(Value::table);
             }
             if items.iter().all(|v| matches!(v, Value::List(_))) {
                 let width = match &items[0] {
@@ -5086,7 +5247,7 @@ fn record_concat(
 /// values take the shared names.
 fn table_concat(t: &crate::Table, right: Value, overwrite: bool) -> Result<Value, String> {
     let mut header = t.header.clone();
-    let mut rows = t.rows.clone();
+    let mut rows = t.rows_vec();
     let n = rows.len() + 1;
     match right {
         Value::Record(fields) => {
@@ -5122,16 +5283,16 @@ fn table_concat(t: &crate::Table, right: Value, overwrite: bool) -> Result<Value
                         }
                     }
                     let mut seen_right: Vec<(Vec<Value>, usize)> = Vec::new();
-                    for r in &more.rows {
+                    for r in more.rows() {
                         let fields: Vec<(String, Value)> =
-                            h2.iter().cloned().zip(r.iter().cloned()).collect();
+                            h2.iter().cloned().zip(r.iter()).collect();
                         let n = rows.len() + 1;
                         let row = place_named(&mut header, &mut rows, &fields, n)?;
                         if levels.is_empty() {
                             rows.push(row);
                             continue;
                         }
-                        let l = label(r, &levels);
+                        let l = label(&r.cells(), &levels);
                         let n = occurrence(&mut seen_right, &l);
                         match keys.iter().position(|(x, m)| *x == l && *m == n) {
                             Some(i) => rows[i] = row,
@@ -5168,7 +5329,7 @@ fn table_concat(t: &crate::Table, right: Value, overwrite: bool) -> Result<Value
             }
             (None, None) => {
                 let w = t.width();
-                for r in &more.rows {
+                for r in more.rows() {
                     let n = rows.len() + 1;
                     if r.len() > w {
                         return Err(format!(
@@ -5176,7 +5337,7 @@ fn table_concat(t: &crate::Table, right: Value, overwrite: bool) -> Result<Value
                             r.len()
                         ));
                     }
-                    let mut row = r.clone();
+                    let mut row = r.cells();
                     row.resize(w, Value::Null);
                     rows.push(row);
                 }
@@ -5229,12 +5390,12 @@ fn column_concat(t: &crate::Table, u: &crate::Table, overwrite: bool) -> Result<
     if t.index > 0 && u.index > 0 {
         return labeled_concat(t, u, overwrite);
     }
-    if t.rows.len() != u.rows.len() {
+    if t.n_rows() != u.n_rows() {
         return Err(format!(
             "the left table has {} row{}, the right {}; columns append by position on tables of one height (index both to align them by label)",
-            t.rows.len(),
-            if t.rows.len() == 1 { "" } else { "s" },
-            u.rows.len()
+            t.n_rows(),
+            if t.n_rows() == 1 { "" } else { "s" },
+            u.n_rows()
         ));
     }
     let names =
@@ -5265,14 +5426,13 @@ fn column_concat(t: &crate::Table, u: &crate::Table, overwrite: bool) -> Result<
     }
     let width = header.len();
     let rows: Vec<Vec<Value>> = t
-        .rows
-        .iter()
-        .zip(&u.rows)
+        .rows()
+        .zip(u.rows())
         .map(|(l, r)| {
-            let mut row = l.clone();
+            let mut row = l.cells();
             row.resize(width, Value::Null);
             for &(j, to) in &right_cols {
-                row[to] = r.get(j).cloned().unwrap_or(Value::Null);
+                row[to] = r.get(j);
             }
             row
         })
@@ -5394,22 +5554,22 @@ fn labeled_concat(t: &crate::Table, u: &crate::Table, overwrite: bool) -> Result
     let mut seen: Vec<(Vec<Value>, usize)> = Vec::new();
     let mut keys: Vec<(Vec<Value>, usize)> = Vec::new();
     let mut rows: Vec<Vec<Value>> = Vec::new();
-    for r in &shape.rows {
-        let l = key(r, sk);
+    for r in shape.rows() {
+        let l = key(&r.cells(), sk);
         let n = occurrence(&mut seen, &l);
         let mut row = vec![Value::Null; width];
         for j in 0..k {
-            row[j] = r.get(j).cloned().unwrap_or(Value::Null);
+            row[j] = r.get(j);
         }
-        fill(&mut row, r, shape_cols);
+        fill(&mut row, &r.cells(), shape_cols);
         keys.push((l, n));
         rows.push(row);
     }
     // the other side's rows: onto the shape row(s) of the same key,
     // or appended with the key in its level(s) and null elsewhere
     let mut seen_other: Vec<(Vec<Value>, usize)> = Vec::new();
-    for r in &other.rows {
-        let l = key(r, ok);
+    for r in other.rows() {
+        let l = key(&r.cells(), ok);
         let n = occurrence(&mut seen_other, &l);
         if broadcast && n > 1 {
             return Err(format!(
@@ -5434,12 +5594,12 @@ fn labeled_concat(t: &crate::Table, u: &crate::Table, overwrite: bool) -> Result
             for (v, &lvl) in l.iter().zip(sk.iter()) {
                 row[lvl] = v.clone();
             }
-            fill(&mut row, r, other_cols);
+            fill(&mut row, &r.cells(), other_cols);
             keys.push((l, n));
             rows.push(row);
         } else {
             for i in targets {
-                fill(&mut rows[i], r, other_cols);
+                fill(&mut rows[i], &r.cells(), other_cols);
             }
         }
     }
@@ -5518,9 +5678,9 @@ pub(crate) fn concat_row(
         }
         Value::Table(t) if mode == ConcatMode::Merge => {
             let w = t.width();
-            let n = t.rows.len() + 1;
+            let n = t.n_rows() + 1;
             let mut header = t.header.clone();
-            let mut rows = t.rows.clone();
+            let mut rows = t.rows_vec();
             let mut cells = vec![Value::Null; w];
             let mut next = 0;
             for (name, v) in row {
@@ -5620,6 +5780,61 @@ pub(crate) fn concat_row(
 /// columns, a count that does not divide the length refused naming
 /// both numbers.
 pub(crate) fn table_command(call: &FnCall, v: Value) -> Result<Value, String> {
+    table_command_shaped(call, v, None)
+}
+
+/// A list of records from a source whose rows are of one shape (a
+/// CSV mount: its `:::columns`) read as a table in the SOURCE'S column
+/// order, a column a record lacks null — not in order of first
+/// appearance (ruling 2026-11-06, the file's order kept); the record
+/// rule stands where a record carries a name the shape does not.
+pub(crate) fn table_reading_shaped(v: Value, shape: Option<&[String]>) -> Result<Value, String> {
+    if let (Some(cols), Value::List(items)) = (shape, &v)
+        && !items.is_empty()
+    {
+        let known: std::collections::HashSet<&str> = cols.iter().map(String::as_str).collect();
+        let shaped = items.iter().all(
+            |i| matches!(i, Value::Record(r) if r.iter().all(|(k, _)| known.contains(k.as_str()))),
+        );
+        if shaped {
+            let mut declared: Vec<Option<crate::value::ColumnType>> = vec![None; cols.len()];
+            for item in items.iter() {
+                if let Value::Record(r) = item {
+                    for (fi, (k, _)) in r.iter().enumerate() {
+                        if let Some(ty) = r.declaration(fi)
+                            && let Some(j) = cols.iter().position(|c| c == k)
+                        {
+                            match &declared[j] {
+                                Some(have) if *have != ty => {
+                                    return Err(format!(
+                                        "key '{k}' is declared {} on one record and {} on another: the records must agree",
+                                        have.word(),
+                                        ty.word()
+                                    ));
+                                }
+                                _ => declared[j] = Some(ty),
+                            }
+                        }
+                    }
+                }
+            }
+            let mut b = crate::TableBuilder::shaped(Some(cols.to_vec()), declared);
+            for item in items.iter() {
+                if let Value::Record(r) = item {
+                    b.push_record(r.iter().map(|(k, v)| (k.clone(), v.clone())));
+                }
+            }
+            return Ok(Value::table(b.finish()?));
+        }
+    }
+    table_reading(v)
+}
+
+pub(crate) fn table_command_shaped(
+    call: &FnCall,
+    v: Value,
+    shape: Option<&[String]>,
+) -> Result<Value, String> {
     // `--index=:col` (`-i`): the index named, a typed projector
     // declaring it; applied after the build. `| #` with no option
     // drops the role.
@@ -5640,6 +5855,37 @@ pub(crate) fn table_command(call: &FnCall, v: Value) -> Result<Value, String> {
         } if name == "--name" => Some(s.clone()),
         _ => None,
     });
+    // `-a|--autoindex` (ruling 2026-11-06): the implicit index made
+    // explicit as `| autoindex` makes it, no start and no step (those
+    // stay the command's); never beside `-i`, a table having one index
+    let autoindex_flag = call.args.iter().any(
+        |a| matches!(a, Arg::Opt { name, value: None } if name == "--autoindex" || name == "-a"),
+    );
+    // `-c|--cast=:col<type>` (ruling 2026-11-06), repeated or a tuple:
+    // the columns cast after the build as map(<type>; --to=:col) casts
+    // them; a column the header declares otherwise is refused
+    let mut casts: Vec<(String, crate::value::ColumnType)> = Vec::new();
+    for a in &call.args {
+        if let Arg::Opt {
+            name,
+            value: Some(crate::syntax::ast::Operand::Lit(v)),
+        } = a
+            && name == "--cast"
+        {
+            for (col, ty) in index_levels(v) {
+                match ty {
+                    Some(ty) => casts.push((col, ty)),
+                    None => return Err(format!("-c=:{col} names no type: -c=:{col}<int>")),
+                }
+            }
+        }
+    }
+    if autoindex_flag && index.is_some() {
+        return Err(
+            "#(-a -i=…) names two indexes, and a table has one: -a prepends the positions as the index, -i=:col makes a column the index"
+                .into(),
+        );
+    }
     let finish = |v: Value| -> Result<Value, String> {
         let Value::Table(t) = v else { return Ok(v) };
         let t = match &index {
@@ -5647,13 +5893,34 @@ pub(crate) fn table_command(call: &FnCall, v: Value) -> Result<Value, String> {
             None if t.index > 0 => t.as_ref().clone().drop_index(),
             None => t.as_ref().clone(),
         };
-        Ok(Value::table(match &header_name {
+        let t = match &header_name {
             Some(n) => t.with_name(Some(n.clone())),
             None => t,
-        }))
+        };
+        let t = if casts.is_empty() {
+            t
+        } else {
+            for (col, ty) in &casts {
+                if let Some(j) = (0..t.width()).find(|&j| t.column_name(j) == *col)
+                    && let Some(declared) = t.declaration(j)
+                    && declared != *ty
+                {
+                    return Err(format!(
+                        "column '{col}' is declared {} by the header and cast to {} by -c: the two must agree",
+                        declared.word(),
+                        ty.word()
+                    ));
+                }
+            }
+            t.cast_columns(&casts)?
+        };
+        if autoindex_flag {
+            return autoindex_bare(&t).map(Value::table);
+        }
+        Ok(Value::table(t))
     };
     let Some(arg) = call.args.iter().find(|a| !matches!(a, Arg::Opt { .. })) else {
-        return finish(table_reading(v)?);
+        return finish(table_reading_shaped(v, shape)?);
     };
     let (width, header): (usize, Option<Vec<String>>) = match arg {
         Arg::Lit(Value::Int(n)) if *n >= 1 => (*n as usize, None),
@@ -5862,14 +6129,8 @@ fn typed_table(
                 .map(|(j, ty)| (names[*j].clone(), ty.clone()))
                 .collect();
             let rows = t
-                .rows
-                .iter()
-                .map(|r| {
-                    order
-                        .iter()
-                        .map(|(j, _)| r.get(*j).cloned().unwrap_or(Value::Null))
-                        .collect()
-                })
+                .rows()
+                .map(|r| order.iter().map(|(j, _)| r.get(*j)).collect())
                 .collect();
             crate::Table::declared(header, rows)
                 .map(Value::table)
@@ -6272,7 +6533,7 @@ pub(crate) fn flatten_value(call: &FnCall, v: Value) -> Result<Value, String> {
             }
             Ok(Value::list(out))
         }
-        Value::Table(t) => Ok(Value::list(t.rows.iter().flatten().cloned().collect())),
+        Value::Table(t) => Ok(Value::list(t.rows().flat_map(|r| r.iter()).collect())),
         // a record flattens to the list of its values: a composite
         // label to the list of its levels (spec: The Table, "The index")
         Value::Record(r) => Ok(Value::list(r.iter().map(|(_, v)| v.clone()).collect())),
@@ -6346,13 +6607,7 @@ pub(crate) fn values_reading(v: Value) -> Result<Value, String> {
         }
         Value::List(_) => Err("values reads a list of records, one list of values per record; this list is not all records".into()),
         // the columns and their types kept (draft 166)
-        Value::Table(t) => Ok(Value::table(crate::Table {
-            header: None,
-            rows: t.rows.clone(),
-            declared: t.declared.clone(),
-            index: 0,
-            name: None,
-        })),
+        Value::Table(t) => Ok(Value::table(crate::Table::assemble(None, t.rows_vec(), t.declared.clone(), 0, None))),
         other => Err(format!("values reads a record's values or a table's rows, not {}", kind_of(&other))),
     }
 }
@@ -6462,18 +6717,16 @@ pub(crate) fn table_meta(v: Value, what: &str) -> Result<Value, String> {
 /// order; `None` for one position out of range (the value is null).
 fn table_rows(t: &crate::Table, rows: &IndexSpec) -> Result<Option<Vec<usize>>, String> {
     Ok(Some(match rows {
-        IndexSpec::At(n) => match position(*n, t.rows.len()) {
+        IndexSpec::At(n) => match position(*n, t.n_rows()) {
             Some(p) => vec![p - 1],
             None => return Ok(None),
         },
         IndexSpec::Range(a, b) => {
-            let (a, b) = span(*a, *b, t.rows.len());
+            let (a, b) = span(*a, *b, t.n_rows());
             (a..b).collect()
         }
-        IndexSpec::List(_) => listed_positions(rows, t.rows.len())?,
-        IndexSpec::Coords(parts) => {
-            listed_positions(&IndexSpec::List(parts.clone()), t.rows.len())?
-        }
+        IndexSpec::List(_) => listed_positions(rows, t.n_rows())?,
+        IndexSpec::Coords(parts) => listed_positions(&IndexSpec::List(parts.clone()), t.n_rows())?,
         IndexSpec::Name(n) => {
             return Err(format!("rows are indexed by position, not by name ('{n}')"));
         }
@@ -6753,18 +7006,18 @@ pub(crate) fn index_value(
                 return Ok(if one_row {
                     t.row(row_set[0] + 1).unwrap_or(Value::Null)
                 } else {
-                    Value::table(crate::Table {
-                        header: t.header.clone(),
-                        rows: row_set.iter().map(|i| t.rows[*i].clone()).collect(),
-                        declared: t.declared.clone(),
-                        index: t.index,
-                        name: None,
-                    })
+                    Value::table(crate::Table::assemble(
+                        t.header.clone(),
+                        row_set.iter().map(|i| t.row_cells(*i)).collect(),
+                        t.declared.clone(),
+                        t.index,
+                        None,
+                    ))
                 });
             };
             let col_set = column(cols)?;
             let one_col = matches!(cols, IndexSpec::At(_) | IndexSpec::Name(_));
-            let cell = |i: usize, j: usize| t.rows[i].get(j).cloned().unwrap_or(Value::Null);
+            let cell = |i: usize, j: usize| t.cell(i, j);
             Ok(match (one_row, one_col) {
                 (true, true) => cell(row_set[0], col_set[0]),
                 (false, true) => {
@@ -6776,24 +7029,22 @@ pub(crate) fn index_value(
                         .map(|j| (keys[*j].clone(), cell(row_set[0], *j)))
                         .collect(),
                 ),
-                (false, false) => Value::table(crate::Table {
-                    header: t
-                        .header
+                (false, false) => Value::table(crate::Table::assemble(
+                    t.header
                         .as_ref()
                         .map(|h| col_set.iter().map(|j| h[*j].clone()).collect()),
-                    rows: row_set
+                    row_set
                         .iter()
                         .map(|i| col_set.iter().map(|j| cell(*i, *j)).collect())
                         .collect(),
-                    declared: if t.declared.is_empty() {
+                    if t.declared.is_empty() {
                         Vec::new()
                     } else {
                         col_set.iter().map(|j| t.declaration(*j)).collect()
                     },
-                    // the index stays where its column is kept first
-                    index: usize::from(t.index > 0 && col_set.first() == Some(&0)),
-                    name: None,
-                }),
+                    usize::from(t.index > 0 && col_set.first() == Some(&0)),
+                    None,
+                )),
             })
         }
         // A row of a frame is a record: `t[2][1]` agrees with
@@ -6839,9 +7090,9 @@ pub(crate) fn index_value(
 /// the whole-context refusal positional selection has always given on
 /// the plain pipe.
 pub(crate) fn table_rows_at(call: &FnCall, v: Value) -> Result<Value, String> {
-    if !matches!(v, Value::Table(_) | Value::List(_)) {
+    if !matches!(v, Value::Table(_) | Value::List(_) | Value::Record(_)) {
         return Err(
-            "positional selection is whole-context; write '@| [n]' / '@| [a..b]' (a plain '| [cond]' filters per capsa; on a table or a list value, '| [n]' is the row or the item)".into(),
+            "positional selection is whole-context; write '@| [n]' / '@| [a..b]' (a plain '| [cond]' filters per capsa; on a table, a list or a record value, '| [n]' is the row, the item or the field)".into(),
         );
     }
     // one position or range, a position list (`| [2; 4; 5]`), or a
@@ -6903,20 +7154,20 @@ pub(crate) fn header_shift(call: &FnCall, v: Value) -> Result<Value, String> {
     };
     Ok(Value::table(match call.name.as_str() {
         "row-to-header" => {
-            let Some(first) = t.rows.first() else {
+            let Some(first) = t.row_at(0) else {
                 return Err("row-to-header: the table has no row to lift".into());
             };
             crate::Table::new(
-                Some(first.iter().map(Value::to_string).collect()),
-                t.rows[1..].to_vec(),
+                Some(first.iter().map(|v| v.to_string()).collect()),
+                t.rows().skip(1).map(|r| r.cells()).collect(),
             )
         }
         _ => {
-            let mut rows = Vec::with_capacity(t.rows.len() + 1);
+            let mut rows = Vec::with_capacity(t.n_rows() + 1);
             if let Some(h) = &t.header {
                 rows.push(h.iter().cloned().map(Value::Str).collect());
             }
-            rows.extend(t.rows.iter().cloned());
+            rows.extend(t.rows().map(|r| r.cells()));
             crate::Table::new(None, rows)
         }
     }))
@@ -7054,7 +7305,7 @@ fn transposed_frame(t: &crate::Table) -> Value {
                 }
             })
             .collect();
-        header.extend(t.rows.iter().map(|r| t.label_name(r)));
+        header.extend(t.rows().map(|r| t.label_name(&r.cells())));
         let rows: Vec<Vec<Value>> = names
             .iter()
             .enumerate()
@@ -7063,11 +7314,7 @@ fn transposed_frame(t: &crate::Table) -> Value {
                 let mut row: Vec<Value> =
                     name.split(':').map(|s| Value::Str(s.to_string())).collect();
                 row.resize(depth, Value::Null);
-                row.extend(
-                    t.rows
-                        .iter()
-                        .map(|r| r.get(j).cloned().unwrap_or(Value::Null)),
-                );
+                row.extend(t.rows().map(|r| r.get(j)));
                 row
             })
             .collect();
@@ -7079,17 +7326,13 @@ fn transposed_frame(t: &crate::Table) -> Value {
         );
     }
     let mut header = vec![first];
-    header.extend((1..=t.rows.len()).map(|i| i.to_string()));
+    header.extend((1..=t.n_rows()).map(|i| i.to_string()));
     let rows: Vec<Vec<Value>> = names
         .iter()
         .enumerate()
         .map(|(j, name)| {
             let mut row = vec![Value::Str(name.clone())];
-            row.extend(
-                t.rows
-                    .iter()
-                    .map(|r| r.get(j).cloned().unwrap_or(Value::Null)),
-            );
+            row.extend(t.rows().map(|r| r.get(j)));
             row
         })
         .collect();
@@ -7106,7 +7349,7 @@ pub(crate) fn transpose_reading(v: Value) -> Result<Value, String> {
             ));
         }
         Value::Table(t) => match &t.header {
-            None => t.rows.clone(),
+            None => t.rows_vec(),
             // A frame transposes to a frame (spec: Tables and
             // Reshapes): the header becomes the first column, named
             // `column`, each old row a column numbered by position;
@@ -7183,28 +7426,44 @@ pub(crate) fn transpose_reading(v: Value) -> Result<Value, String> {
     let m = crate::Table::matrix(rows);
     let w = m.width();
     let exchanged: Vec<Vec<Value>> = (0..w)
-        .map(|j| {
-            m.rows
-                .iter()
-                .map(|r| r.get(j).cloned().unwrap_or(Value::Null))
-                .collect()
-        })
+        .map(|j| m.rows().map(|r| r.get(j)).collect())
         .collect();
-    Ok(Value::table(crate::Table {
-        header: None,
-        rows: exchanged,
-        declared: Vec::new(),
-        index: 0,
-        name: None,
-    }))
+    Ok(Value::table(crate::Table::assemble(
+        None,
+        exchanged,
+        Vec::new(),
+        0,
+        None,
+    )))
 }
 
 /// The named fields of a call's bare-word operands.
+/// A bare field names its column (`melt(:id)`), as a word and a
+/// projector do; the command's names stay names, unevaluated.
+fn field_name(o: &crate::syntax::ast::Operand) -> Option<&str> {
+    use crate::syntax::ast::Operand;
+    match o {
+        Operand::Field {
+            base,
+            name,
+            bare: true,
+        } if matches!(**base, Operand::Topic) => Some(name.as_str()),
+        Operand::Lit(Value::Str(s)) => Some(s.as_str()),
+        Operand::Lit(Value::Projection { key, .. }) => Some(key.as_str()),
+        _ => None,
+    }
+}
+
 fn word_args(call: &FnCall) -> Vec<&str> {
     let mut out = Vec::new();
     for a in &call.args {
         match a {
             Arg::Lit(Value::Str(s)) => out.push(s.as_str()),
+            Arg::Lit(Value::Projection { key, .. }) => out.push(key.as_str()),
+            Arg::Expr(crate::syntax::ast::Operand::List(items)) => {
+                out.extend(items.iter().filter_map(field_name))
+            }
+            Arg::Expr(e) => out.extend(field_name(e)),
             // A list constructor of names stands for the names
             // (`melt(@(year; life))`).
             Arg::Lit(Value::List(items)) => out.extend(items.iter().filter_map(|v| match v {
@@ -7263,16 +7522,15 @@ pub(crate) fn reduce_structure(call: &FnCall, topic: &Value, scale: Scale) -> Op
                 (t.index..t.width())
                     .map(|j| {
                         let n = t
-                            .rows
-                            .iter()
-                            .filter(|r| matches!(r.get(j), Some(Value::Null) | None) == nulls)
+                            .rows()
+                            .filter(|r| matches!(r.get(j), Value::Null) == nulls)
                             .count();
                         (t.column_name(j), Value::Int(n as i64))
                     })
                     .collect(),
             ))
         }
-        Value::Table(t) if name == "count" => Some(Value::Int(t.rows.len() as i64)),
+        Value::Table(t) if name == "count" => Some(Value::Int(t.n_rows() as i64)),
         Value::Record(fields) if NUMERIC.contains(&name) => {
             Some(one(fields.iter().map(|(_, v)| v.clone()).collect()))
         }
@@ -7290,11 +7548,7 @@ pub(crate) fn reduce_structure(call: &FnCall, topic: &Value, scale: Scale) -> Op
         Value::Table(t) if NUMERIC.contains(&name) => Some(Value::record(
             (t.index..t.width())
                 .map(|j| {
-                    let cells: Vec<Value> = t
-                        .rows
-                        .iter()
-                        .map(|r| r.get(j).cloned().unwrap_or(Value::Null))
-                        .collect();
+                    let cells: Vec<Value> = t.rows().map(|r| r.get(j)).collect();
                     (t.column_name(j), one(cells))
                 })
                 .collect(),
@@ -7341,7 +7595,7 @@ fn pivot(call: &FnCall, input: Vec<Value>) -> Result<Vec<Value>, String> {
                     _ => None,
                 })
                 .collect(),
-            Arg::Expr(crate::syntax::ast::Operand::Field { base, name })
+            Arg::Expr(crate::syntax::ast::Operand::Field { base, name, .. })
                 if matches!(**base, crate::syntax::ast::Operand::Topic) =>
             {
                 Some(vec![name.clone()])
@@ -7349,7 +7603,7 @@ fn pivot(call: &FnCall, input: Vec<Value>) -> Result<Vec<Value>, String> {
             Arg::Expr(crate::syntax::ast::Operand::List(items)) => items
                 .iter()
                 .map(|i| match i {
-                    crate::syntax::ast::Operand::Field { base, name }
+                    crate::syntax::ast::Operand::Field { base, name, .. }
                         if matches!(**base, crate::syntax::ast::Operand::Topic) =>
                     {
                         Some(name.clone())

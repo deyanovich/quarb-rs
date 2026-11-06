@@ -280,6 +280,29 @@ pub fn is_atrep(text: &str) -> bool {
 /// `.xhtml` extension, or content that begins with the `<?xml`
 /// prologue. Checked before HTML, whose generic `<` sniff would
 /// otherwise swallow XML.
+/// Whether the file's head is plain XML for the stream: no declared
+/// encoding but UTF-8, and no vocabulary the koine route reads at the
+/// text level.
+fn xml_head_is_plain(p: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(p) else {
+        return false;
+    };
+    let mut head = vec![0u8; 8192];
+    let Ok(n) = f.read(&mut head) else {
+        return false;
+    };
+    head.truncate(n);
+    if let Some(enc) = quarb_xml::declared_encoding(&head)
+        && !enc.eq_ignore_ascii_case("utf-8")
+        && !enc.eq_ignore_ascii_case("utf8")
+    {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&head);
+    quarb_text_koine::detect_xml_kind(&text).is_none()
+}
+
 pub fn is_xml(path: Option<&Path>, text: &str) -> bool {
     let by_ext = path
         .and_then(Path::extension)
@@ -1806,6 +1829,11 @@ pub struct OpenOpts {
     /// The shell gate (a `shell:` environment mounted): the literary
     /// and corpus readings' `annotate=` runs under it.
     pub allow_shell: bool,
+    /// A CSV or TSV file streams (ruling 2026-11-05): the rows are
+    /// not held, a row parsed from its offset when a cell is read —
+    /// the one-off query's mount (`qua QUERY file.csv`); a session
+    /// mounts the file whole and leaves this off.
+    pub stream_rows: bool,
 }
 
 /// Open any target qua speaks — filesystem paths, documents, and
@@ -2325,6 +2353,19 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
     {
         let rest = &take_reader_encoding(rest, ctx)?;
         let target = Path::new(rest);
+        // a large file streamed (hash (d) of the columnar round,
+        // 2026-11-06): its lines read as a step reaches them
+        if cli.stream_rows
+            && target.is_file()
+            && ctx.encoding().is_none()
+            && std::fs::metadata(target)
+                .map(|m| m.len() >= 256 * 1024)
+                .unwrap_or(false)
+        {
+            let a = Rc::new(quarb_lines::LinesStream::open(target).context("reading the lines")?);
+            let r = a.clone();
+            return Ok(Mounted::of(a, Box::new(move |n| r.locator(n))));
+        }
         let text = read_prose(target, ctx)?;
         let a = Rc::new(quarb_lines::LinesAdapter::parse(&text));
         let r = a.clone();
@@ -3045,6 +3086,79 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
             SqliteAdapter::open_with_refs(p, &refs).context("opening SQLite database")?,
             |a, n| a.locator(n),
         ));
+    }
+    // A CSV streamed (ruling 2026-11-05): the file not held, the
+    // rows read by offset as the query reaches them. A declared
+    // encoding is decoded whole, as before: the stream reads UTF-8.
+    if cli.stream_rows
+        && p.is_file()
+        && ctx.encoding().is_none()
+        && let Some(delim) = csv_delimiter(Some(p))
+    {
+        let a = Rc::new(quarb_csv::CsvStream::open(p, delim, ctx.csv()).context("parsing CSV")?);
+        let r = a.clone();
+        return Ok(Mounted::of(a, Box::new(move |n| r.locator(n))));
+    }
+    // A JSON document with one array streamed (hash (d) of the
+    // columnar round, 2026-11-06): the array at the root or under a
+    // root key, its elements parsed into their own arbors when a step
+    // reaches them, the rest of the document parsed whole; a document
+    // with no such array, or a small one, reads whole as before.
+    if cli.stream_rows
+        && p.is_file()
+        && ctx.encoding().is_none()
+        && ctx.format().is_none()
+        && p.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+        && std::fs::metadata(p)
+            .map(|m| m.len() >= 256 * 1024)
+            .unwrap_or(false)
+        && let Some(a) =
+            quarb_json::JsonArray::open(p, quarb_json::Reading::Node).context("parsing JSON")?
+    {
+        let a = Rc::new(a);
+        let r = a.clone();
+        return Ok(Mounted::of(a, Box::new(move |n| r.pointer(n))));
+    }
+    // An XML document with one repeated child streamed (hash (d) of
+    // the columnar round, 2026-11-06): the document element's children
+    // parsed into their own arbors when a step reaches them, the
+    // element itself and the prologue parsed whole; a vocabulary the
+    // koine route knows (TEI, DocBook, …) reads at the text level as
+    // before, and a document of another shape reads whole.
+    if cli.stream_rows
+        && p.is_file()
+        && ctx.encoding().is_none()
+        && ctx.format().is_none()
+        && p.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("xml"))
+        && std::fs::metadata(p)
+            .map(|m| m.len() >= 256 * 1024)
+            .unwrap_or(false)
+        && xml_head_is_plain(p)
+        && let Some(a) = quarb_xml::XmlStream::open(p).context("parsing XML")?
+    {
+        let a = Rc::new(a);
+        let r = a.clone();
+        return Ok(Mounted::of(a, Box::new(move |n| r.locator(n))));
+    }
+    // JSONL streamed the same way (ruling 2026-11-05): a line parsed
+    // into its own arbor when a node of it is reached.
+    if cli.stream_rows
+        && p.is_file()
+        && ctx.encoding().is_none()
+        && ctx.format().is_none()
+        && p.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("jsonl") || e.eq_ignore_ascii_case("ndjson"))
+    {
+        let a = Rc::new(
+            quarb_json::JsonLines::open(p, quarb_json::Reading::Node).context("parsing JSONL")?,
+        );
+        let r = a.clone();
+        return Ok(Mounted::of(a, Box::new(move |n| r.pointer(n))));
     }
     let text = read_prose(p, ctx)?;
     // Strip a leading UTF-8 BOM, as the single-input flow does: it

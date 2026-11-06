@@ -573,43 +573,72 @@ fn statements(text: &str) -> Vec<String> {
     out
 }
 
-/// Strip `#` comments: from a `#` at start of line or preceded by
-/// whitespace, to end of line. Strings are opaque, and a `#` glued
-/// to text (`s/\.#\d+//`) is body text, not a comment — so trailing
-/// annotations parse while substitutions survive.
-fn strip_comments(text: &str) -> String {
+/// Strip the comments: a `#` at start of line or preceded by
+/// whitespace runs to the end of its line (a `#` glued to text,
+/// `s/\.#\d+//`, is body text, so substitutions survive); a `(!!`
+/// opens the block comment (ruling 2026-11-06), closed by the `)`
+/// that balances it, newlines inside kept so the lines keep their
+/// numbers. Strings are opaque to both. A block comment no `)`
+/// balances is refused at its opener.
+fn strip_comments(text: &str) -> Result<String, String> {
+    let b: Vec<char> = text.chars().collect();
     let mut out = String::new();
-    for line in text.lines() {
-        let b: Vec<char> = line.chars().collect();
-        let mut i = 0;
-        while i < b.len() {
-            match b[i] {
-                q @ ('\'' | '"') => {
-                    out.push(q);
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            q @ ('\'' | '"') => {
+                out.push(q);
+                i += 1;
+                while i < b.len() && b[i] != q && b[i] != '\n' {
+                    if b[i] == '\\' && i + 1 < b.len() {
+                        out.push(b[i]);
+                        i += 1;
+                    }
+                    out.push(b[i]);
                     i += 1;
-                    while i < b.len() && b[i] != q {
-                        if b[i] == '\\' && i + 1 < b.len() {
-                            out.push(b[i]);
-                            i += 1;
-                        }
-                        out.push(b[i]);
-                        i += 1;
-                    }
-                    if i < b.len() {
-                        out.push(b[i]);
-                        i += 1;
-                    }
                 }
-                '#' if i == 0 || b[i - 1].is_whitespace() => break,
-                c => {
-                    out.push(c);
+                if i < b.len() && b[i] == q {
+                    out.push(b[i]);
                     i += 1;
                 }
             }
+            '#' if i == 0 || b[i - 1].is_whitespace() => {
+                while i < b.len() && b[i] != '\n' {
+                    i += 1;
+                }
+            }
+            '(' if b.get(i + 1) == Some(&'!') && b.get(i + 2) == Some(&'!') => {
+                let open = i;
+                let mut depth = 0usize;
+                loop {
+                    let Some(&c) = b.get(i) else {
+                        return Err(format!(
+                            "unterminated comment ((!!…) at character {}: no ')' balances its opener",
+                            open + 1
+                        ));
+                    };
+                    i += 1;
+                    match c {
+                        '(' => depth += 1,
+                        ')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        '\n' => out.push('\n'),
+                        _ => {}
+                    }
+                }
+                out.push(' ');
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
         }
-        out.push('\n');
     }
-    out
+    Ok(out)
 }
 
 /// Parse the left side of a `ref`/`edge` field into `(scope_path,
@@ -801,7 +830,7 @@ fn parse_model_in(
 ) -> Result<Model, String> {
     let mut model = Model::default();
     let mut defs = Vec::new();
-    for raw in statements(&strip_comments(text)) {
+    for raw in statements(&strip_comments(text)?) {
         let stmt = raw.trim();
         if stmt.is_empty() {
             continue;
@@ -1195,6 +1224,28 @@ fn parse_model_in(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_block_comment_is_whitespace_in_a_model() {
+        // between statements, inside one, holding `;`, `#` and parens
+        let plain = super::parse_model("node /a/b: /x/*;\nref /a/b::k --> /c/*;\n").unwrap();
+        let commented = super::parse_model(
+            "(!! the header; (a; b) )\nnode /a/b: (!! # inside\n two lines ) /x/*;\n\
+             ref /a/b::k (!! --> is the arrow ) --> /c/*; (!! trailing )\n",
+        )
+        .unwrap();
+        assert_eq!(format!("{commented:?}"), format!("{plain:?}"));
+        // a `#` line comment still runs to its line's end, `(!!` and all
+        let lined =
+            super::parse_model("# see (!! no comment opens here\nnode /a/b: /x/*;\n").unwrap();
+        assert_eq!(
+            format!("{lined:?}"),
+            format!("{:?}", super::parse_model("node /a/b: /x/*;\n").unwrap())
+        );
+        let e = super::parse_model("node /a/b: /x/*; (!! open (x )\n").unwrap_err();
+        assert!(e.contains("unterminated comment"), "{e}");
+        assert!(e.contains("at character 18"), "{e}");
+    }
+
     use super::*;
 
     #[test]

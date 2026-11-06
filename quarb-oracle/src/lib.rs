@@ -186,15 +186,27 @@ impl OracleAdapter {
         // listing under a pushed-down filter, and the keyed read a
         // hop makes (`WHERE key IN (…)`) all derive from it.
         let conn2 = conn.clone();
+        let conn3 = conn.clone();
         let model = RelationalModel::lazy_where(
             specs,
-            std::rc::Rc::new(move |t: usize, spec: &TableSpec, w: Option<&str>| {
-                let conn = conn.borrow_mut();
-                fetch_rows(&conn, spec, &decodes[t], w).map_err(|e| e.to_string())
-            }),
+            std::rc::Rc::new(
+                move |t: usize, spec: &TableSpec, w: Option<&str>, k: Option<usize>| {
+                    let conn = conn.borrow_mut();
+                    fetch_rows(&conn, spec, &decodes[t], w, k).map_err(|e| e.to_string())
+                },
+            ),
             filter,
             quote,
         )
+        // the exact count of a table not read (the pushdown scanning
+        // round, 2026-11-06)
+        .with_counter(Box::new(move |_, spec| {
+            let conn = conn3.borrow_mut();
+            let n: i64 = conn
+                .query_row_as::<i64>(&format!("SELECT count(*) FROM {}", quote(&spec.name)), &[])
+                .map_err(|e| e.to_string())?;
+            Ok(n.max(0) as usize)
+        }))
         // The optimizer's estimate: `EXPLAIN PLAN` fills PLAN_TABLE
         // with the rows and bytes it expects for the statement.
         .with_estimator(std::rc::Rc::new(move |_, spec, equals| {
@@ -335,7 +347,12 @@ fn fetch_rows(
     spec: &TableSpec,
     decodes: &[(Decode, bool)],
     where_sql: Option<&str>,
+    limit: Option<usize>,
 ) -> Result<Vec<RowSpec>, OracleError> {
+    // a prefix: the first rows in the order the whole read uses
+    let cut = limit
+        .map(|k| format!(" FETCH FIRST {k} ROWS ONLY"))
+        .unwrap_or_default();
     let select: Vec<String> = spec
         .columns
         .iter()
@@ -354,7 +371,7 @@ fn fetch_rows(
         None => String::new(),
     };
     let sql = format!(
-        "SELECT {} FROM {}{filter}{order}",
+        "SELECT {} FROM {}{filter}{order}{cut}",
         select.join(", "),
         quote(&spec.name)
     );

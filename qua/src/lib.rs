@@ -191,6 +191,12 @@ struct Cli {
     /// through the adapter's scan path).
     #[arg(long = "no-pushdown")]
     no_pushdown: bool,
+    /// Mount a CSV or TSV file whole instead of streaming its rows
+    /// (ruling 2026-11-05: a one-off query streams the file, a row
+    /// parsed when a cell of it is read; a query that walks the rows
+    /// many times may prefer the file held).
+    #[arg(long = "no-stream")]
+    no_stream: bool,
 
     /// The diagnostics shown on stderr beside a query's answer:
     /// error (the refusals and syntax errors alone), warning (the
@@ -501,6 +507,14 @@ impl From<&Cli> for OpenOpts {
             no_graft: cli.no_graft,
             refs: cli.refs.clone(),
             allow_shell: cli.allow_shell,
+            // the one-off query streams a CSV (ruling 2026-11-05);
+            // a run that keeps the arbor — the kaiv emission, a save,
+            // a resident server — mounts it whole
+            stream_rows: !cli.no_stream
+                && !cli.kaiv
+                && cli.save.is_none()
+                && !cli.resident
+                && !cli.resident_serve,
         }
     }
 }

@@ -158,7 +158,10 @@ fn fetch_rows_where(
     conn: &Connection,
     spec: &TableSpec,
     where_sql: Option<&str>,
+    limit: Option<usize>,
 ) -> Result<Vec<RowSpec>, SqliteError> {
+    // a prefix: the first rows in the order the whole read uses
+    let cut = limit.map(|k| format!(" LIMIT {k}")).unwrap_or_default();
     let cols = spec
         .columns
         .iter()
@@ -175,7 +178,7 @@ fn fetch_rows_where(
     // ROWID tables have no rowid column, so `SELECT rowid` fails to
     // prepare; fall back to a positional ordinal (below), ordered by
     // the key for determinism.
-    let with_rowid = format!("SELECT rowid, {cols} FROM {table}{filter} ORDER BY rowid");
+    let with_rowid = format!("SELECT rowid, {cols} FROM {table}{filter} ORDER BY rowid{cut}");
     if let Ok(mut stmt) = conn.prepare(&with_rowid) {
         let mut rows = stmt.query([])?;
         let mut out = Vec::new();
@@ -199,7 +202,7 @@ fn fetch_rows_where(
         None => cols.clone(),
     };
     let mut stmt = conn.prepare(&format!(
-        "SELECT {cols} FROM {table}{filter} ORDER BY {order}"
+        "SELECT {cols} FROM {table}{filter} ORDER BY {order}{cut}"
     ))?;
     let mut rows = stmt.query([])?;
     let mut out = Vec::new();
@@ -387,16 +390,39 @@ impl SqliteAdapter {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?);
         let specs = specs(&conn, refs)?;
-        let (whole, keyed, stats, listed) = (conn.clone(), conn.clone(), conn.clone(), conn);
+        let (whole, keyed, stats, prefix, counting, listed) = (
+            conn.clone(),
+            conn.clone(),
+            conn.clone(),
+            conn.clone(),
+            conn.clone(),
+            conn,
+        );
         let mut model = RelationalModel::lazy(
             specs,
             Box::new(move |_, spec| {
-                fetch_rows_where(&whole, spec, None).map_err(|e| e.to_string())
+                fetch_rows_where(&whole, spec, None, None).map_err(|e| e.to_string())
             }),
         )
         // A hop reads the rows it lands on, by key.
         .with_key_fetcher(Box::new(move |_, spec, col, values| {
             fetch_rows_keyed(&keyed, spec, None, col, values)
+        }))
+        // the first k rows by rowid for a hop that keeps a prefix, and
+        // the exact count of a table not read (the pushdown scanning
+        // round, 2026-11-06)
+        .with_prefix_fetcher(Box::new(move |_, spec, k| {
+            fetch_rows_where(&prefix, spec, None, Some(k)).map_err(|e| e.to_string())
+        }))
+        .with_counter(Box::new(move |_, spec| {
+            counting
+                .query_row(
+                    &format!("SELECT count(*) FROM {}", quote_ident(&spec.name)),
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map(|n| n.max(0) as usize)
+                .map_err(|e| e.to_string())
         }))
         // `ANALYZE`'s statistics, when the file carries them: the
         // table's row count as the planner knows it. A table with
@@ -447,7 +473,8 @@ impl SqliteAdapter {
             model = model.with_filtered_listing(
                 &table,
                 Box::new(move |_, spec| {
-                    fetch_rows_where(&listed, spec, Some(&where_sql)).map_err(|e| e.to_string())
+                    fetch_rows_where(&listed, spec, Some(&where_sql), None)
+                        .map_err(|e| e.to_string())
                 }),
             );
         }
@@ -477,7 +504,7 @@ impl SqliteAdapter {
     ) -> Result<Self, SqliteError> {
         let mut input = Vec::new();
         for spec in specs(conn, refs)? {
-            let rows = fetch_rows_where(conn, &spec, None)?;
+            let rows = fetch_rows_where(conn, &spec, None, None)?;
             input.push((spec, rows));
         }
         Ok(SqliteAdapter {

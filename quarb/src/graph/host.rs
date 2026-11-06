@@ -433,6 +433,9 @@ impl<A: AstAdapter> Host for A {
     fn node_to_json_text(&self, ext: &GraphExt) -> String {
         node_to_json_text(self, ext.node)
     }
+    fn row_shape(&self, ext: &GraphExt) -> Option<Vec<String>> {
+        AstAdapter::row_columns(self, ext.node)
+    }
     fn node_to_xml(&self, ext: &GraphExt) -> String {
         node_to_xml(self, ext.node)
     }

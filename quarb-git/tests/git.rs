@@ -192,3 +192,32 @@ fn blobs_decode_under_the_mounts_rule() {
     let ru = GitAdapter::open_with_decoding(&dir, decoding).unwrap();
     assert_eq!(values(&ru, "/branches/master/ru.txt::"), ["Привет\n"]);
 }
+
+/// The pushdown scanning round (2026-11-06): a prefix over the
+/// history walks k commits, and the full enumeration finds the same
+/// commit nodes again.
+#[test]
+fn a_prefix_over_the_history_walks_k_commits() {
+    let dir = fixture("prefix");
+    let a = GitAdapter::open(&dir).unwrap();
+    let first = match quarb::run("/commits/* @| [..2]", &a).unwrap() {
+        quarb::QueryResult::Nodes(ns) => ns,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(first.len(), 2);
+    let all = match quarb::run("/commits/*", &a).unwrap() {
+        quarb::QueryResult::Nodes(ns) => ns,
+        other => panic!("{other:?}"),
+    };
+    assert!(all.len() > 2);
+    assert_eq!(&all[..2], &first[..]);
+    let subjects = match quarb::run("/commits/* @| [..2] | ::subject", &a).unwrap() {
+        quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+        other => panic!("{other:?}"),
+    };
+    let all_subjects = match quarb::run("/commits/* | ::subject", &a).unwrap() {
+        quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(subjects, all_subjects[..2]);
+}

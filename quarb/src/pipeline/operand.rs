@@ -110,7 +110,7 @@ pub(crate) fn eval_operand<H: Host>(
         }
         // `base:name` — a record's field; null on a non-record. A
         // field of a recalled record keeps that field's origins.
-        Operand::Field { base, name } if matches!(base.as_ref(), Operand::Recall(_)) => {
+        Operand::Field { base, name, .. } if matches!(base.as_ref(), Operand::Recall(_)) => {
             let Operand::Recall(r) = base.as_ref() else {
                 unreachable!()
             };
@@ -151,24 +151,50 @@ pub(crate) fn eval_operand<H: Host>(
         // indent(:depth - 1)`, `bibref(cmos) | :genus`); a QUARQ
         // answers its own core field first (`:unq`, the canonical
         // text `--expand` prints).
+        // Under a row in reach (ruling 2026-11-05: a table projector's
+        // expression item, `map`'s body over a table) the bare `:name`
+        // is the row's cell in that column, whatever the topic — the
+        // table the item stands on, the cell being mapped; `$_:name`
+        // written out keeps the topic's reading. A thread of its own
+        // record or list (`($_ | sort_by(:Age))`) reads that, as
+        // ever. A name no column carries is refused naming them.
+        Operand::Field {
+            base,
+            name,
+            bare: true,
+        } if matches!(**base, Operand::Topic)
+            && !matches!(scope.topic, Some(Value::Record(_) | Value::List(_)))
+            && let Some(read) = row_field(name) =>
+        {
+            vec![match read {
+                Ok(v) => v,
+                Err(columns) => {
+                    record_refusal(format!(
+                        "no column '{name}' (the columns: {})",
+                        columns.join(", ")
+                    ));
+                    Value::Null
+                }
+            }]
+        }
         // `:name` with a node reference as the topic reads the node the
         // reference names (`map(:name)` over a route); an unknown
         // field is refused there as on a path (finding 2026-11-05:
         // `$$_:%(:Age)` answered null where `/row:%(:Age)` refused)
-        Operand::Field { base, name }
+        Operand::Field { base, name, .. }
             if matches!(**base, Operand::Topic)
                 && scope.topic.is_some_and(|t| matches!(t, Value::Node(_))) =>
         {
             let topic = scope.topic.cloned().unwrap_or(Value::Null);
             vec![through(host, &topic, &Projection::CoreMeta(name.clone()))]
         }
-        Operand::Field { base, name }
+        Operand::Field { base, name, .. }
             if matches!(**base, Operand::Topic) && scope.topic.is_none() =>
         {
             note(host.origin_at(ext).position);
             vec![host.project(ext, &Projection::CoreMeta(name.clone()))]
         }
-        Operand::Field { base, name }
+        Operand::Field { base, name, .. }
             if matches!(**base, Operand::Topic)
                 && !matches!(
                     scope.topic,
@@ -188,7 +214,7 @@ pub(crate) fn eval_operand<H: Host>(
                 vec![Value::Null]
             }
         }
-        Operand::Field { base, name } => eval_operand(host, ext, base, trace, scope)
+        Operand::Field { base, name, .. } => eval_operand(host, ext, base, trace, scope)
             .into_iter()
             .map(|v| match &v {
                 // a core field read through the node a value names;
@@ -371,7 +397,12 @@ pub(crate) fn eval_operand<H: Host>(
                     // `#(:A; :B)` — the table of the named columns:
                     // on a table the columns side by side, on a node
                     // or a record one row of the readings
-                    ProjShape::Columns { items, index } => {
+                    ProjShape::Columns {
+                        items,
+                        index,
+                        autoindex,
+                        casts,
+                    } => {
                         let mut header: Vec<(String, Option<crate::ColumnType>)> =
                             Vec::with_capacity(items.len());
                         let mut columns = Vec::with_capacity(items.len());
@@ -419,6 +450,32 @@ pub(crate) fn eval_operand<H: Host>(
                                 }
                             }
                         }
+                        // what `:*` leaves out (ruling 2026-11-05): the
+                        // columns the items produce (bare `:Age`, the key
+                        // of `name = expr`) and the ones a rename takes
+                        // whole (`new = :old`); a column only read inside
+                        // an expression keeps its place under `:*`
+                        let taken: Vec<String> = items
+                            .iter()
+                            .flat_map(|(n, o)| {
+                                let o = match o {
+                                    Operand::Typed { inner, .. } => inner.as_ref(),
+                                    other => other,
+                                };
+                                let mut v = Vec::new();
+                                if let Some(k) = n {
+                                    v.push(k.clone());
+                                }
+                                if let Operand::Field { base, name, .. } = o
+                                    && matches!(**base, Operand::Topic)
+                                    && name != "*"
+                                {
+                                    v.push(name.clone());
+                                }
+                                v
+                            })
+                            .collect();
+                        let is_rest = |o: &Operand| matches!(o, Operand::Field { base, name, .. } if matches!(**base, Operand::Topic) && name == "*");
                         for (name, item) in items {
                             // `#($.h...)` — the spread: every projector
                             // the held list holds is a column, keyed
@@ -462,6 +519,31 @@ pub(crate) fn eval_operand<H: Host>(
                                 }
                                 continue;
                             }
+                            // `:*` — the rest: the base's data columns the
+                            // items neither produce nor take, in the
+                            // table's order, where it stands (ruling
+                            // 2026-11-05)
+                            if name.is_none() && is_rest(item) {
+                                match topic {
+                                    Some(Value::Table(t)) => {
+                                        for j in t.index..t.width() {
+                                            let k = t.column_name(j);
+                                            if !taken.contains(&k) {
+                                                header.push((k.clone(), t.declaration(j)));
+                                                columns.push(t.column(&k).unwrap_or(Value::Null));
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        crate::pipeline::record_refusal(
+                                            "':*' stands in a projector over a table (t:#(:*; …)) or a record (r:%(:*; …)): the rest of its columns or fields".into(),
+                                        );
+                                        refused = true;
+                                        break;
+                                    }
+                                }
+                                continue;
+                            }
                             // a typed item declares its column
                             let (item, declared) = match item {
                                 Operand::Typed { inner, typing } => {
@@ -482,19 +564,65 @@ pub(crate) fn eval_operand<H: Host>(
                             header.push((key, declared));
                             // on a table a bare `:name` is the column
                             // as a list, whatever record the indexed
-                            // table answers for it elsewhere
+                            // table answers for it elsewhere; any other
+                            // item is evaluated per row (ruling
+                            // 2026-11-05), the row in reach of its bare
+                            // `:name` reads, `$_` the table still
                             let column = match (topic, item) {
-                                (Some(Value::Table(t)), Operand::Field { base, name })
+                                (Some(Value::Table(t)), Operand::Field { base, name, .. })
                                     if matches!(**base, Operand::Topic) =>
                                 {
-                                    t.column(name).unwrap_or(Value::Null)
+                                    // a column the table lacks is refused naming it
+                                    // and the columns, as map refuses (lang's finding
+                                    // 2026-11-06), never a fold of the table
+                                    match t.column(name) {
+                                        Some(c) => c,
+                                        None => {
+                                            crate::pipeline::record_refusal(format!(
+                                                "no column '{name}' (the columns: {})",
+                                                (0..t.width())
+                                                    .map(|j| t.column_name(j))
+                                                    .collect::<Vec<_>>()
+                                                    .join(", ")
+                                            ));
+                                            refused = true;
+                                            break;
+                                        }
+                                    }
                                 }
+                                (Some(Value::Table(t)), item) => Value::list(
+                                    (1..=t.n_rows())
+                                        .map(|i| {
+                                            let row = t.row(i).unwrap_or(Value::Null);
+                                            with_row_in_reach(row, || {
+                                                walk_projections(
+                                                    operand_value(host, x, item, trace, pscope),
+                                                    &read,
+                                                )
+                                            })
+                                        })
+                                        .collect(),
+                                ),
                                 _ => walk_projections(
                                     operand_value(host, x, item, trace, pscope),
                                     &read,
                                 ),
                             };
                             columns.push(column);
+                        }
+                        // a name twice in the header — an item beside what
+                        // `:*` expanded, or two items — is a duplicate field
+                        if !refused
+                            && let Some((k, _)) = header
+                                .iter()
+                                .enumerate()
+                                .find(|(i, (k, _))| header[..*i].iter().any(|(h, _)| h == k))
+                                .map(|(_, h)| h)
+                        {
+                            crate::pipeline::record_refusal(format!(
+                                "'{k}' is already a column of the projector; a name stands once in a header"
+                            ));
+                            refused = true;
                         }
                         if refused {
                             out.push(Value::Null);
@@ -531,6 +659,39 @@ pub(crate) fn eval_operand<H: Host>(
                                     _ => t,
                                 }),
                             });
+                        // `-a` (ruling 2026-11-06): the positions prepended
+                        // as the index, never beside `-i`
+                        let built = built.and_then(|t| {
+                            if !*autoindex {
+                                return Ok(t);
+                            }
+                            if index.is_some() {
+                                return Err("#(…; -a -i=:col) names two indexes, and a table has one: -a prepends the positions as the index, -i=:col makes a column the index".into());
+                            }
+                            crate::stdlib::autoindex_bare(&t)
+                        });
+                        // `-c=:col<type>` (ruling 2026-11-06): the columns cast
+                        // after the build, as map(<type>; --to=:col) casts them
+                        let built = built.and_then(|t| {
+                            if casts.is_empty() {
+                                return Ok(t);
+                            }
+                            let mut list: Vec<(String, crate::ColumnType)> = Vec::new();
+                            for c in casts {
+                                match operand_value(host, x, c, trace, pscope) {
+                                    v @ (Value::Projection { .. } | Value::List(_)) => {
+                                        for (name, ty) in crate::stdlib::index_levels(&v) {
+                                            match ty {
+                                                Some(ty) => list.push((name, ty)),
+                                                None => return Err(format!("-c=:{name} names no type: -c=:{name}<int>")),
+                                            }
+                                        }
+                                    }
+                                    other => return Err(format!("--cast names a column with a typed projector (-c=:col<int>), not {}", crate::stdlib::kind_of(&other))),
+                                }
+                            }
+                            t.cast_columns(&list)
+                        });
                         out.push(match built {
                             Ok(t) => Value::table(t),
                             Err(why) => {
@@ -584,11 +745,14 @@ pub(crate) fn eval_operand<H: Host>(
             };
             match v {
                 Value::Null => eval_operand(host, ext, right, trace, scope),
-                Value::Table(t) if t.rows.iter().flatten().any(|c| matches!(c, Value::Null)) => {
+                Value::Table(t)
+                    if t.rows()
+                        .flat_map(|r| r.iter())
+                        .any(|c| matches!(c, Value::Null)) =>
+                {
                     let rows = t
-                        .rows
-                        .iter()
-                        .map(|r| r.iter().map(fill).collect())
+                        .rows()
+                        .map(|r| r.iter().map(|v| fill(&v)).collect())
                         .collect();
                     vec![match t.rebuild(rows) {
                         Ok(t) => Value::table(t),
@@ -643,23 +807,21 @@ pub(crate) fn eval_operand<H: Host>(
                 return vec![match v {
                     Value::Table(t) => {
                         let kept: Vec<Vec<Value>> = t
-                            .rows
-                            .iter()
+                            .rows()
                             .filter(|row| {
                                 let record = Value::Record(match &t.header {
-                                    Some(h) => h.iter().cloned().zip(row.iter().cloned()).collect(),
+                                    Some(h) => h.iter().cloned().zip(row.iter()).collect(),
                                     None => row
                                         .iter()
-                                        .cloned()
                                         .enumerate()
                                         .map(|(j, v)| ((j + 1).to_string(), v))
                                         .collect(),
                                 });
                                 holds(&record)
                             })
-                            .cloned()
+                            .map(|r| r.cells())
                             .collect();
-                        Value::table(t.with_rows(kept))
+                        Value::table(t.keep_rows(kept))
                     }
                     Value::List(items) => {
                         Value::list(items.iter().filter(|i| holds(i)).cloned().collect())
@@ -767,14 +929,18 @@ pub(crate) fn eval_operand<H: Host>(
                 }
             }
         }
-        Operand::Table { header, rows } => {
+        Operand::Table {
+            header,
+            declared,
+            rows,
+        } => {
             // a projector literal stays the projector, as a list item
             // or a record field does (a held projector table)
             let cell = |e: &Operand| match e {
                 Operand::Lit(v @ Value::Projection { .. }) => v.clone(),
                 _ => operand_value(host, ext, e, trace, scope),
             };
-            match table_literal(header.clone(), rows, cell) {
+            match table_literal(header.clone(), declared, rows, cell) {
                 Ok(t) => vec![Value::table(t)],
                 Err(why) => {
                     crate::pipeline::record_refusal(why);
@@ -1012,11 +1178,50 @@ pub(crate) fn eval_operand<H: Host>(
                     matches!(a, Arg::Expr(_))
                         || matches!(a, Arg::Opt { value: Some(v), .. } if !matches!(v, Operand::Lit(_)))
                 };
+                // `(:Name | split(",") | [1])` — a positional bracket
+                // after a command that spread one value into several
+                // picks among what it spread, as `@| [n]` reads the
+                // context (ruling 2026-11-05: a projector item answers
+                // as written); a bracket over one value stays that
+                // value's own index
+                let selecting;
+                let command = match command {
+                    Command::Func(call)
+                        if call.name == "[]"
+                            && caps.len() > 1
+                            && caps.iter().all(|c| {
+                                !matches!(
+                                    c.topic,
+                                    None | Some(
+                                        Value::List(_) | Value::Table(_) | Value::Record(_)
+                                    )
+                                )
+                            })
+                            && let Some(pred) = match call.args.as_slice() {
+                                [Arg::Lit(Value::Int(n))] => {
+                                    Some(crate::syntax::ast::Predicate::Index(*n))
+                                }
+                                [Arg::Range(a, b)] => {
+                                    Some(crate::syntax::ast::Predicate::Range(*a, *b))
+                                }
+                                _ => None,
+                            } =>
+                    {
+                        selecting = Command::Select(pred);
+                        &selecting
+                    }
+                    other => other,
+                };
                 let resolved;
+                // (`map` keeps its arguments: the first is the body it
+                // applies, `--to=` names its cells)
                 let command = match command {
                     Command::Func(call)
                         if stdlib::known_scalar(&call.name)
-                            && !matches!(call.name.as_str(), "rec" | "record")
+                            && !matches!(
+                                call.name.as_str(),
+                                "rec" | "record" | "map" | "autocast"
+                            )
                             && call.args.iter().any(outer_expr) =>
                     {
                         resolved = Command::Func(FnCall {
@@ -1396,10 +1601,39 @@ pub(crate) fn eval_operand<H: Host>(
         // as one list, as the command's input would be; one value as
         // it is (draft 164).
         Operand::Gathered(inner) => vec![gathered(eval_operand(host, ext, inner, trace, scope))],
-        // A boolean group in operand position is its truth value.
-        Operand::Group(e) => vec![Value::Bool(discard(|| {
-            eval_pred_expr(host, ext, e, trace, scope)
-        }))],
+        // A boolean group in operand position is its truth value —
+        // and a comparison whose sides are one value each distributes
+        // over a list on either side (ruling 2026-11-05: `@(22; 38) >
+        // 35` → `@(false; true)`); several values on a side keep the
+        // existential reading a predicate has.
+        Operand::Group(e) => {
+            if let PredExpr::Compare(l, op, r) = e.as_ref()
+                && !matches!(r, Operand::Pattern(_))
+            {
+                let lhs = discard(|| eval_operand(host, ext, l, trace, scope));
+                let rhs = discard(|| eval_operand(host, ext, r, trace, scope));
+                if lhs.len() == 1
+                    && rhs.len() == 1
+                    && (matches!(lhs[0], Value::List(_)) || matches!(rhs[0], Value::List(_)))
+                {
+                    return vec![match crate::stdlib::compare::compare_value(
+                        &lhs[0],
+                        *op,
+                        &rhs[0],
+                        &|e| host.scale_of(e),
+                    ) {
+                        Ok(v) => v,
+                        Err(why) => {
+                            record_refusal(why);
+                            Value::Null
+                        }
+                    }];
+                }
+            }
+            vec![Value::Bool(discard(|| {
+                eval_pred_expr(host, ext, e, trace, scope)
+            }))]
+        }
         Operand::Ctx {
             index,
             steps,
@@ -1460,6 +1694,7 @@ pub(crate) fn read_projection<H: Host>(
         1 => Operand::Field {
             base: Box::new(Operand::Topic),
             name: key.to_string(),
+            bare: true,
         },
         _ => Operand::Rel {
             steps: Vec::new(),
@@ -1500,14 +1735,8 @@ pub(crate) fn walk_projections(v: Value, read: &dyn Fn(u8, &str) -> Value) -> Va
         ),
         Value::Table(t) => {
             let rows = t
-                .rows
-                .iter()
-                .map(|r| {
-                    r.iter()
-                        .cloned()
-                        .map(|x| walk_projections(x, read))
-                        .collect()
-                })
+                .rows()
+                .map(|r| r.iter().map(|x| walk_projections(x, read)).collect())
                 .collect();
             Value::table(t.with_rows(rows))
         }
@@ -1583,7 +1812,7 @@ pub(crate) fn label_lookup(
             // outer labels, as a table
             if let [LabelSpec::Many(many)] = specs {
                 let rows: Vec<usize> = many.iter().flat_map(|l| t.rows_at_levels(std::slice::from_ref(l))).collect();
-                return Ok(Value::table(t.with_rows(rows.iter().map(|&i| t.rows[i].clone()).collect())));
+                return Ok(Value::table(t.take_rows(&rows)));
             }
             let levels: Vec<Value> = specs
                 .iter()
@@ -1608,7 +1837,7 @@ pub(crate) fn label_lookup(
                 } else if rows.is_empty() {
                     Value::Null
                 } else {
-                    Value::table(t.with_rows(rows.iter().map(|&i| t.rows[i].clone()).collect()))
+                    Value::table(t.take_rows(&rows))
                 });
             }
             Ok(Value::table(t.sub_table(&rows, levels.len())))
@@ -1663,7 +1892,7 @@ pub(crate) fn label_lookup(
             {
                 return Ok(rows.first().and_then(|&i| t.row(i + 1)).unwrap_or(Value::Null));
             }
-            Ok(Value::table(t.with_rows(rows.iter().map(|&i| t.rows[i].clone()).collect())))
+            Ok(Value::table(t.take_rows(&rows)))
         }
         Value::List(_) => Err(
             "a list is indexed by position, [n]; the double bracket looks a label up on an indexed table, or a key on a record"
@@ -1839,6 +2068,46 @@ pub(crate) fn record_build<H: Host>(
     let mut declared: Vec<Option<ColumnType>> = Vec::new();
     let mut keys_type: Option<ColumnType> = None;
     let mut values_type: Option<ColumnType> = None;
+    // what `:*` leaves out (ruling 2026-11-05): the fields the items
+    // produce (a bare `:k`, the key of `name = expr`) and the ones a
+    // rename takes whole (`new = :old`)
+    let taken: Vec<String> = {
+        let mut v = Vec::new();
+        let mut it = args.iter().peekable();
+        while let Some(a) = it.next() {
+            let produced = match a {
+                Arg::Lit(Value::Str(name)) => Some(name.clone()),
+                Arg::Key(k) => Some(Record::key_text(k)),
+                _ => None,
+            };
+            if let Some(name) = produced {
+                v.push(name);
+                if let Some(Arg::Expr(Operand::Field {
+                    base, name: old, ..
+                })) = it.peek()
+                    && matches!(**base, Operand::Topic)
+                    && old != "*"
+                {
+                    v.push(old.clone());
+                }
+                continue;
+            }
+            match a {
+                Arg::Expr(Operand::Field { base, name, .. })
+                    if matches!(**base, Operand::Topic) && name != "*" =>
+                {
+                    v.push(name.clone());
+                }
+                Arg::Expr(Operand::Typed { inner, .. }) => {
+                    if let Some(k) = crate::syntax::ast::auto_field_name(inner) {
+                        v.push(k.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        v
+    };
     let mut args = args.iter().peekable();
     while let Some(arg) = args.next() {
         let before = fields.len();
@@ -1944,6 +2213,30 @@ pub(crate) fn record_build<H: Host>(
                 ));
                 keys.push(None);
                 declared.push(typing.declared());
+            }
+            // `%(:*; …)` — the rest: the topic record's fields the
+            // items neither produce nor take, in its order, where it
+            // stands (ruling 2026-11-05)
+            Arg::Expr(Operand::Field { base, name, .. })
+                if matches!(**base, Operand::Topic) && name == "*" =>
+            {
+                let Some(Value::Record(r)) = scope.topic else {
+                    return Err(
+                        "':*' stands in a projector over a record (r:%(:*; …)) or a table (t:#(:*; …)): the rest of its fields or columns".into(),
+                    );
+                };
+                for (k, v) in r.iter() {
+                    if !taken.iter().any(|t| t == k) {
+                        if fields.iter().any(|(f, _, _)| f == k) {
+                            return Err(format!("'{k}' is already a field of the record"));
+                        }
+                        fields.push((
+                            k.clone(),
+                            v.clone(),
+                            scope.prov.cloned().unwrap_or_default(),
+                        ));
+                    }
+                }
             }
             Arg::Expr(e) => {
                 let name = crate::syntax::ast::auto_field_name(e)
@@ -2181,9 +2474,19 @@ pub(crate) fn eval_pred_expr<H: Host>(
         }) if !steps.is_empty() => {
             host.rel_exists(ext, steps, anchor, projection.as_ref(), trace, scope)
         }
+        // a list of booleans — a comparison that distributed over a
+        // list — holds when any element does (ruling 2026-11-05)
         PredExpr::Truthy(o) => eval_operand(host, ext, o, trace, scope)
             .iter()
-            .any(Value::is_truthy),
+            .any(|v| match v {
+                Value::List(l)
+                    if !l.is_empty()
+                        && l.iter().all(|x| matches!(x, Value::Bool(_) | Value::Null)) =>
+                {
+                    l.iter().any(|x| matches!(x, Value::Bool(true)))
+                }
+                v => v.is_truthy(),
+            }),
     }
 }
 
@@ -2256,6 +2559,7 @@ pub(crate) fn record_array(
 
 pub(crate) fn table_literal(
     mut header: Option<Vec<String>>,
+    declared: &[Option<crate::ColumnType>],
     rows: &[crate::syntax::ast::TableRow],
     mut cell: impl FnMut(&Operand) -> Value,
 ) -> Result<crate::Table, String> {
@@ -2376,7 +2680,7 @@ pub(crate) fn table_literal(
         }
         out.push(values);
     }
-    Ok(crate::Table::new(header, out))
+    Ok(crate::Table::typed(header, out, declared.to_vec())?)
 }
 
 /// An expression's value for a push (the computed push lands a

@@ -344,6 +344,12 @@ pub(crate) trait Host {
     fn node_to_json_text(&self, ext: &Self::Ext) -> String;
     fn node_to_xml(&self, ext: &Self::Ext) -> String;
     fn node_table(&self, ext: &Self::Ext) -> Result<Table, String>;
+    /// The columns of the rows beside `ext`'s node where its source
+    /// hands rows of one shape (a CSV mount's): a table built from
+    /// them keeps that order.
+    fn row_shape(&self, _ext: &Self::Ext) -> Option<Vec<String>> {
+        None
+    }
     /// The thread's subtree rendered through the document
     /// vocabulary named (`markdown`, `html`, `atrep`, `conllu`).
     fn render_node(&self, ext: &Self::Ext, kind: &str) -> String;

@@ -1468,6 +1468,24 @@ pub trait AstAdapter {
     fn count(&self, _from: NodeId, _plan: &StepPlan<'_>) -> Option<usize> {
         None
     }
+    /// The columns of the rows `row_text` serves, asked for the
+    /// source `node` belongs to (the one-pass typed build,
+    /// 2026-11-06): a source whose rows are records of one shape — a
+    /// CSV's — names them; `None` where the rows have no one shape,
+    /// and a table build reads each node's record. A mount of several
+    /// sources answers for the one holding `node`.
+    fn row_columns(&self, _node: NodeId) -> Option<Vec<String>> {
+        None
+    }
+    /// The cells of a row node as text, in the order of
+    /// `row_columns`, handed to `f` once — an empty text a cell the
+    /// row lacks (null), each text in the source's canonical form —
+    /// and `true`; `false` where the node is no row of that shape,
+    /// and the build reads its record. The one-pass typed build
+    /// parses the cells from the text, no value made on the way.
+    fn row_text(&self, _node: NodeId, _f: &mut dyn FnMut(&[&str])) -> bool {
+        false
+    }
     /// A batching hint, the projection twin of `prefetch_links`: the
     /// engine is about to read the properties `names` of every node
     /// in `nodes` (the next command projects them). A remote adapter
@@ -1741,7 +1759,7 @@ macro_rules! forward_ast_adapter {
             resolve_fragment ref_property ref_label link_property
             document_by_ref reverse_resolve descendants_named
             descendants_where may_hold_below select select_plan estimate count
-            prefetch_properties
+            row_columns row_text prefetch_properties
             prefetch_links whole_listings link_property_names acyclic_link quantifier_bound frontier_bound
             property_withheld withheld_properties nodes_withheld
             graph_bound graph_declarations graph_measure store_graph_measure
@@ -1811,6 +1829,8 @@ macro_rules! forward_ast_adapter {
     (@unless [$i:tt] [select_plan $($r:ident)*] select_plan) => {};
     (@unless [$i:tt] [estimate $($r:ident)*] estimate) => {};
     (@unless [$i:tt] [count $($r:ident)*] count) => {};
+    (@unless [$i:tt] [row_columns $($r:ident)*] row_columns) => {};
+    (@unless [$i:tt] [row_text $($r:ident)*] row_text) => {};
     (@unless [$i:tt] [prefetch_properties $($r:ident)*] prefetch_properties) => {};
     (@unless [$i:tt] [prefetch_links $($r:ident)*] prefetch_links) => {};
     (@unless [$i:tt] [whole_listings $($r:ident)*] whole_listings) => {};
@@ -2173,6 +2193,16 @@ macro_rules! forward_ast_adapter {
     (@fwd [$i:tt] count) => {
         fn count(&self, from: $crate::NodeId, plan: &$crate::adapter::StepPlan<'_>) -> Option<usize> {
             $crate::forward_ast_adapter!(@target self $i).count(from, plan)
+        }
+    };
+    (@fwd [$i:tt] row_columns) => {
+        fn row_columns(&self, node: $crate::NodeId) -> Option<Vec<String>> {
+            $crate::forward_ast_adapter!(@target self $i).row_columns(node)
+        }
+    };
+    (@fwd [$i:tt] row_text) => {
+        fn row_text(&self, node: $crate::NodeId, f: &mut dyn FnMut(&[&str])) -> bool {
+            $crate::forward_ast_adapter!(@target self $i).row_text(node, f)
         }
     };
     (@fwd [$i:tt] prefetch_properties) => {

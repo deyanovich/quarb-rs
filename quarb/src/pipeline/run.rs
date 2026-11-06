@@ -218,6 +218,21 @@ pub(crate) struct RunState {
     /// such a path's predicates, where the predicate scope has no
     /// topic of its own.
     pub(crate) enclosing_topic: Vec<Value>,
+    /// The rows in reach, innermost last (ruling 2026-11-05): while a
+    /// table projector's expression item or `map`'s body over a table
+    /// evaluates, the row it evaluates for, the bare `:name` reading
+    /// its cell in that column.
+    pub(crate) row_in_reach: Vec<Value>,
+    /// The prefix the pipeline keeps right after the one branch's
+    /// last step (`@| [..n]`, `@| [n]`, `@| first(n)`), computed once
+    /// per top-level query (ruling 2026-11-05: a slice right after the
+    /// step ends the reading at n): the hop hands it to the adapter
+    /// in the step plan's `limit`; an adapter that lists its rows
+    /// lazily stops there, every other ignores it.
+    pub(crate) prefix_limit: Option<usize>,
+    /// Whether the hop in progress is that last step, with no test of
+    /// its own that would thin the prefix after the adapter cut it.
+    pub(crate) limit_armed: bool,
     /// The unresolved external references of the run: identifiers
     /// (a URL, for html) of documents queries referenced but could
     /// not reach because they are not mounted. The engine performs
@@ -317,6 +332,33 @@ impl Drop for RunGuard {
             FINISHED.with(|fin| *fin.borrow_mut() = done);
         }
     }
+}
+
+/// Run `f` with `row` — the record of a table's row — in reach of
+/// the bare `:name` reads inside it (ruling 2026-11-05: a table
+/// projector's expression item, `map`'s body over a table).
+pub(crate) fn with_row_in_reach<R>(row: Value, f: impl FnOnce() -> R) -> R {
+    with_run(|s| s.row_in_reach.push(row));
+    let out = f();
+    with_run(|s| {
+        s.row_in_reach.pop();
+    });
+    out
+}
+
+/// The bare `:name` read on the row in reach: `None` where no row is
+/// in reach; the cell, or the columns the row has where none is
+/// called `name` (for the refusal).
+pub(crate) fn row_field(name: &str) -> Option<Result<Value, Vec<String>>> {
+    with_run(|s| {
+        s.row_in_reach.last().map(|r| match r {
+            Value::Record(f) => f
+                .get(name)
+                .cloned()
+                .ok_or_else(|| f.iter().map(|(k, _)| k.clone()).collect()),
+            _ => Err(Vec::new()),
+        })
+    })
 }
 
 /// Run `f` with `scope`'s topic (if any) reachable as `$_` inside

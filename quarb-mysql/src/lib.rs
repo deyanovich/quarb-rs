@@ -146,16 +146,33 @@ impl MysqlAdapter {
         // hop makes (`WHERE key IN (…)`) all derive from it.
         let rt = Rc::new(rt);
         let (rt2, conn2) = (rt.clone(), conn.clone());
+        let (rt3, conn3) = (rt.clone(), conn.clone());
         let model = RelationalModel::lazy_where(
             specs,
-            std::rc::Rc::new(move |t: usize, spec: &TableSpec, w: Option<&str>| {
-                let mut conn = conn.borrow_mut();
-                rt.block_on(fetch_rows(&mut conn, spec, &decodes[t], w))
-                    .map_err(|e| e.to_string())
-            }),
+            std::rc::Rc::new(
+                move |t: usize, spec: &TableSpec, w: Option<&str>, k: Option<usize>| {
+                    let mut conn = conn.borrow_mut();
+                    rt.block_on(fetch_rows(&mut conn, spec, &decodes[t], w, k))
+                        .map_err(|e| e.to_string())
+                },
+            ),
             filter,
             quarb_relational::quote_backtick,
         )
+        // the exact count of a table not read (the pushdown scanning
+        // round, 2026-11-06)
+        .with_counter(Box::new(move |_, spec| {
+            let mut conn = conn3.borrow_mut();
+            let sql = format!(
+                "SELECT count(*) FROM {}",
+                quarb_relational::quote_backtick(&spec.name)
+            );
+            let row = rt3
+                .block_on(sqlx::query(&sql).fetch_one(&mut *conn))
+                .map_err(|e| e.to_string())?;
+            let n: i64 = row.try_get(0).map_err(|e| e.to_string())?;
+            Ok(n.max(0) as usize)
+        }))
         // The planner's estimate: `EXPLAIN FORMAT=JSON` names the
         // rows it expects to examine.
         .with_estimator(std::rc::Rc::new(move |_, spec, equals| {
@@ -291,6 +308,7 @@ async fn fetch_rows(
     spec: &TableSpec,
     decodes: &[Decode],
     where_sql: Option<&str>,
+    limit: Option<usize>,
 ) -> Result<Vec<RowSpec>, sqlx::Error> {
     let select: Vec<String> = spec
         .columns
@@ -317,23 +335,27 @@ async fn fetch_rows(
         Some(w) => format!(" WHERE {w}"),
         None => String::new(),
     };
-    let rows = sqlx::query(&format!(
-        "SELECT {} FROM {}{filter}{order}",
+    // a prefix: the first rows in the order the whole read uses
+    let cut = limit.map(|k| format!(" LIMIT {k}")).unwrap_or_default();
+    let sql = format!(
+        "SELECT {} FROM {}{filter}{order}{cut}",
         select.join(", "),
         quarb_relational::quote_backtick(&spec.name)
-    ))
-    .fetch_all(&mut *conn)
-    .await?;
-    Ok(rows
-        .iter()
-        .enumerate()
-        .map(|(i, r)| RowSpec {
-            rowid: Some(i as i64 + 1),
+    );
+    // a row cursor: the rows arrive one at a time and are kept only
+    // in the model's own shape
+    let mut stream = sqlx::query(&sql).fetch(&mut *conn);
+    let mut out = Vec::new();
+    while let Some(r) = futures_util::TryStreamExt::try_next(&mut stream).await? {
+        let i = out.len() as i64 + 1;
+        out.push(RowSpec {
+            rowid: Some(i),
             values: (0..spec.columns.len())
-                .map(|c| cell(r, c, decodes[c]))
+                .map(|c| cell(&r, c, decodes[c]))
                 .collect(),
-        })
-        .collect())
+        });
+    }
+    Ok(out)
 }
 
 /// The catalog for a pushed plan's column-type assumptions

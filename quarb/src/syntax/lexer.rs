@@ -786,6 +786,29 @@ fn binary(op: &str, glued: bool, next: Option<char>) -> Result<()> {
 }
 
 /// Tokenize `input` into the subset's token stream.
+/// The end of the block comment opening at `open` (`(!!`): the
+/// index past the `)` that balances it, every `(` inside counted,
+/// strings and all — the rule every rounded bracket follows. An
+/// opener no `)` balances is refused at its position.
+fn skip_comment(chars: &[char], open: usize) -> Result<usize> {
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < chars.len() {
+        match chars[i] {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(i + 1);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    Err(QuarbError::lex("unterminated comment ((!!…): no ')' balances its opener").at(open))
+}
+
 pub fn lex(input: &str) -> Result<Vec<Token>> {
     lex_spanned(input).map(|(tokens, _)| tokens)
 }
@@ -815,6 +838,15 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
         let c = chars[i];
         if c.is_whitespace() {
             i += 1;
+            spaced = true;
+            continue;
+        }
+        // `(!! … )` — the block comment (ruling 2026-11-06): whitespace
+        // to the parser, closed by the `)` that balances its opener
+        // (comments nest, commented-out code works), refused at the
+        // opener when no `)` balances it, as an unterminated string is.
+        if c == '(' && at(i + 1) == Some('!') && at(i + 2) == Some('!') {
+            i = skip_comment(&chars, i)?;
             spaced = true;
             continue;
         }
@@ -1437,6 +1469,21 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                     quoted: false,
                     glued: true,
                 });
+            }
+            // `:*` — the rest item of a projector (ruling 2026-11-05:
+            // the columns or fields the projector neither keeps nor
+            // renames elsewhere): the field token and the star as its
+            // name, the star standing alone.
+            ':' if at(i + 1) == Some('*')
+                && !at(i + 2).is_some_and(|c| is_name_char(c) || matches!(c, '"' | '\'' | '(')) =>
+            {
+                tokens.push(Token::Field);
+                tokens.push(Token::Name {
+                    text: "*".to_string(),
+                    quoted: false,
+                    glued: true,
+                });
+                i += 2;
             }
             // `:name` — a record's field, or on a node the core
             // property (`/a:name`, draft 157: the ladder counts
@@ -2801,6 +2848,48 @@ fn read_quoted(chars: &[char], start: usize, quote: char) -> Result<(String, usi
     Err(QuarbError::lex(format!(
         "unterminated quoted name ({quote}…)"
     )))
+}
+
+#[cfg(test)]
+mod comment_tests {
+    use super::*;
+
+    fn texts(src: &str) -> Vec<String> {
+        lex(src).unwrap().iter().map(|t| format!("{t:?}")).collect()
+    }
+
+    #[test]
+    fn a_comment_is_whitespace_wherever_it_stands() {
+        assert_eq!(texts("= 1 (!! one ) + 2"), texts("= 1 + 2"));
+        assert_eq!(texts("(!! leading )= 1 + 2"), texts("= 1 + 2"));
+        assert_eq!(texts("= 1 + 2(!! trailing )"), texts("= 1 + 2"));
+        assert_eq!(texts("/a(!! between )/b"), texts("/a /b"));
+    }
+
+    #[test]
+    fn comments_nest_and_hold_code() {
+        assert_eq!(
+            texts("= 1 (!! (!! inner ) and (a; (b)) ) + 2"),
+            texts("= 1 + 2")
+        );
+        assert_eq!(texts("= 1 (!! | map(> 0 ? 1 : 2) ) + 2"), texts("= 1 + 2"));
+    }
+
+    #[test]
+    fn an_unbalanced_comment_is_refused_at_its_opener() {
+        let e = lex("= 1 (!! open (x ) + 2").unwrap_err().to_string();
+        assert!(e.contains("unterminated comment"), "{e}");
+        assert!(e.contains("(at character 5)"), "{e}");
+        let e = lex("= 1 + (!!").unwrap_err().to_string();
+        assert!(e.contains("(at character 7)"), "{e}");
+    }
+
+    #[test]
+    fn a_double_negation_is_written_with_two_groups() {
+        // `(!!x)` opens a comment now; `(!(!x))` negates twice
+        assert_eq!(texts("= (!!x)"), texts("="));
+        assert!(lex("= (!(!x))").is_ok());
+    }
 }
 
 #[cfg(test)]

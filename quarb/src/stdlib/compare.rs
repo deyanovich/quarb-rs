@@ -122,21 +122,12 @@ pub(crate) fn compare(a: &Value, op: CmpOp, b: &Value, scale: UnitScale) -> bool
         {
             return op == CmpOp::Ne;
         }
-        // The set reading of `=` over a list (any item equal) is
-        // retired (spec: Retired Forms): a list equals a list,
-        // element by element, and membership is the containment
-        // comparison. Refused with the pointer, as every retired
-        // spelling is.
-        (Value::List(_), _) | (_, Value::List(_)) if matches!(op, CmpOp::Eq | CmpOp::Ne) => {
-            let spelled = if op == CmpOp::Eq { "=" } else { "!=" };
-            crate::value::ambient::record_refusal(format!(
-                "'{spelled}' between a list and a value is retired: membership is the \
-                 containment comparison, 'VALUE <<= LIST' (negated '!(VALUE <<= LIST)')"
-            ));
-            return false;
-        }
-        // The ordering, pattern and substring comparisons over a
-        // list operand read any item.
+        // In a predicate a comparison over a list operand holds when
+        // it holds for any item (ruling 2026-11-05: the list of
+        // booleans the comparison distributes to, read as ANY, the
+        // rule multi-valued projections have); `=` and `!=` beside a
+        // value distribute too, the idiomatic membership being the
+        // containment comparison `VALUE <<= LIST`.
         (Value::List(xs), _) => {
             return xs.iter().any(|x| compare(x, op, b, scale));
         }
@@ -171,6 +162,70 @@ pub(crate) fn compare(a: &Value, op: CmpOp, b: &Value, scale: UnitScale) -> bool
         },
         CmpOp::Within | CmpOp::Encloses => unreachable!("handled above"),
     }
+}
+
+/// A comparison in VALUE position (ruling 2026-11-05): between a list
+/// and a scalar it distributes, a list of booleans in the list's
+/// order, from either side (`@(22; 38) > 35` → `@(false; true)`,
+/// `35 < @(22; 38)` alike), a null element comparing false; between
+/// two lists the ordering comparisons zip by position, shapes
+/// agreeing, where `=` and `!=` stay whole-value equality (a list is
+/// a value); the regex `==` / `!==` distributes with the list on the
+/// left only, a list in the pattern slot refused. Two scalars are
+/// the boolean the predicate would answer.
+pub(crate) fn compare_value(
+    a: &Value,
+    op: CmpOp,
+    b: &Value,
+    scale: UnitScale,
+) -> Result<Value, String> {
+    let each = |x: &Value, y: &Value| -> Value {
+        match (x, y) {
+            (Value::Null, _) | (_, Value::Null) => Value::Bool(false),
+            _ => Value::Bool(compare(x, op, y, scale)),
+        }
+    };
+    // containment and the substring test take the list whole: the
+    // container, the text searched
+    if !matches!(
+        op,
+        CmpOp::Eq
+            | CmpOp::Ne
+            | CmpOp::Lt
+            | CmpOp::Le
+            | CmpOp::Gt
+            | CmpOp::Ge
+            | CmpOp::Match
+            | CmpOp::NotMatch
+    ) {
+        return Ok(Value::Bool(compare(a, op, b, scale)));
+    }
+    Ok(match (a, b) {
+        (Value::List(_), Value::List(_)) if matches!(op, CmpOp::Eq | CmpOp::Ne) => {
+            Value::Bool(compare(a, op, b, scale))
+        }
+        (Value::List(xs), Value::List(ys)) => {
+            if matches!(op, CmpOp::Match | CmpOp::NotMatch) {
+                return Err("the pattern slot of '==' takes one pattern, not a list".into());
+            }
+            if xs.len() != ys.len() {
+                return Err(format!(
+                    "the lists differ in length, {} against {}; a comparison zips them by position",
+                    xs.len(),
+                    ys.len()
+                ));
+            }
+            Value::list(xs.iter().zip(ys.iter()).map(|(x, y)| each(x, y)).collect())
+        }
+        (Value::List(xs), _) => Value::list(xs.iter().map(|x| each(x, b)).collect()),
+        (_, Value::List(ys)) => {
+            if matches!(op, CmpOp::Match | CmpOp::NotMatch) {
+                return Err("the pattern slot of '==' takes one pattern, not a list".into());
+            }
+            Value::list(ys.iter().map(|y| each(a, y)).collect())
+        }
+        _ => Value::Bool(compare(a, op, b, scale)),
+    })
 }
 
 /// `a <<= b`, a within b (spec: Containment), by the container's
@@ -365,9 +420,10 @@ pub(crate) fn value_eq(a: &Value, b: &Value, scale: UnitScale) -> bool {
             x.header == y.header
                 && x.index == y.index
                 && declared(x) == declared(y)
-                && x.rows.len() == y.rows.len()
-                && x.rows.iter().zip(y.rows.iter()).all(|(r, s)| {
-                    r.len() == s.len() && r.iter().zip(s.iter()).all(|(a, b)| value_eq(a, b, scale))
+                && x.n_rows() == y.n_rows()
+                && x.rows().zip(y.rows()).all(|(r, s)| {
+                    r.len() == s.len()
+                        && r.iter().zip(s.iter()).all(|(a, b)| value_eq(&a, &b, scale))
                 })
         }
         _ => false,

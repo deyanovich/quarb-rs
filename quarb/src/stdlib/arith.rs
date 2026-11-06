@@ -427,22 +427,22 @@ fn labeled_broadcast(
     };
     let mut keys: Vec<(Vec<Value>, usize)> = Vec::new();
     let mut seen = Vec::new();
-    let left: Vec<(Vec<Value>, usize, &Vec<Value>)> = t
-        .rows
-        .iter()
+    let left: Vec<(Vec<Value>, usize, Vec<Value>)> = t
+        .rows()
         .map(|r| {
-            let l = label(r);
+            let r = r.cells();
+            let l = label(&r);
             let n = occurrences(&mut seen, &l);
             keys.push((l.clone(), n));
             (l, n, r)
         })
         .collect();
     let mut seen = Vec::new();
-    let right: Vec<(Vec<Value>, usize, &Vec<Value>)> = u
-        .rows
-        .iter()
+    let right: Vec<(Vec<Value>, usize, Vec<Value>)> = u
+        .rows()
         .map(|r| {
-            let l = label(r);
+            let r = r.cells();
+            let l = label(&r);
             let n = occurrences(&mut seen, &l);
             if !keys.iter().any(|(x, m)| *x == l && *m == n) {
                 keys.push((l.clone(), n));
@@ -456,11 +456,11 @@ fn labeled_broadcast(
             let a = left
                 .iter()
                 .find(|(x, m, _)| x == l && m == n)
-                .map(|(_, _, r)| *r);
+                .map(|(_, _, r)| r);
             let b = right
                 .iter()
                 .find(|(x, m, _)| x == l && m == n)
-                .map(|(_, _, r)| *r);
+                .map(|(_, _, r)| r);
             let mut row = l.clone();
             for j in k..w {
                 row.push(match (a, b) {
@@ -494,7 +494,7 @@ pub(crate) fn broadcast(
         }
         // Two tables: the same header and dimensions, cell by cell.
         (Value::Table(t), Value::Table(u)) => {
-            if t.header != u.header || t.rows.len() != u.rows.len() || t.width() != u.width() {
+            if t.header != u.header || t.n_rows() != u.n_rows() || t.width() != u.width() {
                 return Err(format!(
                     "{sym}: the tables differ in shape, {} and {}{}",
                     t.kind()
@@ -511,13 +511,12 @@ pub(crate) fn broadcast(
                 ));
             }
             let rows = t
-                .rows
-                .iter()
-                .zip(u.rows.iter())
+                .rows()
+                .zip(u.rows())
                 .map(|(a, b)| {
                     a.iter()
                         .zip(b.iter())
-                        .map(|(x, y)| broadcast(op, x, y, scale))
+                        .map(|(x, y)| broadcast(op, &x, &y, scale))
                         .collect::<Result<Vec<_>, _>>()
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -556,18 +555,17 @@ pub(crate) fn broadcast(
                 }
             }
             let rows = t
-                .rows
-                .iter()
+                .rows()
                 .map(|r| {
                     r.iter()
                         .zip(v.iter())
                         .map(|(cell, coord)| {
                             if matches!(coord, Value::Null) || matches!(cell, Value::Null) {
-                                Ok(cell.clone())
+                                Ok(cell)
                             } else if list_left {
-                                broadcast(op, coord, cell, scale)
+                                broadcast(op, coord, &cell, scale)
                             } else {
-                                broadcast(op, cell, coord, scale)
+                                broadcast(op, &cell, coord, scale)
                             }
                         })
                         .collect::<Result<Vec<_>, _>>()
@@ -583,17 +581,16 @@ pub(crate) fn broadcast(
         (Value::Table(t), s) | (s, Value::Table(t)) => {
             let scalar_left = !matches!(left, Value::Table(_));
             let rows = t
-                .rows
-                .iter()
+                .rows()
                 .map(|r| {
                     r.iter()
                         .map(|cell| {
-                            if !admits(cell) {
+                            if !admits(&cell) {
                                 cell.clone()
                             } else if scalar_left {
-                                arith(op, s, cell, scale)
+                                arith(op, s, &cell, scale)
                             } else {
-                                arith(op, cell, s, scale)
+                                arith(op, &cell, s, scale)
                             }
                         })
                         .collect()
@@ -766,12 +763,14 @@ fn matrix(v: &Value) -> Option<&crate::Table> {
     match v {
         Value::Table(t)
             if t.header.is_none()
-                && !t.rows.is_empty()
+                && t.n_rows() != 0
                 && t.width() > 0
                 && t.types().iter().all(|c| {
                     matches!(c, crate::ColumnType::Integer | crate::ColumnType::Float)
                 })
-                && t.rows.iter().flatten().all(|c| !matches!(c, Value::Null)) =>
+                && t.rows()
+                    .flat_map(|r| r.iter())
+                    .all(|c| !matches!(c, Value::Null)) =>
         {
             Some(t)
         }
@@ -798,15 +797,13 @@ fn dot(a: impl Iterator<Item = Value>, b: impl Iterator<Item = Value>, scale: Un
 /// length their dot product; the inner dimensions must agree, and
 /// anything else is refused by kind.
 fn matmul(left: &Value, right: &Value, scale: UnitScale) -> Result<Value, String> {
-    let column = |t: &crate::Table, j: usize| -> Vec<Value> {
-        t.rows.iter().map(|r| r[j].clone()).collect()
-    };
+    let column = |t: &crate::Table, j: usize| -> Vec<Value> { t.column_cells(j) };
     match (matrix(left), vector(left), matrix(right), vector(right)) {
         (Some(m), _, _, Some(v)) => {
             if m.width() != v.len() {
                 return Err(format!(
                     "x: a matrix of {}×{} against a vector of {}: the inner dimensions differ ({} and {})",
-                    m.rows.len(),
+                    m.n_rows(),
                     m.width(),
                     v.len(),
                     m.width(),
@@ -814,21 +811,20 @@ fn matmul(left: &Value, right: &Value, scale: UnitScale) -> Result<Value, String
                 ));
             }
             Ok(Value::list(
-                m.rows
-                    .iter()
-                    .map(|r| dot(r.iter().cloned(), v.iter().cloned(), scale))
+                m.rows()
+                    .map(|r| dot(r.iter(), v.iter().cloned(), scale))
                     .collect(),
             ))
         }
         (_, Some(v), Some(m), _) => {
-            if v.len() != m.rows.len() {
+            if v.len() != m.n_rows() {
                 return Err(format!(
                     "x: a vector of {} against a matrix of {}×{}: the inner dimensions differ ({} and {})",
                     v.len(),
-                    m.rows.len(),
+                    m.n_rows(),
                     m.width(),
                     v.len(),
-                    m.rows.len()
+                    m.n_rows()
                 ));
             }
             Ok(Value::list(
@@ -838,23 +834,22 @@ fn matmul(left: &Value, right: &Value, scale: UnitScale) -> Result<Value, String
             ))
         }
         (Some(m), _, Some(n), _) => {
-            if m.width() != n.rows.len() {
+            if m.width() != n.n_rows() {
                 return Err(format!(
                     "x: matrices of {}×{} and {}×{}: the inner dimensions differ ({} and {})",
-                    m.rows.len(),
+                    m.n_rows(),
                     m.width(),
-                    n.rows.len(),
+                    n.n_rows(),
                     n.width(),
                     m.width(),
-                    n.rows.len()
+                    n.n_rows()
                 ));
             }
             let rows = m
-                .rows
-                .iter()
+                .rows()
                 .map(|r| {
                     (0..n.width())
-                        .map(|j| dot(r.iter().cloned(), column(n, j).into_iter(), scale))
+                        .map(|j| dot(r.iter(), column(n, j).into_iter(), scale))
                         .collect()
                 })
                 .collect();

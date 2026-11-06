@@ -272,8 +272,12 @@ pub fn registry_tsv() -> String {
             (true, Some(Agg::Context)) if spec.name == "shift" => "context",
             (true, Some(Agg::Context)) => "rendering",
             (false, Some(Agg::Reducing)) => "reducing",
+            // `collapse` and the positional selections by key are the
+            // inventory's thread commands (threads in, threads out),
+            // its kind word for the family (lang c1e56732)
+            (false, Some(Agg::Context)) if spec.name == "collapse" => "thread",
             (false, Some(Agg::Context)) => "context",
-            (_, Some(Agg::Keyed)) => "keyed",
+            (_, Some(Agg::Keyed)) => "thread",
             (_, Some(Agg::Association { .. })) => "assoc",
             (false, None) => "none",
         };

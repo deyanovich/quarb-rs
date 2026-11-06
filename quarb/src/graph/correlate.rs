@@ -118,6 +118,55 @@ fn counted(query: &Query, adapter: &impl AstAdapter, start: NodeId) -> Option<us
     adapter.count(adapter.child_host(from), &plan)
 }
 
+/// Clears the prefix hint when the query that set it returns.
+struct PrefixClear(bool);
+
+impl Drop for PrefixClear {
+    fn drop(&mut self) {
+        if self.0 {
+            crate::pipeline::with_run(|s| {
+                s.prefix_limit = None;
+                s.limit_armed = false;
+            });
+        }
+    }
+}
+
+/// The prefix a query keeps right after its one branch's last step
+/// (ruling 2026-11-05): `@| [n]`, `@| [..n]`, `@| [1..n]`, `@| first`,
+/// `@| first(n)` as the pipeline's first command, over a branch of
+/// plain steps whose last carries no test of its own (a predicate, a
+/// trait, a label, the leaf mark would thin what the adapter cut).
+fn prefix_limit(query: &Query) -> Option<usize> {
+    if !query.correlations.is_empty() || query.branches.len() != 1 {
+        return None;
+    }
+    let b = &query.branches[0];
+    let last = match b.steps.last()? {
+        PathElem::Step(s) => s,
+        _ => return None,
+    };
+    if !last.predicates.is_empty()
+        || !last.traits.is_empty()
+        || !last.labels.is_empty()
+        || last.leaf
+        || !b.steps.iter().all(|e| matches!(e, PathElem::Step(_)))
+    {
+        return None;
+    }
+    let n = match query.pipeline.first()? {
+        Command::Select(Predicate::Index(n)) => *n,
+        Command::Select(Predicate::Range(a, Some(e))) if a.is_none_or(|a| a >= 1) => *e,
+        Command::Agg(call) if call.name == "first" => match call.args.first() {
+            None => 1,
+            Some(crate::syntax::ast::Arg::Lit(Value::Int(n))) => *n,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    (n >= 1).then_some(n as usize)
+}
+
 /// `@| count` over a plain path, counted as the walk goes: a query
 /// that is one anchored branch of child and descendant steps (any
 /// name, traits and per-node predicates; no positional predicate,
@@ -135,6 +184,161 @@ fn streamed_count(
     trace: &Trace,
     outer: Option<&Scope<'_, GraphExt>>,
 ) -> Option<(usize, Origins)> {
+    let [Command::Agg(call)] = query.pipeline.as_slice() else {
+        return None;
+    };
+    if call.name != "count" || !call.args.is_empty() {
+        return None;
+    }
+    let projected = query
+        .branches
+        .first()
+        .is_some_and(|b| b.projection.is_some());
+    let command = command_now();
+    let mut count = 0usize;
+    let mut origins = Origins::default();
+    streamed_nodes(query, adapter, start, trace, outer, &mut |n| {
+        count += 1;
+        if projected {
+            origins.insert(Origin {
+                position: n.into(),
+                command,
+            });
+        }
+    })?;
+    Some((count, origins))
+}
+
+/// `@| #` over a plain path (ruling 2026-11-06, the columnar round):
+/// the table built as the walk goes — each node the last step keeps
+/// read as `@| #` reads a node, the record of its properties, its
+/// fields laid under the header in order of first appearance, a
+/// field a row lacks null — no thread and no record held per row;
+/// the rest of the pipeline then runs over the one table. The
+/// provenance is the union of the nodes' origins, bounded as every
+/// origins set is; the trace shows no threads, as for the counted
+/// walk. `None` where the query is not that shape, or a node reads
+/// as no record (a sample's scalars take the thread path).
+fn streamed_table(
+    query: &Query,
+    adapter: &impl AstAdapter,
+    start: NodeId,
+    trace: &Trace,
+    outer: Option<&Scope<'_, GraphExt>>,
+) -> Option<(Value, Origins)> {
+    if query
+        .branches
+        .first()
+        .is_some_and(|b| b.projection.is_some())
+    {
+        return None;
+    }
+    // the bare `@| #` alone: `@| #(::a; ::b)` right after a path is a
+    // one-row table literal in the aggregate scope, not a per-node
+    // projector (the per-row form is `@| # | #(:a; :b)`, over the
+    // streamed table)
+    let call = match query.pipeline.first()? {
+        // options alone (`-i=:col`, `--name=…`) are applied to the
+        // built table as the table command applies them
+        // an option holding an expression (`-c=$.cols`) reads it in a
+        // capsa's scope, which is the thread path's
+        Command::Agg(call)
+            if call.name == "#"
+                && call.args.iter().all(|a| {
+                    matches!(
+                        a,
+                        crate::syntax::ast::Arg::Opt { value: None, .. }
+                            | crate::syntax::ast::Arg::Opt {
+                                value: Some(Operand::Lit(_)),
+                                ..
+                            }
+                    )
+                }) =>
+        {
+            call
+        }
+        _ => return None,
+    };
+    let command = command_now();
+    let mut origins = Origins::default();
+    let mut scalar = false;
+    // the store: a record per node pushed as it is read, no row held
+    // in row form at any point, the typing pass once at the end
+    // a source whose rows are of one shape hands each row's cells as
+    // text, parsed into the typed columns as they arrive (the
+    // one-pass typed build); any other node is read as its record
+    let mut shape: Option<Option<Vec<String>>> = None;
+    let mut builder = crate::TableBuilder::new();
+    streamed_nodes(query, adapter, start, trace, outer, &mut |n| {
+        if scalar {
+            return;
+        }
+        // the first node kept says whether its source hands rows of
+        // one shape: the builder takes that shape before any row
+        if shape.is_none() {
+            let cols = adapter.row_columns(n);
+            if let Some(cols) = &cols {
+                builder = crate::TableBuilder::shaped(Some(cols.clone()), Vec::new());
+            }
+            shape = Some(cols);
+        }
+        if matches!(shape, Some(Some(_)))
+            && adapter.row_text(n, &mut |cells| builder.push_text_row(cells))
+        {
+            origins.insert(Origin {
+                position: n.into(),
+                command,
+            });
+            return;
+        }
+        match crate::graph::serialize::node_to_json(adapter, n) {
+            // a cell that is no scalar (a nested record, a list) is
+            // the thread path's refusal, naming the field and the
+            // row: that path takes over
+            Value::Record(fields) if !fields.iter().all(|(_, v)| crate::stdlib::flat_cell(v)) => {
+                scalar = true
+            }
+            Value::Record(fields) => {
+                builder.push_record(fields.into_iter());
+                origins.insert(Origin {
+                    position: n.into(),
+                    command,
+                });
+            }
+            _ => scalar = true,
+        }
+    })?;
+    if scalar {
+        return None;
+    }
+    let table = Value::table(
+        builder
+            .finish()
+            .unwrap_or_else(|_| unreachable!("no column is declared")),
+    );
+    if call.args.is_empty() {
+        return Some((table, origins));
+    }
+    // a refused option (an index column the table lacks) takes the
+    // thread path, which refuses the same way
+    let table = crate::stdlib::table_command(call, table).ok()?;
+    Some((table, origins))
+}
+
+/// The nodes a plain path's last step keeps, visited as the walk
+/// goes — the engine behind the counted walk and the streamed table:
+/// one anchored branch of child and descendant steps (any name,
+/// traits and per-node predicates; no positional predicate, no
+/// mark), no correlation, at the top level. `None` where the query is
+/// not that shape, before any node is visited.
+fn streamed_nodes(
+    query: &Query,
+    adapter: &impl AstAdapter,
+    start: NodeId,
+    trace: &Trace,
+    outer: Option<&Scope<'_, GraphExt>>,
+    visit: &mut dyn FnMut(NodeId),
+) -> Option<()> {
     // A nested query (a record's field, a predicate's operand)
     // evaluates under the invoking capsa's register, marks and
     // witness; only a top-level count streams.
@@ -144,12 +348,6 @@ fn streamed_count(
     if !query.correlations.is_empty() || query.branches.len() != 1 {
         return None;
     }
-    let [Command::Agg(call)] = query.pipeline.as_slice() else {
-        return None;
-    };
-    if call.name != "count" || !call.args.is_empty() {
-        return None;
-    }
     let b = &query.branches[0];
     // A projected path (`//token<word>::lower @| count`) counts its
     // nodes too — `count` is the number of inputs, a null value
@@ -157,7 +355,6 @@ fn streamed_count(
     // changes is the provenance: a computed reduction over values
     // keeps the union of their origins, so the counted nodes are
     // recorded (bounded, as every origins set is).
-    let projected = b.projection.is_some();
     let from = match b.anchor {
         Anchor::Current => start,
         Anchor::Root => adapter.root(),
@@ -262,17 +459,14 @@ fn streamed_count(
         next.retain(|n| seen.insert(*n));
         frontier = next;
         if frontier.is_empty() {
-            return Some((0, Origins::default()));
+            return Some(());
         }
     }
-    // The last step, counted one node at a time.
-    let mut count = 0usize;
-    let mut origins = Origins::default();
-    let command = command_now();
+    // The last step, visited one node at a time.
     let mut seen: Option<std::collections::HashSet<NodeId>> = (frontier.len() > 1
         && !matches!(last.axis, Axis::Child))
     .then(std::collections::HashSet::new);
-    let mut tally = |n: NodeId, step: &Step, count: &mut usize, origins: &mut Origins| {
+    let mut tally = |n: NodeId, step: &Step| {
         if let Some(seen) = seen.as_mut()
             && !seen.insert(n)
         {
@@ -295,12 +489,8 @@ fn streamed_count(
             )
             .len()
         };
-        *count += kept;
-        if projected && kept > 0 {
-            origins.insert(Origin {
-                position: (n).into(),
-                command: command,
-            });
+        if kept > 0 {
+            visit(n);
         }
     };
     for &at in &frontier {
@@ -309,7 +499,7 @@ fn streamed_count(
                 let host = adapter.child_host(at);
                 for c in adapter.children(host) {
                     if matches_step(adapter, c, last) {
-                        tally(c, last, &mut count, &mut origins);
+                        tally(c, last);
                     }
                 }
             }
@@ -356,7 +546,7 @@ fn streamed_count(
                     Some(hits) => {
                         for (n, _) in hits {
                             if tests_ok(adapter, n, step) {
-                                tally(n, step, &mut count, &mut origins);
+                                tally(n, step);
                             }
                         }
                     }
@@ -366,7 +556,7 @@ fn streamed_count(
                         stack.reverse();
                         while let Some(c) = stack.pop() {
                             if matches_step(adapter, c, step) {
-                                tally(c, step, &mut count, &mut origins);
+                                tally(c, step);
                             }
                             if !sought.may_hold_below(adapter, c) {
                                 continue;
@@ -379,7 +569,7 @@ fn streamed_count(
             }
         }
     }
-    Some((count, origins))
+    Some(())
 }
 
 pub(crate) fn eval_query_caps(
@@ -419,6 +609,44 @@ pub(crate) fn eval_query_caps_outer(
         }
         return (vec![c], true);
     }
+    // `@| #` over a plain path: the table built as the walk goes, the
+    // rest of the pipeline over it (ruling 2026-11-06).
+    if outer.is_none()
+        && base.contexts.is_empty()
+        && let Some((table, origins)) = streamed_table(query, adapter, start, base, outer)
+    {
+        let mut c = Capsa::bare(GraphExt::at(adapter.root()), Some(table));
+        if !origins.is_empty() {
+            c.prov = Prov::leaf(origins);
+        }
+        let mode = crate::syntax::parser::command_mode_out(
+            &query.pipeline[0],
+            crate::syntax::parser::PipeMode::Nav,
+        );
+        let caps = apply_commands(
+            &query.pipeline[1..],
+            mode,
+            1,
+            true,
+            vec![c],
+            adapter,
+            base,
+            outer,
+        );
+        return (caps, pipeline_projected(query));
+    }
+    // The prefix the pipeline keeps right after the branch's last
+    // step, for the adapters that list lazily (ruling 2026-11-05);
+    // a nested query never touches the hint of the query it serves
+    let prefix = if outer.is_none() && base.contexts.is_empty() {
+        prefix_limit(query)
+    } else {
+        None
+    };
+    if prefix.is_some() {
+        crate::pipeline::with_run(|s| s.prefix_limit = prefix);
+    }
+    let _clear = PrefixClear(prefix.is_some());
     let first_new = base.contexts.len();
     let mut contexts = base.contexts.clone();
     let mut outers = base.outer.clone();

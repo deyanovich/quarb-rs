@@ -30,7 +30,18 @@ pub fn unparse(query: &Query) -> String {
         && query.correlations.is_empty()
         && let Some((Command::Expr(head), rest)) = query.pipeline.split_first()
     {
-        let mut out = format!("= {}", operand(head));
+        // the stage projector on the topic prints bare after a pipe
+        // (`| %(:a; :b)`); lifted to the head it needs its base, or
+        // it reads back as the record constructor
+        let printed = operand(head);
+        let printed = if printed.starts_with("%(")
+            && matches!(head, Operand::Projected { base, .. } if matches!(**base, Operand::Topic))
+        {
+            format!("$_:{printed}")
+        } else {
+            printed
+        };
+        let mut out = format!("= {printed}");
         for command_ast in rest {
             out.push(' ');
             out.push_str(&command(command_ast));
@@ -893,7 +904,12 @@ pub(crate) fn operand(o: &Operand) -> String {
                     }
                     other => format!("{b}:({})", operand(other)),
                 },
-                crate::syntax::ast::ProjShape::Columns { items, index } => format!(
+                crate::syntax::ast::ProjShape::Columns {
+                    items,
+                    index,
+                    autoindex,
+                    casts,
+                } => format!(
                     "{b}:#({})",
                     items
                         .iter()
@@ -902,6 +918,8 @@ pub(crate) fn operand(o: &Operand) -> String {
                             None => operand(o),
                         })
                         .chain(index.iter().map(|i| format!("--index={}", operand(i))))
+                        .chain(autoindex.then(|| "-a".to_string()))
+                        .chain(casts.iter().map(|c| format!("--cast={}", operand(c))))
                         .collect::<Vec<_>>()
                         .join("; ")
                 ),
@@ -922,8 +940,8 @@ pub(crate) fn operand(o: &Operand) -> String {
         // The seed never stands alone in parsed text; a headless
         // body pipeline prints without it (see `body_text`).
         Operand::Seed => "$_".to_string(),
-        Operand::Field { base, name } => match **base {
-            Operand::Topic => format!(":{name}"),
+        Operand::Field { base, name, bare } => match **base {
+            Operand::Topic if *bare => format!(":{name}"),
             _ => format!("{}:{name}", operand(base)),
         },
         Operand::LabelIndex { base, labels } => format!(
@@ -996,10 +1014,22 @@ pub(crate) fn operand(o: &Operand) -> String {
             }
             format!("@%({})", parts.join("; "))
         }
-        Operand::Table { header, rows } => {
+        Operand::Table {
+            header,
+            declared,
+            rows,
+        } => {
             let mut parts: Vec<String> = Vec::new();
             if let Some(h) = header {
-                parts.push(format!("@({})", h.join("; ")));
+                let names: Vec<String> = h
+                    .iter()
+                    .enumerate()
+                    .map(|(j, n)| match declared.get(j) {
+                        Some(Some(t)) => format!("{n}<{}>", t.word()),
+                        _ => n.clone(),
+                    })
+                    .collect();
+                parts.push(format!("@({})", names.join("; ")));
             }
             for row in rows {
                 parts.push(match row {

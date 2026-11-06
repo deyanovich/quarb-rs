@@ -744,7 +744,7 @@ impl QueryArbor {
             // base first and the shape's operands after it
             Operand::Projected { base, shape } => {
                 let (kind, items): (&str, Vec<&Operand>) = match shape {
-                    crate::syntax::ast::ProjShape::Columns { items, index } => (
+                    crate::syntax::ast::ProjShape::Columns { items, index, .. } => (
                         "table",
                         items
                             .iter()
@@ -824,7 +824,7 @@ impl QueryArbor {
             Operand::Seed => {
                 self.intern(Some("seed"), Vec::new(), Some(parent));
             }
-            Operand::Field { base, name } => {
+            Operand::Field { base, name, .. } => {
                 let id = self.intern(
                     Some("field"),
                     vec![("name".to_string(), Value::Str(name.clone()))],
@@ -847,7 +847,7 @@ impl QueryArbor {
             // has no key.
             Operand::Typed { inner, typing } => {
                 let (kind, key): (&str, Option<String>) = match inner.as_ref() {
-                    Operand::Field { base, name } if matches!(**base, Operand::Topic) => {
+                    Operand::Field { base, name, .. } if matches!(**base, Operand::Topic) => {
                         ("core", Some(name.clone()))
                     }
                     Operand::Rel {

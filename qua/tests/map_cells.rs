@@ -115,10 +115,12 @@ fn to_restricts_the_mapping() {
         one("= %(a = null; b = 2; c = null) | map(?? 0; --to=[1])"),
         "%(a = 0; b = 2; c = null)"
     );
-    let e = run(&format!("{T} | map(?? 0; --to=:zz)"))
-        .unwrap_err()
-        .to_string();
-    assert!(e.contains("no column 'zz'"), "{e}");
+    // a column the table lacks is appended last, the body filling it
+    // from null (ruling 2026-11-05: `--to=:new`)
+    assert_eq!(
+        one(&format!("{T} | map(?? 0; --to=:zz) | $_:zz")),
+        "@(0; 0; 0)"
+    );
 }
 
 #[test]

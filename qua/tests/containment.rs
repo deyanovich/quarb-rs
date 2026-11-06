@@ -93,16 +93,13 @@ fn a_period_reads_as_its_first_instant() {
 }
 
 #[test]
-fn the_set_reading_of_equality_over_a_list_is_retired() {
-    let err = run(r#"/rows/*[::tags = "a"]::id"#).unwrap_err().to_string();
-    assert!(
-        err.contains("retired") && err.contains("VALUE <<= LIST"),
-        "{err}"
-    );
-    let err = run(r#"/rows/*[::tags != "a"]::id"#)
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("retired"), "{err}");
+fn equality_beside_a_list_distributes_and_a_predicate_reads_any() {
+    // ruling 2026-11-05: `=` beside a list distributes, and a predicate
+    // reads the booleans as any — the membership `"a" <<= ::tags`
+    // spelled the other way (the containment stays the idiom)
+    assert_eq!(ids(r#"::tags = "a""#), ids(r#""a" <<= ::tags"#));
+    assert!(run(r#"/rows/*[::tags != "a"]::id"#).is_ok());
+    assert_eq!(one(r#"= (@("a"; "b") = "a")"#), "@(true; false)");
     // a list equals a list, element by element
     assert_eq!(ids(r#"::tags = @("a"; "b")"#), "1");
     assert_eq!(ids("::tags = @()"), "3");

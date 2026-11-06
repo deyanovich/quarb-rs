@@ -187,6 +187,11 @@ impl XmlAdapter {
     /// A locator path to `node`, like `/library/book[2]/author`, for
     /// rendering. A `[n]` index is added only to disambiguate
     /// same-tag siblings.
+    /// The element carrying `id` / `xml:id` = `id`, if any.
+    pub fn node_by_id(&self, id: &str) -> Option<NodeId> {
+        self.ids.get(id).copied()
+    }
+
     pub fn locator(&self, node: NodeId) -> String {
         let mut segments = Vec::new();
         let mut cur = Some(node);
@@ -394,6 +399,493 @@ impl AstAdapter for XmlAdapter {
     }
 }
 
+/// An XML document with one repeated child streamed (hash (d) of the
+/// columnar round, 2026-11-06): the document element's children —
+/// `<page>` under `<mediawiki>`, `<entry>` under `<dictionary>` — as
+/// byte spans found by one pass of the reader, each parsed into its
+/// own arbor when a step reaches it, wrapped in the document
+/// element's own start tag so its prefixes resolve as in the whole
+/// parse; the document element itself, its attributes and the
+/// prologue parsed whole as the PREFIX document with the children
+/// left out. The node ids pack the child's index above its arbor's
+/// node; the prefix's nodes keep their own ids below.
+pub struct XmlStream {
+    size: u64,
+    /// The prologue and the document element, childless.
+    prefix: XmlAdapter,
+    /// The document element in the prefix: the children's parent.
+    anchor: NodeId,
+    /// The document element's start and end tags, as written.
+    root_start: String,
+    root_end: String,
+    /// The children's spans and their tags (interned).
+    offsets: Vec<(u64, u32)>,
+    tags: Vec<u32>,
+    tag_names: Vec<String>,
+    /// The whitespace text of the document element between its
+    /// children, one piece before each child and one after the last.
+    gaps: Vec<String>,
+    /// `id` / `xml:id` values anywhere in the children → the child.
+    ids: HashMap<String, u32>,
+    last: std::cell::RefCell<Option<(u32, XmlAdapter)>>,
+    reader: std::cell::RefCell<(std::io::BufReader<std::fs::File>, u32)>,
+}
+
+const CHILD_SHIFT: u32 = 32;
+
+impl XmlStream {
+    /// The file scanned for its document element's children; `None`
+    /// where the document is not of that shape (text beside the
+    /// children, no children, or children under half the file),
+    /// where the whole read is the right one.
+    pub fn open(path: &std::path::Path) -> Result<Option<Self>, XmlError> {
+        use std::io::Seek;
+        let bytes =
+            std::fs::read(path).map_err(|e| quick_xml::Error::Io(std::sync::Arc::new(e)))?;
+        let size = bytes.len() as u64;
+        let mut reader = Reader::from_reader(std::io::Cursor::new(&bytes));
+        let decoder = reader.decoder();
+        let mut buf = Vec::new();
+        let mut depth = 0usize;
+        let mut root_span: Option<(usize, usize)> = None; // the start tag's bytes
+        let mut root_end_span: Option<(usize, usize)> = None;
+        let mut root_tag: Option<String> = None;
+        let mut offsets: Vec<(u64, u32)> = Vec::new();
+        let mut tags: Vec<u32> = Vec::new();
+        let mut tag_names: Vec<String> = Vec::new();
+        let mut tag_index: HashMap<String, u32> = HashMap::new();
+        let mut gaps: Vec<String> = vec![String::new()];
+        let mut ids: HashMap<String, u32> = HashMap::new();
+        let mut child_start: usize = 0;
+        let mut intern_tag = |name: &str| -> u32 {
+            if let Some(&k) = tag_index.get(name) {
+                return k;
+            }
+            let k = tag_names.len() as u32;
+            tag_names.push(name.to_string());
+            tag_index.insert(name.to_string(), k);
+            k
+        };
+        loop {
+            let before = reader.buffer_position() as usize;
+            let event = reader.read_event_into(&mut buf)?;
+            let after = reader.buffer_position() as usize;
+            match event {
+                // the document element: its start tag kept; childless
+                // (`<root/>`) it has nothing to stream
+                Event::Empty(_) if depth == 0 => return Ok(None),
+                Event::Start(e) if depth == 0 => {
+                    root_tag = Some(
+                        decoder
+                            .decode(e.name().as_ref())
+                            .map_err(quick_xml::Error::from)?
+                            .into_owned(),
+                    );
+                    root_span = Some((before, after));
+                    depth = 1;
+                }
+                // a child of the document element: its span opened, or
+                // whole when empty
+                Event::Start(e) | Event::Empty(e) if depth == 1 => {
+                    let empty = bytes[before..after].ends_with(b"/>");
+                    child_start = before;
+                    let name = decoder
+                        .decode(e.name().as_ref())
+                        .map_err(quick_xml::Error::from)?
+                        .into_owned();
+                    let k = intern_tag(&name);
+                    let i = offsets.len() as u32;
+                    for attr in e.attributes() {
+                        let attr = attr.map_err(quick_xml::Error::from)?;
+                        let key = decoder
+                            .decode(attr.key.as_ref())
+                            .map_err(quick_xml::Error::from)?;
+                        if key == "id" || key == "xml:id" {
+                            let v = attr.decode_and_unescape_value(decoder)?.into_owned();
+                            ids.entry(v).or_insert(i);
+                        }
+                    }
+                    tags.push(k);
+                    if empty {
+                        offsets.push((before as u64, (after - before) as u32));
+                        gaps.push(String::new());
+                    } else {
+                        depth = 2;
+                        offsets.push((before as u64, 0));
+                    }
+                }
+                Event::Start(e) => {
+                    for attr in e.attributes() {
+                        let attr = attr.map_err(quick_xml::Error::from)?;
+                        let key = decoder
+                            .decode(attr.key.as_ref())
+                            .map_err(quick_xml::Error::from)?;
+                        if key == "id" || key == "xml:id" {
+                            let v = attr.decode_and_unescape_value(decoder)?.into_owned();
+                            ids.entry(v).or_insert(offsets.len() as u32 - 1);
+                        }
+                    }
+                    depth += 1;
+                }
+                Event::Empty(e) => {
+                    for attr in e.attributes() {
+                        let attr = attr.map_err(quick_xml::Error::from)?;
+                        let key = decoder
+                            .decode(attr.key.as_ref())
+                            .map_err(quick_xml::Error::from)?;
+                        if key == "id" || key == "xml:id" {
+                            let v = attr.decode_and_unescape_value(decoder)?.into_owned();
+                            ids.entry(v).or_insert(offsets.len() as u32 - 1);
+                        }
+                    }
+                }
+                Event::End(_) => {
+                    if depth == 2 {
+                        let last = offsets.last_mut().expect("an open child");
+                        last.1 = (after - child_start) as u32;
+                        gaps.push(String::new());
+                        depth = 1;
+                    } else if depth == 1 {
+                        root_end_span = Some((before, after));
+                        depth = 0;
+                    } else {
+                        depth -= 1;
+                    }
+                }
+                Event::Text(e) if depth == 1 => {
+                    let text = e.xml_content().map_err(quick_xml::Error::from)?;
+                    if !text.trim().is_empty() {
+                        // text beside the children: the document is no stream
+                        return Ok(None);
+                    }
+                    gaps.last_mut().expect("a gap").push_str(&text);
+                }
+                Event::CData(_) | Event::GeneralRef(_) if depth == 1 => return Ok(None),
+                Event::Eof => break,
+                _ => {}
+            }
+            buf.clear();
+        }
+        let (Some((rs, re)), Some((es, ee)), Some(_)) = (root_span, root_end_span, root_tag) else {
+            return Ok(None);
+        };
+        if offsets.len() < 2 {
+            return Ok(None);
+        }
+        let covered: u64 = offsets.iter().map(|&(_, l)| l as u64).sum();
+        if covered * 2 < size {
+            return Ok(None);
+        }
+        let root_start = String::from_utf8_lossy(&bytes[rs..re]).into_owned();
+        let root_end = String::from_utf8_lossy(&bytes[es..ee]).into_owned();
+        // the prefix: the prologue, the document element, childless
+        let mut prefix_text = String::from_utf8_lossy(&bytes[..rs]).into_owned();
+        prefix_text.push_str(&root_start);
+        if !root_start.ends_with("/>") {
+            prefix_text.push_str(&root_end);
+        }
+        let prefix = XmlAdapter::parse(&prefix_text)?;
+        let anchor = *prefix
+            .children(prefix.root())
+            .first()
+            .ok_or(XmlError::NoRoot)?;
+        let mut file = std::io::BufReader::with_capacity(
+            1 << 16,
+            std::fs::File::open(path).map_err(|e| quick_xml::Error::Io(std::sync::Arc::new(e)))?,
+        );
+        file.seek(std::io::SeekFrom::Start(0))
+            .map_err(|e| quick_xml::Error::Io(std::sync::Arc::new(e)))?;
+        Ok(Some(XmlStream {
+            size,
+            prefix,
+            anchor,
+            root_start,
+            root_end,
+            offsets,
+            tags,
+            tag_names,
+            gaps,
+            ids,
+            last: std::cell::RefCell::new(None),
+            reader: std::cell::RefCell::new((file, u32::MAX)),
+        }))
+    }
+
+    pub fn n_children(&self) -> usize {
+        self.offsets.len()
+    }
+
+    fn pack(i: u32, local: NodeId) -> NodeId {
+        NodeId(((i as u64 + 1) << CHILD_SHIFT) | local.0)
+    }
+
+    fn unpack(node: NodeId) -> Option<(u32, NodeId)> {
+        let i = (node.0 >> CHILD_SHIFT) as u32;
+        (i > 0).then(|| (i - 1, NodeId(node.0 & ((1u64 << CHILD_SHIFT) - 1))))
+    }
+
+    /// The child's own node in its arbor: the document element's
+    /// first child there.
+    const LOCAL_ROOT: NodeId = NodeId(2);
+
+    /// Child `i` parsed (or the one last parsed) in the document
+    /// element's wrapping, and `f` on its arbor.
+    fn with_child<T>(&self, i: u32, f: impl FnOnce(&XmlAdapter) -> T) -> Option<T> {
+        {
+            let last = self.last.borrow();
+            if let Some((k, a)) = &*last
+                && *k == i
+            {
+                return Some(f(a));
+            }
+        }
+        use std::io::{Read, Seek};
+        let &(offset, len) = self.offsets.get(i as usize)?;
+        let text = {
+            let mut r = self.reader.borrow_mut();
+            if r.1 != i {
+                r.0.seek(std::io::SeekFrom::Start(offset)).ok()?;
+            } else {
+                let here = r.0.stream_position().ok()?;
+                if here != offset {
+                    r.0.seek(std::io::SeekFrom::Start(offset)).ok()?;
+                }
+            }
+            let mut buf = vec![0u8; len as usize];
+            r.0.read_exact(&mut buf).ok()?;
+            r.1 = i + 1;
+            if let Some(&(next, _)) = self.offsets.get(i as usize + 1) {
+                let gap = next - (offset + len as u64);
+                if gap > 0 && gap < 1 << 16 {
+                    let mut skip = vec![0u8; gap as usize];
+                    r.0.read_exact(&mut skip).ok()?;
+                }
+            }
+            String::from_utf8(buf).ok()?
+        };
+        let wrapped = format!("{}{}{}", self.root_start, text, self.root_end);
+        let a = XmlAdapter::parse(&wrapped).ok()?;
+        let out = f(&a);
+        *self.last.borrow_mut() = Some((i, a));
+        Some(out)
+    }
+
+    /// The children as the plan reaches them: a child step, nothing
+    /// tested but the name.
+    fn children_plan(&self, from: NodeId, plan: &quarb::StepPlan<'_>) -> bool {
+        from == self.anchor
+            && plan.conjuncts.is_empty()
+            && plan.traits.is_empty()
+            && matches!(plan.axis, quarb::PlanAxis::Child)
+    }
+
+    fn matching(&self, name: Option<&str>) -> impl Iterator<Item = u32> + '_ {
+        let k = name
+            .and_then(|n| self.tag_names.iter().position(|t| t == n))
+            .map(|k| k as u32);
+        let named = name.is_some();
+        (0..self.offsets.len() as u32).filter(move |&i| !named || Some(self.tags[i as usize]) == k)
+    }
+
+    /// The node's locator, as the whole read spells it: a child among
+    /// same-tag siblings numbered when the tag repeats.
+    pub fn locator(&self, node: NodeId) -> String {
+        match Self::unpack(node) {
+            None => self.prefix.locator(node),
+            Some((i, local)) => {
+                let base = self.prefix.locator(self.anchor);
+                let tag = self.tags[i as usize];
+                let repeats = self.tags.iter().filter(|&&t| t == tag).count() > 1;
+                let nth = self.tags[..i as usize]
+                    .iter()
+                    .filter(|&&t| t == tag)
+                    .count()
+                    + 1;
+                let segment = if repeats {
+                    format!("{}[{nth}]", self.tag_names[tag as usize])
+                } else {
+                    self.tag_names[tag as usize].clone()
+                };
+                let inner = self.with_child(i, |a| a.locator(local)).unwrap_or_default();
+                // the arbor's locator: /root/child[/…]: the first two
+                // segments are the wrapping and the child itself
+                let rest: Vec<&str> = inner.trim_start_matches('/').splitn(3, '/').collect();
+                let tail = rest.get(2).map(|r| format!("/{r}")).unwrap_or_default();
+                format!("{base}/{segment}{tail}")
+            }
+        }
+    }
+}
+
+impl AstAdapter for XmlStream {
+    fn estimate(&self, _scope: &[&str], plan: &quarb::StepPlan<'_>) -> Option<quarb::Estimate> {
+        let n = self.matching(plan.name).count() as u64;
+        let nodes = match plan.limit {
+            Some(k) if self.children_plan(self.anchor, plan) => (n.min(k as u64), n.min(k as u64)),
+            _ => (n, n),
+        };
+        Some(quarb::Estimate {
+            nodes,
+            bytes: Some((self.size, self.size)),
+            requests: None,
+            latency: quarb::Latency::Local,
+            confidence: quarb::Confidence::Bound,
+        })
+    }
+
+    fn root(&self) -> NodeId {
+        self.prefix.root()
+    }
+
+    fn walks_for_references(&self) -> bool {
+        true
+    }
+
+    fn children(&self, node: NodeId) -> Vec<NodeId> {
+        match Self::unpack(node) {
+            Some((i, local)) => self
+                .with_child(i, |a| {
+                    a.children(local)
+                        .into_iter()
+                        .map(|c| Self::pack(i, c))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            None if node == self.anchor => (0..self.offsets.len() as u32)
+                .map(|i| Self::pack(i, Self::LOCAL_ROOT))
+                .collect(),
+            None => self.prefix.children(node),
+        }
+    }
+
+    fn count(&self, from: NodeId, plan: &quarb::StepPlan<'_>) -> Option<usize> {
+        self.children_plan(from, plan)
+            .then(|| self.matching(plan.name).count())
+    }
+
+    fn select(&self, from: NodeId, plan: &quarb::StepPlan<'_>) -> Option<quarb::Selection> {
+        let k = plan.limit?;
+        if !self.children_plan(from, plan) {
+            return None;
+        }
+        Some(quarb::Selection {
+            nodes: self
+                .matching(plan.name)
+                .take(k)
+                .map(|i| (Self::pack(i, Self::LOCAL_ROOT), 1))
+                .collect(),
+            applied: Vec::new(),
+        })
+    }
+
+    fn name(&self, node: NodeId) -> Option<String> {
+        match Self::unpack(node) {
+            Some((i, local)) if local == Self::LOCAL_ROOT => {
+                Some(self.tag_names[self.tags[i as usize] as usize].clone())
+            }
+            Some((i, local)) => self.with_child(i, |a| a.name(local)).flatten(),
+            None => self.prefix.name(node),
+        }
+    }
+
+    fn traits(&self, node: NodeId) -> Vec<String> {
+        match Self::unpack(node) {
+            Some((i, local)) => self.with_child(i, |a| a.traits(local)).unwrap_or_default(),
+            None => self.prefix.traits(node),
+        }
+    }
+
+    fn parent(&self, node: NodeId) -> Option<NodeId> {
+        match Self::unpack(node) {
+            Some((_, local)) if local == Self::LOCAL_ROOT => Some(self.anchor),
+            Some((i, local)) => self
+                .with_child(i, |a| a.parent(local).map(|p| Self::pack(i, p)))
+                .flatten(),
+            None => self.prefix.parent(node),
+        }
+    }
+
+    fn ref_property(&self, node: NodeId) -> Option<String> {
+        match Self::unpack(node) {
+            Some((i, local)) => self.with_child(i, |a| a.ref_property(local)).flatten(),
+            None => self.prefix.ref_property(node),
+        }
+    }
+
+    fn property_names(&self, node: NodeId) -> Vec<String> {
+        match Self::unpack(node) {
+            Some((i, local)) => self
+                .with_child(i, |a| a.property_names(local))
+                .unwrap_or_default(),
+            None => self.prefix.property_names(node),
+        }
+    }
+
+    fn can_refer_to(&self, _source: NodeId, _target: NodeId) -> Option<bool> {
+        Some(true)
+    }
+
+    fn property(&self, node: NodeId, name: &str) -> Option<Value> {
+        match Self::unpack(node) {
+            Some((i, local)) => self.with_child(i, |a| a.property(local, name)).flatten(),
+            None => self.prefix.property(node, name),
+        }
+    }
+
+    fn default_value(&self, node: NodeId) -> Option<Value> {
+        match Self::unpack(node) {
+            Some((i, local)) => self.with_child(i, |a| a.default_value(local)).flatten(),
+            // the document element's text is its children's, in order,
+            // with its own whitespace between; the document node's too,
+            // as the text flows up in the whole read
+            None if node == self.anchor || node == self.prefix.root() => {
+                let mut text = String::new();
+                for i in 0..self.offsets.len() as u32 {
+                    text.push_str(&self.gaps[i as usize]);
+                    if let Some(Some(Value::Str(t))) =
+                        self.with_child(i, |a| a.default_value(Self::LOCAL_ROOT))
+                    {
+                        text.push_str(&t);
+                    }
+                }
+                if let Some(tail) = self.gaps.get(self.offsets.len()) {
+                    text.push_str(tail);
+                }
+                Some(Value::Str(text))
+            }
+            None => self.prefix.default_value(node),
+        }
+    }
+
+    fn metadata_catalogue(&self) -> &'static [&'static str] {
+        &["tag", "local-name", "ns-prefix", "n-attrs"]
+    }
+
+    fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
+        match Self::unpack(node) {
+            Some((i, local)) => self.with_child(i, |a| a.metadata(local, key)).flatten(),
+            None => self.prefix.metadata(node, key),
+        }
+    }
+
+    fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
+        let value = self.property(node, property)?;
+        let Value::Str(s) = value else {
+            return None;
+        };
+        let target = s.strip_prefix('#').unwrap_or(&s).to_string();
+        // in the same child first, as the whole read finds it
+        if let Some((i, local)) = Self::unpack(node)
+            && let Some(Some(r)) = self.with_child(i, |a| a.resolve(local, property, hint))
+        {
+            return Some(Self::pack(i, r));
+        }
+        let j = *self.ids.get(&target)?;
+        self.with_child(j, |a| a.node_by_id(&target).map(|r| Self::pack(j, r)))
+            .flatten()
+    }
+}
+
 #[cfg(test)]
 mod declared_tests {
     #[test]
@@ -415,5 +907,112 @@ mod declared_tests {
             super::declared_encoding(b"\xef\xbb\xbf<?xml encoding=\"utf-8\"?>"),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod stream_tests {
+    //! The document with one repeated child streamed reads as the
+    //! whole file does, node for node.
+    use super::*;
+
+    const DOC: &str = "<?xml version=\"1.0\"?>\n<dictionary xmlns:x=\"urn:x\" lang=\"grc\">\n  <entry id=\"e1\" x:n=\"1\"><form>λόγος</form><sense>word</sense><see ref=\"e3\"/></entry>\n  <entry id=\"e2\"><form>μῆνις</form><sense n=\"a\">wrath &amp; rage</sense></entry>\n  <note id=\"n1\">a note</note>\n  <entry id=\"e3\"><form>ἀοιδός</form><sense>singer</sense><see ref=\"#e1\"/></entry>\n</dictionary>\n";
+
+    fn file(name: &str, text: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("quarb-xml-stream-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join(name);
+        std::fs::write(&p, text).unwrap();
+        p
+    }
+
+    fn walk(s: &XmlStream, sn: NodeId, w: &XmlAdapter, wn: NodeId, depth: usize) {
+        assert!(depth < 10);
+        assert_eq!(s.name(sn), w.name(wn), "name at {}", w.locator(wn));
+        assert_eq!(s.traits(sn), w.traits(wn), "traits at {}", w.locator(wn));
+        assert_eq!(
+            s.property_names(sn),
+            w.property_names(wn),
+            "attrs at {}",
+            w.locator(wn)
+        );
+        for a in w.property_names(wn) {
+            assert_eq!(
+                s.property(sn, &a),
+                w.property(wn, &a),
+                "{a} at {}",
+                w.locator(wn)
+            );
+        }
+        assert_eq!(
+            s.default_value(sn),
+            w.default_value(wn),
+            "text at {}",
+            w.locator(wn)
+        );
+        assert_eq!(s.locator(sn), w.locator(wn), "locator");
+        for k in ["tag", "local-name", "ns-prefix", "n-attrs"] {
+            assert_eq!(
+                s.metadata(sn, k),
+                w.metadata(wn, k),
+                "{k} at {}",
+                w.locator(wn)
+            );
+        }
+        let sc = s.children(sn);
+        let wc = w.children(wn);
+        assert_eq!(sc.len(), wc.len(), "children at {}", w.locator(wn));
+        for (a, b) in sc.iter().zip(wc.iter()) {
+            assert_eq!(s.parent(*a), Some(sn), "parent at {}", w.locator(*b));
+            walk(s, *a, w, *b, depth + 1);
+        }
+    }
+
+    #[test]
+    fn the_children_read_as_the_whole_file_does() {
+        let p = file("dict.xml", DOC);
+        let s = XmlStream::open(&p)
+            .unwrap()
+            .expect("a document worth streaming");
+        assert_eq!(s.n_children(), 4);
+        let w = XmlAdapter::parse(DOC).unwrap();
+        walk(&s, s.root(), &w, w.root(), 0);
+        // the plan hooks, by name and bare
+        let dict = s.children(s.root())[0];
+        let mut plan = quarb::StepPlan {
+            traits: Vec::new(),
+            cap: quarb::Cap {
+                nodes: None,
+                bytes: None,
+            },
+            axis: quarb::PlanAxis::Child,
+            name: Some("entry"),
+            conjuncts: Vec::new(),
+            limit: Some(2),
+            order: None,
+        };
+        assert_eq!(s.count(dict, &plan), Some(3));
+        assert_eq!(s.select(dict, &plan).map(|sel| sel.nodes.len()), Some(2));
+        plan.name = None;
+        assert_eq!(s.count(dict, &plan), Some(4));
+        // a reference across children, bare and with the fragment sigil
+        let e1 = s.children(dict)[0];
+        let see = s.children(e1)[2];
+        let target = s.resolve(see, "ref", None).expect("resolves");
+        assert_eq!(s.property(target, "id"), Some(Value::Str("e3".into())));
+        let e3 = s.children(dict)[3];
+        let back = s.resolve(s.children(e3)[2], "ref", None).expect("resolves");
+        assert_eq!(s.property(back, "id"), Some(Value::Str("e1".into())));
+    }
+
+    #[test]
+    fn a_document_with_text_beside_its_children_reads_whole() {
+        let p = file("mixed.xml", "<r>text <a>1</a> more <a>2</a></r>");
+        assert!(XmlStream::open(&p).unwrap().is_none());
+        let p = file(
+            "one.xml",
+            "<r><a>only one child, under half the file by its text? no, over</a></r>",
+        );
+        assert!(XmlStream::open(&p).unwrap().is_none());
     }
 }

@@ -20,6 +20,8 @@ const NUMBER: &str = "\x1b[35m"; // magenta — numbers and unit/span literals
 const OPERATOR: &str = "\x1b[33m"; // yellow — sigils, comparisons, pipes
 const PATH: &str = "\x1b[34m"; // blue — the / and // axes
 const REGISTER: &str = "\x1b[36m"; // cyan — $. $* @. %. register refs
+/// The block comment `(!! … )`: dim, as prose beside code.
+const COMMENT: &str = "\x1b[2m";
 
 /// Non-alphanumeric operator spellings, longest first so a prefix
 /// never wins over the sigil it opens (`:::` before `::`, `<=>?`
@@ -127,6 +129,7 @@ enum Class {
     Operator,
     Path,
     Register,
+    Comment,
 }
 
 impl Class {
@@ -138,6 +141,7 @@ impl Class {
             Class::Operator => OPERATOR,
             Class::Path => PATH,
             Class::Register => REGISTER,
+            Class::Comment => COMMENT,
         }
     }
     fn css(self) -> &'static str {
@@ -148,6 +152,7 @@ impl Class {
             Class::Operator => "qh-operator",
             Class::Path => "qh-path",
             Class::Register => "qh-register",
+            Class::Comment => "qh-comment",
         }
     }
 }
@@ -177,6 +182,29 @@ fn scan(src: &str) -> Vec<(Option<Class>, &str)> {
                 i += 1;
             }
             spans.push((None, &src[start..i]));
+            continue;
+        }
+
+        // The block comment `(!! … )` (ruling 2026-11-06): to the `)`
+        // that balances its opener, every `(` inside counted; an
+        // opener nothing balances runs to the end, as the engine's
+        // refusal will say.
+        if c == '(' && b.get(i + 1) == Some(&b'!') && b.get(i + 2) == Some(&b'!') {
+            let start = i;
+            let mut depth = 0usize;
+            while i < b.len() {
+                let ch = b[i];
+                i += 1;
+                if ch == b'(' {
+                    depth += 1;
+                } else if ch == b')' {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+            }
+            spans.push((Some(Class::Comment), &src[start..i]));
             continue;
         }
 
@@ -381,6 +409,27 @@ fn is_keyword(word: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_block_comment_is_one_dim_span() {
+        let spans = super::scan("= 1 (!! one (two) ) + 2");
+        let comment: Vec<&str> = spans
+            .iter()
+            .filter(|(c, _)| matches!(c, Some(super::Class::Comment)))
+            .map(|(_, t)| *t)
+            .collect();
+        assert_eq!(comment, ["(!! one (two) )"]);
+        // the operands around it keep their classes
+        assert!(
+            spans
+                .iter()
+                .any(|(c, t)| matches!(c, Some(super::Class::Number)) && *t == "2")
+        );
+        // an opener nothing balances runs to the end
+        let spans = super::scan("= 1 (!! open (x ) + 2");
+        assert_eq!(spans.last().map(|(_, t)| *t), Some("(!! open (x ) + 2"));
+        assert!(super::highlight_html("(!! c )").contains("qh-comment"));
+    }
+
     use super::*;
 
     fn strip(s: &str) -> String {

@@ -1199,9 +1199,8 @@ fn the_graph_as_a_table() {
         };
         (
             tb.header.clone().unwrap(),
-            tb.rows
-                .iter()
-                .map(|r| r.iter().map(Value::display_form).collect())
+            tb.rows()
+                .map(|r| r.iter().map(|v| v.display_form()).collect())
                 .collect(),
         )
     };
@@ -1257,7 +1256,7 @@ fn pagerank_over_the_induced_subgraph() {
         let Value::Table(tb) = &vs[0] else {
             panic!("{q}: not a table")
         };
-        (tb.header.clone().unwrap(), tb.rows.clone())
+        (tb.header.clone().unwrap(), tb.rows_vec())
     };
     // a → {x.rs, y.txt} → deep → x.rs: the rank over the `e` edges
     // sums to one; a, linked by nothing, holds the floor (1 - d) / n
@@ -3456,9 +3455,9 @@ fn attached_read_survives_filters_and_walks() {
         table.header.as_ref().unwrap(),
         &["node", "name", "kind", "v", "w"]
     );
-    assert_eq!(table.rows[0][3], Value::Int(1));
-    assert_eq!(table.rows[1][3], Value::Int(2));
-    assert_eq!(table.rows[1][4], Value::Str("k".into()));
+    assert_eq!(table.cell(0, 3), Value::Int(1));
+    assert_eq!(table.cell(1, 3), Value::Int(2));
+    assert_eq!(table.cell(1, 4), Value::Str("k".into()));
 }
 
 #[test]
@@ -3759,7 +3758,7 @@ fn graph_pagerank_is_row_aligned_over_the_induced_subgraph() {
     let Value::Table(table) = &table[0] else {
         panic!("{table:?}");
     };
-    assert_eq!(table.rows.len(), 2);
+    assert_eq!(table.n_rows(), 2);
     assert_eq!(table.header.as_ref().unwrap().last().unwrap(), "n");
     let why = refused("//a(->e)* | graph:pagerank(->e)", &t).unwrap();
     assert!(why.contains("aggregation pipe"), "{why}");
@@ -4153,9 +4152,8 @@ fn table_of(q: &str, t: &MockTree) -> (Vec<String>, Vec<Vec<String>>) {
     };
     (
         tb.header.clone().unwrap(),
-        tb.rows
-            .iter()
-            .map(|r| r.iter().map(Value::display_form).collect())
+        tb.rows()
+            .map(|r| r.iter().map(|v| v.display_form()).collect())
             .collect(),
     )
 }

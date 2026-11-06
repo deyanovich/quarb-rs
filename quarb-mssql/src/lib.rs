@@ -217,16 +217,38 @@ impl MssqlAdapter {
         // hop makes (`WHERE key IN (…)`) all derive from it.
         let rt = Rc::new(rt);
         let (rt2, conn2) = (rt.clone(), conn.clone());
+        let (rt3, conn3) = (rt.clone(), conn.clone());
         let model = RelationalModel::lazy_where(
             specs,
-            std::rc::Rc::new(move |t: usize, spec: &TableSpec, w: Option<&str>| {
-                let mut conn = conn.borrow_mut();
-                rt.block_on(fetch_rows(&mut conn, spec, &decodes[t], w))
-                    .map_err(|e| e.to_string())
-            }),
+            std::rc::Rc::new(
+                move |t: usize, spec: &TableSpec, w: Option<&str>, k: Option<usize>| {
+                    let mut conn = conn.borrow_mut();
+                    rt.block_on(fetch_rows(&mut conn, spec, &decodes[t], w, k))
+                        .map_err(|e| e.to_string())
+                },
+            ),
             filter,
             quote,
         )
+        // the exact count of a table not read (the pushdown scanning
+        // round, 2026-11-06)
+        .with_counter(Box::new(move |_, spec| {
+            let sql = format!("SELECT COUNT_BIG(*) FROM [dbo].{}", quote(&spec.name));
+            let mut conn = conn3.borrow_mut();
+            let rows = rt3
+                .block_on(async {
+                    conn.simple_query(sql.as_str())
+                        .await?
+                        .into_first_result()
+                        .await
+                })
+                .map_err(|e| e.to_string())?;
+            let n: i64 = rows
+                .first()
+                .and_then(|r| r.get::<i64, _>(0))
+                .ok_or("no row count")?;
+            Ok(n.max(0) as usize)
+        }))
         // The catalog's row count (`sys.partitions`), exact for the
         // whole table and an upper bound under an equality.
         .with_estimator(std::rc::Rc::new(move |_, spec, equals| {
@@ -398,7 +420,10 @@ async fn fetch_rows(
     spec: &TableSpec,
     decodes: &[Decode],
     where_sql: Option<&str>,
+    limit: Option<usize>,
 ) -> Result<Vec<RowSpec>, MssqlError> {
+    // a prefix: the first rows in the order the whole read uses
+    let top = limit.map(|k| format!("TOP ({k}) ")).unwrap_or_default();
     let select: Vec<String> = spec
         .columns
         .iter()
@@ -422,7 +447,7 @@ async fn fetch_rows(
     let rows = conn
         .query(
             format!(
-                "SELECT {} FROM [dbo].{}{filter}{order}",
+                "SELECT {top}{} FROM [dbo].{}{filter}{order}",
                 select.join(", "),
                 quote(&spec.name)
             ),

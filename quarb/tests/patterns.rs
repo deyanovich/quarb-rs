@@ -585,8 +585,10 @@ fn record_field_colon_canonicalizes() {
     assert_eq!(canon("/a | .r | (.r):x"), "/a | .r | $.r:x");
     assert_eq!(canon("/a | .r | $.r:a:b"), "/a | .r | $.r:a:b");
     assert_eq!(canon("/a | :n"), "/a | :n");
-    assert_eq!(canon("/a | $_:n"), "/a | :n");
-    assert_eq!(canon("/a | [:n .maior. 1]"), canon("/a | [$_:n > 1]"));
+    // the topic written out stays written (ruling 2026-11-05: under a
+    // row in reach `$_:n` and `:n` read differently)
+    assert_eq!(canon("/a | $_:n"), "/a | $_:n");
+    assert_eq!(canon("/a | [:n .maior. 1]"), canon("/a | [:n > 1]"));
     assert_eq!(canon("/a | %+"), "/a | %+");
     assert_eq!(canon("/a | %+:year"), "/a | %+:year");
     assert_eq!(

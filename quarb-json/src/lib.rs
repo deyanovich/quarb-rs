@@ -595,6 +595,47 @@ impl JsonAdapter {
     }
 
     /// The reading this adapter took.
+    /// One value — an element of a streamed array, its text spanning
+    /// lines or not — as the one element of an array root, the shape
+    /// [`parse_lines_as`](Self::parse_lines_as) gives a line: the root
+    /// node an array, the element its first child, named `i`.
+    pub fn parse_one_as(text: &str, i: u32, reading: Reading) -> serde_json::Result<Self> {
+        use serde::de::DeserializeSeed;
+        let mut b = Builder::new();
+        let root = b.push(None, Kind::Array, Value::Null, None);
+        let mut d = serde_json::Deserializer::from_str(text);
+        match reading {
+            Reading::Node => {
+                NodeSeed {
+                    b: &mut b,
+                    name: Some(Name::Index(i)),
+                    parent: Some(root),
+                }
+                .deserialize(&mut d)?;
+            }
+            Reading::Property => {
+                let built = PropSeed {
+                    b: &mut b,
+                    name: Some(Name::Index(i)),
+                    parent: Some(root),
+                    in_object: false,
+                }
+                .deserialize(&mut d)?;
+                match built {
+                    Built::Scalar(v) => b.nodes[root.0 as usize].items.push((i as usize, v)),
+                    Built::List(vs) => {
+                        let child =
+                            b.push(Some(Name::Index(i)), Kind::Array, Value::Null, Some(root));
+                        b.nodes[child.0 as usize].items = vs.into_iter().enumerate().collect();
+                    }
+                    Built::Node(_) => {}
+                }
+            }
+        }
+        d.end()?;
+        Ok(b.finish(reading))
+    }
+
     pub fn reading(&self) -> Reading {
         self.reading
     }
@@ -1062,5 +1103,1060 @@ impl AstAdapter for JsonAdapter {
     /// JSON Pointer in its URI fragment form.
     fn resolve_fragment(&self, _node: NodeId, fragment: &str) -> Option<NodeId> {
         self.walk_pointer(&percent_decode(fragment))
+    }
+}
+
+/// The streaming reading of a JSONL file (ruling 2026-11-05: under a
+/// one-off query the file is not held). One scan records where every
+/// non-empty line starts — the offset index — and a line is parsed
+/// into its own small arbor when a node of it is reached, the last
+/// line parsed kept. A node's id packs the line and the node's id
+/// within the line's arbor; every answer is [`JsonAdapter::parse_lines`]'s
+/// — the ids differ, the names, kinds, cells, pointers and metadata
+/// do not. A reference reaches within its line (`#/i/…` across lines
+/// through the index); `n-lines` on the root is the count.
+pub struct JsonLines {
+    path: std::path::PathBuf,
+    offsets: Vec<(u64, u32)>,
+    size: u64,
+    reading: Reading,
+    /// The line last parsed: its index and its arbor (the root an
+    /// array of one element, the line's node its first child).
+    last: std::cell::RefCell<Option<(u32, JsonAdapter)>>,
+    /// The file, open once, and the line it stands before: a
+    /// sequential read (a predicate over every line) seeks never.
+    reader: std::cell::RefCell<(std::io::BufReader<std::fs::File>, u32)>,
+}
+
+const LINE_SHIFT: u32 = 32;
+
+impl JsonLines {
+    pub fn open(path: &std::path::Path, reading: Reading) -> std::io::Result<Self> {
+        use std::io::{BufRead, Seek};
+        let size = std::fs::metadata(path)?.len();
+        let mut reader = std::io::BufReader::with_capacity(1 << 16, std::fs::File::open(path)?);
+        let mut offsets = Vec::new();
+        let mut line = Vec::new();
+        let mut at = 0u64;
+        loop {
+            line.clear();
+            let n = reader.read_until(b'\n', &mut line)?;
+            if n == 0 {
+                break;
+            }
+            let start = at;
+            at += n as u64;
+            let body = &line[..];
+            let body = body.strip_suffix(b"\n").unwrap_or(body);
+            let body = body.strip_suffix(b"\r").unwrap_or(body);
+            let bom = if start == 0 {
+                body.strip_prefix(b"\xEF\xBB\xBF").map_or(0, |_| 3)
+            } else {
+                0
+            };
+            let body = &body[bom..];
+            if body.iter().all(|c| c.is_ascii_whitespace()) {
+                continue;
+            }
+            offsets.push((start + bom as u64, body.len() as u32));
+        }
+        let _ = reader.stream_position();
+        let mut file = std::io::BufReader::with_capacity(1 << 16, std::fs::File::open(path)?);
+        file.seek(std::io::SeekFrom::Start(0))?;
+        Ok(JsonLines {
+            path: path.to_path_buf(),
+            offsets,
+            size,
+            reading,
+            last: std::cell::RefCell::new(None),
+            reader: std::cell::RefCell::new((file, u32::MAX)),
+        })
+    }
+
+    fn pack(line: u32, local: NodeId) -> NodeId {
+        NodeId(((line as u64 + 1) << LINE_SHIFT) | local.0)
+    }
+
+    fn unpack(node: NodeId) -> Option<(u32, NodeId)> {
+        let line = (node.0 >> LINE_SHIFT) as u32;
+        (line > 0).then(|| (line - 1, NodeId(node.0 & ((1u64 << LINE_SHIFT) - 1))))
+    }
+
+    /// Line `i` parsed (or the one last parsed), and `f` on its
+    /// arbor; `None` past the end or on a line that is no JSON.
+    fn with_line<T>(&self, i: u32, f: impl FnOnce(&JsonAdapter) -> T) -> Option<T> {
+        {
+            let last = self.last.borrow();
+            if let Some((k, a)) = &*last
+                && *k == i
+            {
+                return Some(f(a));
+            }
+        }
+        use std::io::{Read, Seek};
+        let &(offset, len) = self.offsets.get(i as usize)?;
+        let text = {
+            let mut r = self.reader.borrow_mut();
+            // the line after the one last read follows in the file;
+            // any other, a seek to its offset
+            if r.1 != i {
+                r.0.seek(std::io::SeekFrom::Start(offset)).ok()?;
+            }
+            let mut buf = vec![0u8; len as usize];
+            r.0.read_exact(&mut buf).ok()?;
+            // past the line's body: its ending, and any blank lines
+            // before the next body
+            let next_offset = self.offsets.get(i as usize + 1).map(|&(o, _)| o);
+            match next_offset {
+                Some(o) => {
+                    let gap = o - (offset + len as u64);
+                    let mut skip = vec![0u8; gap as usize];
+                    r.0.read_exact(&mut skip).ok()?;
+                    r.1 = i + 1;
+                }
+                None => {
+                    let mut rest = Vec::new();
+                    let _ = r.0.read_to_end(&mut rest);
+                    r.1 = u32::MAX;
+                }
+            }
+            String::from_utf8(buf).ok()?
+        };
+        let a = JsonAdapter::parse_lines_as(&text, self.reading).ok()?;
+        let out = f(&a);
+        *self.last.borrow_mut() = Some((i, a));
+        Some(out)
+    }
+
+    /// The line's own node in its arbor: the root's first child.
+    fn line_node(a: &JsonAdapter) -> Option<NodeId> {
+        a.children(a.root()).first().copied()
+    }
+
+    /// The JSON Pointer of a node (`/i/key/0`), the line's index its
+    /// first segment.
+    pub fn pointer(&self, node: NodeId) -> String {
+        let Some((i, local)) = Self::unpack(node) else {
+            return "/".to_string();
+        };
+        self.with_line(i, |a| {
+            let p = a.pointer(local);
+            let rest = p.strip_prefix("/0").unwrap_or("");
+            format!("/{i}{rest}")
+        })
+        .unwrap_or_else(|| "/".to_string())
+    }
+
+    fn lines_plan(&self, from: NodeId, plan: &quarb::StepPlan<'_>) -> bool {
+        from.0 == 0
+            && plan.conjuncts.is_empty()
+            && plan.traits.is_empty()
+            && plan.name.is_none()
+            && matches!(plan.axis, quarb::PlanAxis::Child)
+    }
+
+    /// The whole file as the in-memory reading reads it: the fallback
+    /// of the answers that need every line at once.
+    fn whole(&self) -> Option<JsonAdapter> {
+        let text = std::fs::read_to_string(&self.path).ok()?;
+        JsonAdapter::parse_lines_as(&text, self.reading).ok()
+    }
+}
+
+impl AstAdapter for JsonLines {
+    fn estimate(&self, _scope: &[&str], plan: &quarb::StepPlan<'_>) -> Option<quarb::Estimate> {
+        let n = self.offsets.len() as u64;
+        let nodes = match plan.limit {
+            Some(k) if self.lines_plan(NodeId(0), plan) => (n.min(k as u64), n.min(k as u64)),
+            _ => (n, n),
+        };
+        Some(quarb::Estimate {
+            nodes,
+            bytes: Some((self.size, self.size)),
+            requests: None,
+            latency: quarb::Latency::Local,
+            confidence: quarb::Confidence::Bound,
+        })
+    }
+
+    fn root(&self) -> NodeId {
+        NodeId(0)
+    }
+
+    fn walks_for_references(&self) -> bool {
+        true
+    }
+
+    fn children(&self, node: NodeId) -> Vec<NodeId> {
+        match Self::unpack(node) {
+            None => (0..self.offsets.len() as u32)
+                .filter_map(|i| {
+                    // the line's node is its arbor's first child —
+                    // local id 1, the root being 0 — for every line
+                    // that is a value; a scalar line under the
+                    // property reading is an item, no node
+                    Some(Self::pack(i, NodeId(1)))
+                })
+                .collect(),
+            Some((i, local)) => self
+                .with_line(i, |a| {
+                    a.children(local)
+                        .into_iter()
+                        .map(|c| Self::pack(i, c))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    fn count(&self, from: NodeId, plan: &quarb::StepPlan<'_>) -> Option<usize> {
+        self.lines_plan(from, plan).then_some(self.offsets.len())
+    }
+
+    fn select(&self, from: NodeId, plan: &quarb::StepPlan<'_>) -> Option<quarb::Selection> {
+        let k = plan.limit?;
+        if !self.lines_plan(from, plan) {
+            return None;
+        }
+        let n = self.offsets.len().min(k);
+        Some(quarb::Selection {
+            nodes: (0..n as u32)
+                .map(|i| (Self::pack(i, NodeId(1)), 1))
+                .collect(),
+            applied: Vec::new(),
+        })
+    }
+
+    fn name(&self, node: NodeId) -> Option<String> {
+        let (i, local) = Self::unpack(node)?;
+        if local.0 == 1 {
+            return Some(i.to_string());
+        }
+        self.with_line(i, |a| a.name(local)).flatten()
+    }
+
+    fn parent(&self, node: NodeId) -> Option<NodeId> {
+        let (i, local) = Self::unpack(node)?;
+        if local.0 == 1 {
+            return Some(NodeId(0));
+        }
+        self.with_line(i, |a| a.parent(local).map(|p| Self::pack(i, p)))
+            .flatten()
+    }
+
+    fn traits(&self, node: NodeId) -> Vec<String> {
+        match Self::unpack(node) {
+            None => vec!["array".to_string()],
+            Some((i, local)) => self.with_line(i, |a| a.traits(local)).unwrap_or_default(),
+        }
+    }
+
+    fn property(&self, node: NodeId, name: &str) -> Option<Value> {
+        let (i, local) = Self::unpack(node)?;
+        self.with_line(i, |a| a.property(local, name)).flatten()
+    }
+
+    fn properties(&self, node: NodeId) -> Vec<(String, Value)> {
+        match Self::unpack(node) {
+            None => self
+                .whole()
+                .map(|a| a.properties(a.root()))
+                .unwrap_or_default(),
+            Some((i, local)) => self
+                .with_line(i, |a| a.properties(local))
+                .unwrap_or_default(),
+        }
+    }
+
+    fn default_value(&self, node: NodeId) -> Option<Value> {
+        let (i, local) = Self::unpack(node)?;
+        self.with_line(i, |a| a.default_value(local)).flatten()
+    }
+
+    fn metadata_catalogue(&self) -> &'static [&'static str] {
+        &["type", "length", "n-lines", "path", "size"]
+    }
+
+    fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
+        match Self::unpack(node) {
+            None => match key {
+                "type" => Some(Value::Str("array".into())),
+                "length" | "n-lines" => Some(Value::Int(self.offsets.len() as i64)),
+                "path" => Some(Value::Str(self.path.display().to_string())),
+                "size" => Some(Value::Int(self.size as i64)),
+                _ => None,
+            },
+            Some((i, local)) => self.with_line(i, |a| a.metadata(local, key)).flatten(),
+        }
+    }
+
+    fn can_refer_to(&self, _source: NodeId, _target: NodeId) -> Option<bool> {
+        Some(true)
+    }
+
+    fn ref_property(&self, node: NodeId) -> Option<String> {
+        let (i, local) = Self::unpack(node)?;
+        self.with_line(i, |a| a.ref_property(local)).flatten()
+    }
+
+    /// A reference resolves within its line's arbor; `#` alone is the
+    /// file's root; `#/i/…` crosses to line i through the index.
+    fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
+        let (i, _) = Self::unpack(node)?;
+        let reference = self.property(node, property)?;
+        let Value::Str(s) = reference else {
+            return None;
+        };
+        if s == "#" {
+            return Some(NodeId(0));
+        }
+        if let Some(fragment) = s.strip_prefix('#') {
+            return self.resolve_fragment(node, fragment);
+        }
+        self.with_line(i, |a| {
+            let local_node = Self::unpack(node)?.1;
+            a.resolve(local_node, property, hint)
+                .map(|r| Self::pack(i, r))
+        })
+        .flatten()
+    }
+
+    fn resolve_fragment(&self, _node: NodeId, fragment: &str) -> Option<NodeId> {
+        let fragment = fragment.trim_start_matches('/');
+        if fragment.is_empty() {
+            return Some(NodeId(0));
+        }
+        let (first, rest) = fragment.split_once('/').unwrap_or((fragment, ""));
+        let i: u32 = first.parse().ok()?;
+        let local_fragment = format!("/0/{rest}");
+        let local_fragment = local_fragment.trim_end_matches('/').to_string();
+        self.with_line(i, |a| {
+            a.resolve_fragment(a.root(), &local_fragment)
+                .map(|r| Self::pack(i, r))
+        })
+        .flatten()
+    }
+}
+
+/// A JSON document with one array streamed (hash (d) of the columnar
+/// round, 2026-11-06): the array at the root, or under a key of the
+/// root object. The document is parsed whole with that array
+/// emptied — its other keys are small by construction — and the
+/// array's elements are byte spans found by one scan of the file,
+/// each parsed into its own arbor when a step reaches it, the one
+/// last parsed kept. `/books/*` streams; `//title` walks the elements
+/// one at a time; nothing needs the whole read. The node ids pack the
+/// element's index above its arbor's node, as the JSONL adapter's do;
+/// the prefix document's nodes keep their own ids below.
+pub struct JsonArray {
+    path: std::path::PathBuf,
+    size: u64,
+    reading: Reading,
+    /// The document with the array emptied.
+    prefix: JsonAdapter,
+    /// The emptied array's node in the prefix: the elements' parent.
+    anchor: NodeId,
+    /// The key the array stands under, `None` for a root array.
+    key: Option<String>,
+    offsets: Vec<(u64, u32)>,
+    last: std::cell::RefCell<Option<(u32, JsonAdapter)>>,
+    reader: std::cell::RefCell<(std::io::BufReader<std::fs::File>, u32)>,
+}
+
+/// What the scan found: the arrays at the root or under a root key,
+/// each with its byte span and its elements' spans.
+struct Scanned {
+    key: Option<String>,
+    start: u64,
+    end: u64,
+    elements: Vec<(u64, u32)>,
+}
+
+impl JsonArray {
+    /// The file scanned for its one array; `None` where it holds no
+    /// array worth streaming (none at the root or under a root key,
+    /// or one smaller than half the file), where the whole read is
+    /// the right one.
+    pub fn open(path: &std::path::Path, reading: Reading) -> std::io::Result<Option<Self>> {
+        use std::io::{Read, Seek};
+        let size = std::fs::metadata(path)?.len();
+        let mut reader = std::io::BufReader::with_capacity(1 << 16, std::fs::File::open(path)?);
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes)?;
+        let Some(found) = scan_arrays(&bytes) else {
+            return Ok(None);
+        };
+        let best = found
+            .into_iter()
+            .max_by_key(|a| a.end - a.start)
+            .filter(|a| (a.end - a.start) * 2 >= size);
+        let Some(best) = best else {
+            return Ok(None);
+        };
+        // the document with the array emptied
+        let mut prefix_text =
+            Vec::with_capacity(bytes.len() - (best.end - best.start) as usize + 2);
+        prefix_text.extend_from_slice(&bytes[..best.start as usize]);
+        prefix_text.extend_from_slice(b"[]");
+        prefix_text.extend_from_slice(&bytes[best.end as usize..]);
+        drop(bytes);
+        let prefix_text = String::from_utf8(prefix_text)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let prefix = JsonAdapter::parse_as(&prefix_text, reading)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let anchor = match &best.key {
+            None => prefix.root(),
+            Some(k) => prefix
+                .children(prefix.root())
+                .into_iter()
+                .find(|c| prefix.name(*c).as_deref() == Some(k.as_str()))
+                .ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "the array's key")
+                })?,
+        };
+        let mut file = std::io::BufReader::with_capacity(1 << 16, std::fs::File::open(path)?);
+        file.seek(std::io::SeekFrom::Start(0))?;
+        Ok(Some(JsonArray {
+            path: path.to_path_buf(),
+            size,
+            reading,
+            prefix,
+            anchor,
+            key: best.key,
+            offsets: best.elements,
+            last: std::cell::RefCell::new(None),
+            reader: std::cell::RefCell::new((file, u32::MAX)),
+        }))
+    }
+
+    pub fn n_elements(&self) -> usize {
+        self.offsets.len()
+    }
+
+    fn pack(i: u32, local: NodeId) -> NodeId {
+        NodeId(((i as u64 + 1) << LINE_SHIFT) | local.0)
+    }
+
+    fn unpack(node: NodeId) -> Option<(u32, NodeId)> {
+        let i = (node.0 >> LINE_SHIFT) as u32;
+        (i > 0).then(|| (i - 1, NodeId(node.0 & ((1u64 << LINE_SHIFT) - 1))))
+    }
+
+    /// Element `i` parsed (or the one last parsed), and `f` on its
+    /// arbor; `None` past the end.
+    fn with_element<T>(&self, i: u32, f: impl FnOnce(&JsonAdapter) -> T) -> Option<T> {
+        {
+            let last = self.last.borrow();
+            if let Some((k, a)) = &*last
+                && *k == i
+            {
+                return Some(f(a));
+            }
+        }
+        use std::io::{Read, Seek};
+        let &(offset, len) = self.offsets.get(i as usize)?;
+        let text = {
+            let mut r = self.reader.borrow_mut();
+            // the element after the one last read follows it in the
+            // file (its separator between); any other, a seek
+            if r.1 != i {
+                r.0.seek(std::io::SeekFrom::Start(offset)).ok()?;
+            } else {
+                let here = r.0.stream_position().ok()?;
+                if here != offset {
+                    r.0.seek(std::io::SeekFrom::Start(offset)).ok()?;
+                }
+            }
+            let mut buf = vec![0u8; len as usize];
+            r.0.read_exact(&mut buf).ok()?;
+            r.1 = i + 1;
+            // the next element's offset is where the sequential read
+            // resumes: the bytes between are the separator
+            if let Some(&(next, _)) = self.offsets.get(i as usize + 1) {
+                let gap = next - (offset + len as u64);
+                if gap > 0 && gap < 1 << 16 {
+                    let mut skip = vec![0u8; gap as usize];
+                    r.0.read_exact(&mut skip).ok()?;
+                }
+            }
+            String::from_utf8(buf).ok()?
+        };
+        let a = JsonAdapter::parse_one_as(&text, i, self.reading).ok()?;
+        let out = f(&a);
+        *self.last.borrow_mut() = Some((i, a));
+        Some(out)
+    }
+
+    /// The elements as the plan reaches them from their array: a
+    /// child step with nothing to test.
+    fn elements_plan(&self, from: NodeId, plan: &quarb::StepPlan<'_>) -> bool {
+        from == self.anchor
+            && plan.conjuncts.is_empty()
+            && plan.traits.is_empty()
+            && plan.name.is_none()
+            && matches!(plan.axis, quarb::PlanAxis::Child)
+    }
+
+    /// The node's path, as the whole read's pointer spells it.
+    pub fn pointer(&self, node: NodeId) -> String {
+        match Self::unpack(node) {
+            None => self.prefix.pointer(node),
+            Some((i, local)) => {
+                let base = self.prefix.pointer(self.anchor);
+                let base = if base == "/" { String::new() } else { base };
+                let inner = self
+                    .with_element(i, |a| a.pointer(local))
+                    .unwrap_or_default();
+                // the element arbor's pointer opens with its index
+                let inner = inner.trim_start_matches('/');
+                let inner = inner
+                    .split_once('/')
+                    .map(|(_, rest)| format!("/{rest}"))
+                    .unwrap_or_default();
+                format!("{base}/{i}{inner}")
+            }
+        }
+    }
+}
+
+/// The arrays a document streams: the root array, or every array
+/// under a key of the root object, each with its elements' byte
+/// spans; `None` where the document is neither.
+fn scan_arrays(bytes: &[u8]) -> Option<Vec<Scanned>> {
+    let n = bytes.len();
+    let mut i = 0usize;
+    let skip_ws = |i: &mut usize| {
+        while *i < n && bytes[*i].is_ascii_whitespace() {
+            *i += 1;
+        }
+    };
+    // the end of the value starting at `i` (exclusive), over strings
+    // and nesting; `None` where the text ends first
+    let value_end = |mut i: usize| -> Option<usize> {
+        let mut depth = 0usize;
+        let mut in_str = false;
+        let mut esc = false;
+        let start = i;
+        while i < n {
+            let c = bytes[i];
+            if in_str {
+                if esc {
+                    esc = false;
+                } else if c == b'\\' {
+                    esc = true;
+                } else if c == b'"' {
+                    in_str = false;
+                    if depth == 0 {
+                        return Some(i + 1);
+                    }
+                }
+            } else {
+                match c {
+                    b'"' => in_str = true,
+                    b'[' | b'{' => depth += 1,
+                    b']' | b'}' => {
+                        if depth == 0 {
+                            return Some(i);
+                        }
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(i + 1);
+                        }
+                    }
+                    b',' if depth == 0 => return Some(i),
+                    c if depth == 0 && c.is_ascii_whitespace() && i > start => return Some(i),
+                    _ => {}
+                }
+            }
+            i += 1;
+        }
+        (depth == 0 && !in_str && i > start).then_some(i)
+    };
+    // the elements of the array whose `[` stands at `i`: their spans
+    // and the position after its `]`
+    let elements_of = |open: usize| -> Option<(Vec<(u64, u32)>, usize)> {
+        let mut out = Vec::new();
+        let mut i = open + 1;
+        loop {
+            skip_ws(&mut i);
+            if i >= n {
+                return None;
+            }
+            if bytes[i] == b']' {
+                return Some((out, i + 1));
+            }
+            let end = value_end(i)?;
+            out.push((i as u64, (end - i) as u32));
+            i = end;
+            skip_ws(&mut i);
+            if i >= n {
+                return None;
+            }
+            match bytes[i] {
+                b',' => i += 1,
+                b']' => return Some((out, i + 1)),
+                _ => return None,
+            }
+        }
+    };
+    skip_ws(&mut i);
+    if i >= n {
+        return None;
+    }
+    // a BOM is no JSON
+    if bytes[i..].starts_with(b"\xEF\xBB\xBF") {
+        return None;
+    }
+    match bytes[i] {
+        b'[' => {
+            let (elements, end) = elements_of(i)?;
+            Some(vec![Scanned {
+                key: None,
+                start: i as u64,
+                end: end as u64,
+                elements,
+            }])
+        }
+        b'{' => {
+            let mut found = Vec::new();
+            i += 1;
+            loop {
+                skip_ws(&mut i);
+                if i >= n {
+                    return None;
+                }
+                if bytes[i] == b'}' {
+                    break;
+                }
+                // the key
+                if bytes[i] != b'"' {
+                    return None;
+                }
+                let key_end = value_end(i)?;
+                let key: String = serde_json::from_slice(&bytes[i..key_end]).ok()?;
+                i = key_end;
+                skip_ws(&mut i);
+                if i >= n || bytes[i] != b':' {
+                    return None;
+                }
+                i += 1;
+                skip_ws(&mut i);
+                if i >= n {
+                    return None;
+                }
+                if bytes[i] == b'[' {
+                    let (elements, end) = elements_of(i)?;
+                    found.push(Scanned {
+                        key: Some(key),
+                        start: i as u64,
+                        end: end as u64,
+                        elements,
+                    });
+                    i = end;
+                } else {
+                    i = value_end(i)?;
+                }
+                skip_ws(&mut i);
+                if i >= n {
+                    return None;
+                }
+                match bytes[i] {
+                    b',' => i += 1,
+                    b'}' => break,
+                    _ => return None,
+                }
+            }
+            (!found.is_empty()).then_some(found)
+        }
+        _ => None,
+    }
+}
+
+impl AstAdapter for JsonArray {
+    fn estimate(&self, _scope: &[&str], plan: &quarb::StepPlan<'_>) -> Option<quarb::Estimate> {
+        let n = self.offsets.len() as u64;
+        let nodes = match plan.limit {
+            Some(k) if self.elements_plan(self.anchor, plan) => (n.min(k as u64), n.min(k as u64)),
+            _ => (n, n),
+        };
+        Some(quarb::Estimate {
+            nodes,
+            bytes: Some((self.size, self.size)),
+            requests: None,
+            latency: quarb::Latency::Local,
+            confidence: quarb::Confidence::Bound,
+        })
+    }
+
+    fn root(&self) -> NodeId {
+        self.prefix.root()
+    }
+
+    fn walks_for_references(&self) -> bool {
+        true
+    }
+
+    fn children(&self, node: NodeId) -> Vec<NodeId> {
+        match Self::unpack(node) {
+            Some((i, local)) => self
+                .with_element(i, |a| {
+                    a.children(local)
+                        .into_iter()
+                        .map(|c| Self::pack(i, c))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            None if node == self.anchor => (0..self.offsets.len() as u32)
+                .map(|i| Self::pack(i, NodeId(1)))
+                .collect(),
+            None => self.prefix.children(node),
+        }
+    }
+
+    fn count(&self, from: NodeId, plan: &quarb::StepPlan<'_>) -> Option<usize> {
+        self.elements_plan(from, plan).then_some(self.offsets.len())
+    }
+
+    fn select(&self, from: NodeId, plan: &quarb::StepPlan<'_>) -> Option<quarb::Selection> {
+        let k = plan.limit?;
+        if !self.elements_plan(from, plan) {
+            return None;
+        }
+        let n = self.offsets.len().min(k);
+        Some(quarb::Selection {
+            nodes: (0..n as u32)
+                .map(|i| (Self::pack(i, NodeId(1)), 1))
+                .collect(),
+            applied: Vec::new(),
+        })
+    }
+
+    fn name(&self, node: NodeId) -> Option<String> {
+        match Self::unpack(node) {
+            Some((i, local)) if local.0 == 1 => Some(i.to_string()),
+            Some((i, local)) => self.with_element(i, |a| a.name(local)).flatten(),
+            None => self.prefix.name(node),
+        }
+    }
+
+    fn parent(&self, node: NodeId) -> Option<NodeId> {
+        match Self::unpack(node) {
+            Some((_, local)) if local.0 == 1 => Some(self.anchor),
+            Some((i, local)) => self
+                .with_element(i, |a| a.parent(local).map(|p| Self::pack(i, p)))
+                .flatten(),
+            None => self.prefix.parent(node),
+        }
+    }
+
+    fn traits(&self, node: NodeId) -> Vec<String> {
+        match Self::unpack(node) {
+            Some((i, local)) => self
+                .with_element(i, |a| a.traits(local))
+                .unwrap_or_default(),
+            None => self.prefix.traits(node),
+        }
+    }
+
+    fn property(&self, node: NodeId, name: &str) -> Option<Value> {
+        match Self::unpack(node) {
+            Some((i, local)) => self.with_element(i, |a| a.property(local, name)).flatten(),
+            None => self.prefix.property(node, name),
+        }
+    }
+
+    fn properties(&self, node: NodeId) -> Vec<(String, Value)> {
+        match Self::unpack(node) {
+            Some((i, local)) => self
+                .with_element(i, |a| a.properties(local))
+                .unwrap_or_default(),
+            None => self.prefix.properties(node),
+        }
+    }
+
+    fn default_value(&self, node: NodeId) -> Option<Value> {
+        match Self::unpack(node) {
+            Some((i, local)) => self.with_element(i, |a| a.default_value(local)).flatten(),
+            None => self.prefix.default_value(node),
+        }
+    }
+
+    fn metadata_catalogue(&self) -> &'static [&'static str] {
+        &["type", "length", "path", "size"]
+    }
+
+    fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
+        match Self::unpack(node) {
+            Some((i, local)) => self.with_element(i, |a| a.metadata(local, key)).flatten(),
+            None if node == self.anchor => match key {
+                "type" => Some(Value::Str("array".into())),
+                "length" => Some(Value::Int(self.offsets.len() as i64)),
+                "path" => Some(Value::Str(self.path.display().to_string())),
+                "size" => Some(Value::Int(self.size as i64)),
+                _ => self.prefix.metadata(node, key),
+            },
+            None => match key {
+                "path" if node == self.prefix.root() => {
+                    Some(Value::Str(self.path.display().to_string()))
+                }
+                "size" if node == self.prefix.root() => Some(Value::Int(self.size as i64)),
+                _ => self.prefix.metadata(node, key),
+            },
+        }
+    }
+
+    fn can_refer_to(&self, _source: NodeId, _target: NodeId) -> Option<bool> {
+        Some(true)
+    }
+
+    fn ref_property(&self, node: NodeId) -> Option<String> {
+        match Self::unpack(node) {
+            Some((i, local)) => self.with_element(i, |a| a.ref_property(local)).flatten(),
+            None => self.prefix.ref_property(node),
+        }
+    }
+
+    fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
+        let reference = self.property(node, property)?;
+        let Value::Str(s) = reference else {
+            return None;
+        };
+        if s == "#" {
+            return Some(self.root());
+        }
+        if let Some(fragment) = s.strip_prefix('#') {
+            return self.resolve_fragment(node, fragment);
+        }
+        match Self::unpack(node) {
+            Some((i, local)) => self
+                .with_element(i, |a| {
+                    a.resolve(local, property, hint).map(|r| Self::pack(i, r))
+                })
+                .flatten(),
+            None => self.prefix.resolve(node, property, hint),
+        }
+    }
+
+    /// `#/key/i/rest` reaches element `i` of the array and its arbor
+    /// below; any other fragment the prefix resolves.
+    fn resolve_fragment(&self, _node: NodeId, fragment: &str) -> Option<NodeId> {
+        let trimmed = fragment.trim_start_matches('/');
+        if trimmed.is_empty() {
+            return Some(self.root());
+        }
+        let rest = match &self.key {
+            None => trimmed,
+            Some(k) => match trimmed.strip_prefix(k.as_str()) {
+                Some(r) if r.is_empty() => return Some(self.anchor),
+                Some(r) if r.starts_with('/') => r.trim_start_matches('/'),
+                _ => return self.prefix.resolve_fragment(self.prefix.root(), fragment),
+            },
+        };
+        let (first, rest) = rest.split_once('/').unwrap_or((rest, ""));
+        let Ok(i) = first.parse::<u32>() else {
+            return self.prefix.resolve_fragment(self.prefix.root(), fragment);
+        };
+        let local_fragment = format!("/{i}/{rest}");
+        let local_fragment = local_fragment.trim_end_matches('/').to_string();
+        self.with_element(i, |a| {
+            a.resolve_fragment(a.root(), &local_fragment)
+                .map(|r| Self::pack(i, r))
+        })
+        .flatten()
+    }
+}
+
+#[cfg(test)]
+mod lines_tests {
+    use super::*;
+
+    const TEXT: &str = "{\"name\":\"Braund\",\"age\":22,\"tags\":[\"a\",\"b\"],\"home\":{\"city\":\"X\"}}\n\n{\"name\":\"Cumings\",\"age\":38,\"link\":{\"$ref\":\"#/0/home\"}}\n[1,2]\n\"plain\"\n";
+
+    fn file() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("quarb-json-lines-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("t.jsonl");
+        std::fs::write(&p, TEXT).unwrap();
+        p
+    }
+
+    /// Every line's arbor reads as the whole reading reads it: the
+    /// names, kinds, cells, pointers and metadata, the ids apart.
+    #[test]
+    fn the_lines_read_as_the_whole_file_does() {
+        let p = file();
+        let s = JsonLines::open(&p, Reading::Node).unwrap();
+        let w = JsonAdapter::parse_lines(TEXT).unwrap();
+        let sl = s.children(s.root());
+        let wl = w.children(w.root());
+        assert_eq!(sl.len(), 4);
+        assert_eq!(sl.len(), wl.len());
+        fn walk(s: &JsonLines, sn: NodeId, w: &JsonAdapter, wn: NodeId, depth: usize) {
+            assert!(depth < 8);
+            assert_eq!(s.name(sn), w.name(wn), "name at {}", w.pointer(wn));
+            assert_eq!(s.traits(sn), w.traits(wn), "traits at {}", w.pointer(wn));
+            assert_eq!(
+                s.properties(sn),
+                w.properties(wn),
+                "properties at {}",
+                w.pointer(wn)
+            );
+            assert_eq!(
+                s.default_value(sn),
+                w.default_value(wn),
+                "value at {}",
+                w.pointer(wn)
+            );
+            assert_eq!(s.pointer(sn), w.pointer(wn), "pointer");
+            assert_eq!(s.metadata(sn, "length"), w.metadata(wn, "length"));
+            for k in ["name", "age", "tags", "home"] {
+                assert_eq!(
+                    s.property(sn, k),
+                    w.property(wn, k),
+                    "{k} at {}",
+                    w.pointer(wn)
+                );
+            }
+            let (sc, wc) = (s.children(sn), w.children(wn));
+            assert_eq!(sc.len(), wc.len(), "children at {}", w.pointer(wn));
+            for (a, b) in sc.iter().zip(wc.iter()) {
+                assert_eq!(s.parent(*a), Some(sn));
+                walk(s, *a, w, *b, depth + 1);
+            }
+        }
+        for (a, b) in sl.iter().zip(wl.iter()) {
+            assert_eq!(s.parent(*a), Some(s.root()));
+            walk(&s, *a, &w, *b, 0);
+        }
+        // out of order, and back
+        assert_eq!(
+            s.property(sl[1], "name"),
+            Some(Value::Str("Cumings".into()))
+        );
+        assert_eq!(s.property(sl[0], "age"), Some(Value::Int(22)));
+        assert_eq!(s.metadata(s.root(), "n-lines"), Some(Value::Int(4)));
+        // a reference across lines through the index
+        let link = s
+            .children(sl[1])
+            .into_iter()
+            .find(|c| s.name(*c).as_deref() == Some("link"))
+            .unwrap();
+        let target = s.resolve(link, "$ref", None).unwrap();
+        assert_eq!(s.pointer(target), "/0/home");
+        assert_eq!(s.property(target, "city"), Some(Value::Str("X".into())));
+    }
+}
+
+#[cfg(test)]
+mod array_tests {
+    //! The one-array document streamed reads as the whole file does,
+    //! node for node, under a key and at the root.
+    use super::*;
+
+    const KEYED: &str = "{\"meta\": {\"n\": 2, \"tags\": [\"x\"]},\n \"books\": [\n  {\"title\": \"Iliad\", \"year\": -750, \"people\": [{\"name\": \"Homer\"}]},\n  {\"title\": \"Emma\", \"year\": 1815, \"ref\": \"#/books/0\"},\n  {\"title\": \"Odyssey\"}\n ],\n \"note\": \"end\"}\n";
+    const ROOT: &str = "[{\"a\": 1, \"b\": [1, 2]}, {\"a\": \"two\"}, 3, \"four\", null]";
+
+    fn file(name: &str, text: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("quarb-json-array-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join(name);
+        std::fs::write(&p, text).unwrap();
+        p
+    }
+
+    fn walk(s: &JsonArray, sn: NodeId, w: &JsonAdapter, wn: NodeId, depth: usize) {
+        assert!(depth < 10);
+        assert_eq!(s.name(sn), w.name(wn), "name at {}", w.pointer(wn));
+        assert_eq!(s.traits(sn), w.traits(wn), "traits at {}", w.pointer(wn));
+        assert_eq!(
+            s.properties(sn),
+            w.properties(wn),
+            "properties at {}",
+            w.pointer(wn)
+        );
+        assert_eq!(
+            s.default_value(sn),
+            w.default_value(wn),
+            "value at {}",
+            w.pointer(wn)
+        );
+        assert_eq!(s.pointer(sn), w.pointer(wn), "pointer");
+        for k in ["type", "length"] {
+            assert_eq!(
+                s.metadata(sn, k),
+                w.metadata(wn, k),
+                "{k} at {}",
+                w.pointer(wn)
+            );
+        }
+        let sc = s.children(sn);
+        let wc = w.children(wn);
+        assert_eq!(sc.len(), wc.len(), "children at {}", w.pointer(wn));
+        for (a, b) in sc.iter().zip(wc.iter()) {
+            assert_eq!(s.parent(*a), Some(sn), "parent at {}", w.pointer(*b));
+            walk(s, *a, w, *b, depth + 1);
+        }
+    }
+
+    #[test]
+    fn the_keyed_array_reads_as_the_whole_file_does() {
+        let p = file("keyed.json", KEYED);
+        let s = JsonArray::open(&p, Reading::Node)
+            .unwrap()
+            .expect("an array worth streaming");
+        assert_eq!(s.n_elements(), 3);
+        let w = JsonAdapter::parse(KEYED).unwrap();
+        walk(&s, s.root(), &w, w.root(), 0);
+        // the plan hooks
+        let books = s
+            .children(s.root())
+            .into_iter()
+            .find(|c| s.name(*c).as_deref() == Some("books"))
+            .unwrap();
+        let plan = quarb::StepPlan {
+            traits: Vec::new(),
+            cap: quarb::Cap {
+                nodes: None,
+                bytes: None,
+            },
+            axis: quarb::PlanAxis::Child,
+            name: None,
+            conjuncts: Vec::new(),
+            limit: Some(2),
+            order: None,
+        };
+        assert_eq!(s.count(books, &plan), Some(3));
+        assert_eq!(s.select(books, &plan).map(|sel| sel.nodes.len()), Some(2));
+        // the fragment reference across elements
+        let emma = s.children(books)[1];
+        let target = s.resolve(emma, "ref", None).expect("resolves");
+        assert_eq!(
+            s.property(target, "title"),
+            Some(Value::Str("Iliad".into()))
+        );
+        assert_eq!(s.metadata(books, "length"), Some(Value::Int(3)));
+    }
+
+    #[test]
+    fn the_root_array_reads_as_the_whole_file_does() {
+        let p = file("root.json", ROOT);
+        let s = JsonArray::open(&p, Reading::Node)
+            .unwrap()
+            .expect("an array worth streaming");
+        assert_eq!(s.n_elements(), 5);
+        let w = JsonAdapter::parse(ROOT).unwrap();
+        walk(&s, s.root(), &w, w.root(), 0);
+        assert_eq!(s.pointer(s.children(s.root())[0]), "/0");
+    }
+
+    #[test]
+    fn a_document_without_an_array_worth_streaming_reads_whole() {
+        let p = file(
+            "scalar.json",
+            "{\"a\": {\"b\": [1, 2, 3]}, \"c\": \"a long text that outweighs the array by far, twice over at least\"}",
+        );
+        assert!(JsonArray::open(&p, Reading::Node).unwrap().is_none());
+        let p = file("num.json", "42");
+        assert!(JsonArray::open(&p, Reading::Node).unwrap().is_none());
     }
 }

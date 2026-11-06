@@ -103,9 +103,21 @@ pub(crate) fn navigate_paths(
                         edges.into_iter().map(|(s, e)| (s, Some(e))).collect()
                     } else {
                         let mut succs = Vec::new();
+                        // the branch's last step takes the pipeline's
+                        // prefix into its plan (ruling 2026-11-05),
+                        // at the top level alone
+                        let armed = outer.is_none()
+                            && elems.last().is_some_and(|l| std::ptr::eq(l, elem))
+                            && crate::pipeline::with_run(|s| s.prefix_limit.is_some());
+                        if armed {
+                            crate::pipeline::with_run(|s| s.limit_armed = true);
+                        }
                         apply_step(
                             adapter, node, step, trace, outer, witness, ext, register, &mut succs,
                         );
+                        if armed {
+                            crate::pipeline::with_run(|s| s.limit_armed = false);
+                        }
                         succs
                             .into_iter()
                             .map(|s| (s, arrived_edge(adapter, node, step, s)))
@@ -1586,6 +1598,20 @@ pub(crate) fn project(adapter: &impl AstAdapter, node: NodeId, proj: &Projection
 
 /// Apply one step to a single source node, appending results to `out`.
 #[allow(clippy::too_many_arguments)]
+/// The prefix the step's plan carries (ruling 2026-11-05): the
+/// pipeline's, where the hop in progress is the branch's last step
+/// and the step tests nothing of its own after the adapter's cut.
+fn plan_limit(step: &Step) -> Option<usize> {
+    if !step.predicates.is_empty()
+        || !step.traits.is_empty()
+        || !step.labels.is_empty()
+        || step.leaf
+    {
+        return None;
+    }
+    crate::pipeline::with_run(|s| if s.limit_armed { s.prefix_limit } else { None })
+}
+
 pub(crate) fn apply_step(
     adapter: &impl AstAdapter,
     node: NodeId,
@@ -1625,7 +1651,7 @@ pub(crate) fn apply_step(
                     _ => None,
                 },
                 conjuncts,
-                limit: None,
+                limit: plan_limit(step),
                 order: None,
             };
             let mut consumed_first = false;
@@ -1976,7 +2002,7 @@ pub(crate) fn descendant_step(
                 axis: PlanAxis::Descendant,
                 name: Some(n),
                 conjuncts,
-                limit: None,
+                limit: plan_limit(step),
                 order: None,
             };
             adapter.select(node, &plan).map(|sel| {

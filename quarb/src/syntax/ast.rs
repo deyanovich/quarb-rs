@@ -887,6 +887,12 @@ pub enum ProjShape {
     Columns {
         items: Vec<(Option<String>, Operand)>,
         index: Option<Box<Operand>>,
+        /// `-a|--autoindex` (ruling 2026-11-06): the positions
+        /// prepended as the index, as `| autoindex` does.
+        autoindex: bool,
+        /// `-c|--cast=:col<type>` (ruling 2026-11-06): the columns
+        /// cast after the build, each a typed projector or a tuple.
+        casts: Vec<Operand>,
     },
 }
 
@@ -1001,8 +1007,18 @@ pub enum Operand {
     Cursor,
     /// `base:name` — a field of a record value: the
     /// bottom rung of the colon ladder, a value's field below a
-    /// node's property. A leading `:name` reads the topic's field.
-    Field { base: Box<Operand>, name: String },
+    /// node's property. A leading `:name` reads the topic's field:
+    /// `bare` says the colon was written without its base (`:name`,
+    /// the base the topic), where `$_:name` writes the topic out —
+    /// alike everywhere but under a row in reach (ruling 2026-11-05:
+    /// a table projector's expression item and `map`'s body read the
+    /// bare `:name` as the row's cell, the written `$_` staying the
+    /// table or the cell).
+    Field {
+        base: Box<Operand>,
+        name: String,
+        bare: bool,
+    },
     /// `t[[label]]`, `t[[x; y]]`, `t[[a..b]]`, `r[[k]]` — the lookup
     /// by label (spec: Indexing a Value, draft 166): on an indexed
     /// table the rows carrying the label, on a record the field
@@ -1057,6 +1073,10 @@ pub enum Operand {
     /// named one matches the header by name).
     Table {
         header: Option<Vec<String>>,
+        /// The header's declarations (ruling 2026-11-06, a type rides
+        /// the name): `#(@(n<int>; s); …)` declares column n; empty
+        /// where no name carries a trait.
+        declared: Vec<Option<crate::value::ColumnType>>,
         rows: Vec<TableRow>,
     },
     /// `@%(...)` — the record array (spec: List Construction):

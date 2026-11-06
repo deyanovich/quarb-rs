@@ -410,7 +410,12 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   untouched tables are never read (\texttt{:::loaded},
   \texttt{:::n-loaded} report the state). Engine
   adapters are thin catalog drivers over it. Depends on
-  \texttt{quarb}. \\
+  \texttt{quarb}. The pushdown scanning round (2026-11-06): a child hop keeping
+  a prefix reads \texttt{LIMIT k} in the whole read's order
+  through the driver's prefix fetcher (declined where no order
+  backs the cut), and \texttt{@| count} on a table not read is
+  the driver's \texttt{count(*)}; a model or a multi-source
+  mount forwards both to the source under its own node. \\
 \texttt{quarb-sqlite} & The SQLite catalog driver: PRAGMA
   introspection, storage-class type mapping. Depends on
   \texttt{quarb-relational} and \texttt{rusqlite}. \\
@@ -1223,7 +1228,9 @@ root-anchored sequence of hops, each an axis followed by a name:
 \texttt{--defs}, \texttt{--expand}
   & \live fragments: parse-time expansion with call-by-name
     \texttt{\$param} forms, defs files (\texttt{\#} line comments
-    stripped in \texttt{parse\_defs}), and the unparser
+    stripped in \texttt{parse\_defs}; the block comment
+    \texttt{(!!\ ...\ )} is whitespace to the lexer wherever it
+    stands, ruling 2026-11-06), and the unparser
     (\texttt{quarb::unparse}) rendering any parsed query back to
     canonical text (\texttt{--expand} = macroexpand); correlation
     chains and inline-pipe splices as bodies;
@@ -1947,6 +1954,16 @@ pub trait AstAdapter {
     /// index bucket's length). `None` walks.
     fn count(&self, _from: NodeId, _plan: &StepPlan<'_>)
         -> Option<usize> { None }
+    /// The columns of the rows `row_text` serves, for the source
+    /// `node` belongs to: a source whose rows are records of one
+    /// shape (a CSV's) names them; `None` where they have no one shape.
+    fn row_columns(&self, _node: NodeId) -> Option<Vec<String>> { None }
+    /// A row node's cells as text in the columns' order, handed to
+    /// `f` once (an empty text: null) and `true`; `false` where the
+    /// node is no row of that shape. The one-pass typed table build
+    /// parses the cells from the text.
+    fn row_text(&self, _node: NodeId, _f: &mut dyn FnMut(&[&str]))
+        -> bool { false }
     /// A batching hint before the engine reads the properties
     /// `names` of every node in `nodes` (the next command projects
     /// them): the projection twin of `prefetch_links`.
