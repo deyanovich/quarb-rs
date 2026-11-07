@@ -2832,7 +2832,11 @@ fn pushdown_applies(cli: &Cli) -> bool {
     // prices the query against the store's estimator and prints or
     // refuses before anything is read; a pushdown would execute the
     // SQL outright and drop both flags.
+    // A model enriches the arbor (derived containers, references,
+    // edges, weights) and is checked at load; the SQL plan sees the
+    // bare source, so a modelled run goes through the engine.
     !cli.no_pushdown
+        && cli.model.is_none()
         && !cli.plan
         && cli.budget.is_none()
         && !cli.kaiv

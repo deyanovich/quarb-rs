@@ -223,17 +223,29 @@ pub enum Token {
     /// quantifier. `{n}` carries `(n, Some(n))`; `{m,}` carries
     /// `(m, None)` (open-ended, clamped to the adapter's quantifier
     /// bound at execution).
-    Quant { min: usize, max: Option<usize> },
+    Quant {
+        min: usize,
+        max: Option<usize>,
+        /// `{abs:2;3}` — a cost rule named before the bounds (spec:
+        /// Def. Cost Rule); `None` is the signed sum.
+        rule: Option<String>,
+    },
     /// `{.g}` glued to the aggregation pipe: the fold's selector
     /// (spec: The Pipeline, the fold by a regula), its text as
     /// written; `glued` is false when a space stood before it.
     FoldSel { text: String, glued: bool },
     /// `{;100_km}` / `{10_km;100_km}` / `{2_h;}` — a budget
     /// quantifier: the floor and the ceiling as written (spec: The
-    /// budget quantifier). A brace pair alone, never after `+`/`*`.
+    /// budget quantifier), each a signed quantity; or the bare unit
+    /// `{_km}`, the dimension named and no bound. A brace pair
+    /// alone, never after `+`/`*`.
     Budget {
         floor: Option<String>,
         ceiling: Option<String>,
+        /// `{_km}` — the unit after the underscore, no bounds.
+        unit: Option<String>,
+        /// `{abs:2_km;3_km}` — a cost rule named before the bounds.
+        rule: Option<String>,
     },
     /// `~(...)` — the inner regex pattern.
     Regex(String),
@@ -1839,7 +1851,11 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             // plus in a value group (`(+2)`) in any position.
             '(' if at(i + 1) == Some('+') && quantifier_body(&chars, i + 2, ')') => {
                 let (min, max, next) = read_quantifier(&chars, i + 2, ')')?;
-                tokens.push(Token::Quant { min, max });
+                tokens.push(Token::Quant {
+                    min,
+                    max,
+                    rule: None,
+                });
                 i = next;
             }
             // `(;cmd)` — the rounded shell literal, the backtick's
@@ -2163,15 +2179,34 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 tokens.push(Token::FoldSel { text, glued });
                 i += len + 2;
             }
-            '{' if budget_body(&chars, i + 1, '}') => {
-                let (floor, ceiling, next) = read_budget(&chars, i + 1, '}')?;
-                tokens.push(Token::Budget { floor, ceiling });
-                i = next;
-            }
             '{' => {
-                let (min, max, next) = read_quantifier(&chars, i + 1, '}')?;
-                tokens.push(Token::Quant { min, max });
-                i = next;
+                // a cost rule named before the bounds: `{abs:2_km;3_km}`
+                // (spec: Def. Cost Rule)
+                let (rule, body) = read_cost_rule(&chars, i + 1)?;
+                if let Some((unit, next)) = read_bare_unit(&chars, body, '}')? {
+                    // the bare-unit brace `{_km}` / `{min:_m}` (ruling
+                    // 2026-11-07): the dimension named, no bounds
+                    tokens.push(Token::Budget {
+                        floor: None,
+                        ceiling: None,
+                        unit: Some(unit),
+                        rule,
+                    });
+                    i = next;
+                } else if budget_body(&chars, body, '}') {
+                    let (floor, ceiling, next) = read_budget(&chars, body, '}')?;
+                    tokens.push(Token::Budget {
+                        floor,
+                        ceiling,
+                        unit: None,
+                        rule,
+                    });
+                    i = next;
+                } else {
+                    let (min, max, next) = read_quantifier(&chars, body, '}')?;
+                    tokens.push(Token::Quant { min, max, rule });
+                    i = next;
+                }
             }
             other => {
                 return Err(QuarbError::unsupported(format!(
@@ -2531,10 +2566,92 @@ fn read_interpolated(chars: &[char], start: usize) -> Result<(Vec<InterpPart>, u
     read_interpolated_until(chars, start, '"')
 }
 
+/// The bare-unit brace's body (ruling 2026-11-07): an underscore and
+/// a unit's name up to `close`, `{_km}`, `{min:_t}` — the dimension
+/// the brace measures and the unit its costs print in, no bounds.
+/// Returns the unit and the index past the closer; `None` for any
+/// other body. A unit beside a `;` is refused: a bare unit takes no
+/// bounds, since a bound's own unit names the dimension.
+fn read_bare_unit(chars: &[char], start: usize, close: char) -> Result<Option<(String, usize)>> {
+    let mut k = start;
+    let mut body = String::new();
+    while let Some(&c) = chars.get(k) {
+        if c == close {
+            break;
+        }
+        body.push(c);
+        k += 1;
+    }
+    if chars.get(k) != Some(&close) {
+        return Ok(None);
+    }
+    let sides: Vec<&str> = body.split(';').map(str::trim).collect();
+    if !sides.iter().any(|s| s.starts_with('_')) {
+        return Ok(None);
+    }
+    if sides.len() > 1 {
+        return Err(QuarbError::lex(format!(
+            "a bare unit takes no bounds: the bound names the dimension — write the unit \
+             alone, '{{{u}}}', or bounds, '{{;20{u}}}'",
+            u = sides
+                .iter()
+                .find(|s| s.starts_with('_'))
+                .expect("one side opens with '_'")
+        )));
+    }
+    let unit = &sides[0][1..];
+    if unit.is_empty()
+        || !unit
+            .chars()
+            .next()
+            .is_some_and(crate::value::quantity::is_name_char)
+        || !unit.chars().all(|c| {
+            crate::value::quantity::is_name_char(c)
+                || c.is_ascii_digit()
+                || matches!(c, '*' | '/' | '^')
+        })
+    {
+        return Err(QuarbError::lex(format!(
+            "a bare unit names a unit after its underscore, '{{_km}}': '{{{}}}' names none",
+            sides[0]
+        )));
+    }
+    Ok(Some((unit.to_string(), k + 1)))
+}
+
 /// Whether a brace body up to `close` is a budget: one `;` at most,
-/// and a quantity literal — digits, then `_` or a space and a unit's
-/// letters — on at least one side, nothing else (`;100_km`,
-/// `10_km;100_km`, `2_h;`). A bare count body is not.
+/// and a quantity literal — digits, a sign before them allowed, then
+/// `_` or a space and a unit's letters — on at least one side,
+/// nothing else (`;100_km`, `10_km;100_km`, `2_h;`, `-200_m;`). A
+/// bare count body is not.
+/// A cost rule's name and colon at the start of a brace body
+/// (`abs:`, `rise:`, `fall:`, `max:`, `min:`): the rule and where the
+/// bounds begin; no rule, the body as it stands. `::` is a projection,
+/// never a rule.
+fn read_cost_rule(chars: &[char], start: usize) -> Result<(Option<String>, usize)> {
+    let mut k = start;
+    let mut name = String::new();
+    while let Some(&c) = chars.get(k) {
+        if c.is_ascii_lowercase() {
+            name.push(c);
+            k += 1;
+        } else {
+            break;
+        }
+    }
+    if name.is_empty() || chars.get(k) != Some(&':') || chars.get(k + 1) == Some(&':') {
+        return Ok((None, start));
+    }
+    if crate::syntax::ast::CostRule::parse(&name).is_none() {
+        return Err(QuarbError::lex(format!(
+            "'{name}:' names no cost rule: a brace takes abs (the total variation), rise (the \
+             total ascent), fall (the total descent), max or min before its bounds, \
+             '{{abs:2_km;3_km}}'; the signed sum needs no name"
+        )));
+    }
+    Ok((Some(name), k + 1))
+}
+
 fn budget_body(chars: &[char], start: usize, close: char) -> bool {
     let mut k = start;
     let mut unit_letter = false;
@@ -2551,7 +2668,7 @@ fn budget_body(chars: &[char], start: usize, close: char) -> bool {
                 semis += 1;
                 side_open = true;
             }
-            ' ' if side_open => {}
+            ' ' | '-' | '+' if side_open => {}
             c if c.is_ascii_digit() => side_open = false,
             _ if side_open => return false,
             '.' | '_' | ' ' => {}
@@ -2568,7 +2685,7 @@ fn budget_body(chars: &[char], start: usize, close: char) -> bool {
 }
 
 /// Read a budget quantifier's body after the opener at `start`, up
-/// to `close`: `floor;ceiling`, either side absent, each the
+/// to `close`: `floor;ceiling`, either side absent, each the signed
 /// quantity text as written (spaces trimmed, `_` kept). An exact
 /// form `{Q}` — no `;` — is refused with a pointer at the ceiling.
 fn read_budget(
@@ -2899,7 +3016,7 @@ mod quant_tests {
     #[test]
     fn quantifier_forms() {
         let quant = |src: &str| match lex(src).unwrap().as_slice() {
-            [Token::Quant { min, max }] => (*min, *max),
+            [Token::Quant { min, max, .. }] => (*min, *max),
             other => panic!("expected a single Quant, got {other:?}"),
         };
         assert_eq!(quant("{2}"), (2, Some(2)));
@@ -2909,11 +3026,11 @@ mod quant_tests {
         // a budget: the bounds as written (spec: The budget quantifier)
         assert!(matches!(
             lex("{;100_km}").unwrap().as_slice(),
-            [Token::Budget { floor: None, ceiling: Some(c) }] if c == "100_km"
+            [Token::Budget { floor: None, ceiling: Some(c), .. }] if c == "100_km"
         ));
         assert!(matches!(
             lex("{2_h;}").unwrap().as_slice(),
-            [Token::Budget { floor: Some(f), ceiling: None }] if f == "2_h"
+            [Token::Budget { floor: Some(f), ceiling: None, .. }] if f == "2_h"
         ));
         assert!(
             lex("{5_km}")
@@ -2921,6 +3038,36 @@ mod quant_tests {
                 .to_string()
                 .contains("no exact form")
         );
+        // a bound is a signed quantity (ruling 2026-11-07)
+        assert!(matches!(
+            lex("{min:-200_m;}").unwrap().as_slice(),
+            [Token::Budget { floor: Some(f), ceiling: None, unit: None, rule: Some(r) }]
+                if f == "-200_m" && r == "min"
+        ));
+        assert!(matches!(
+            lex("{max:;-100_m}").unwrap().as_slice(),
+            [Token::Budget { floor: None, ceiling: Some(c), unit: None, .. }] if c == "-100_m"
+        ));
+        // the bare-unit brace: the dimension and the printing unit,
+        // no bounds; a unit beside a bound is refused
+        assert!(matches!(
+            lex("{_km}").unwrap().as_slice(),
+            [Token::Budget { floor: None, ceiling: None, unit: Some(u), rule: None }] if u == "km"
+        ));
+        assert!(matches!(
+            lex("{min:_t}").unwrap().as_slice(),
+            [Token::Budget { floor: None, ceiling: None, unit: Some(u), rule: Some(r) }]
+                if u == "t" && r == "min"
+        ));
+        assert!(matches!(
+            lex("{ _m/s }").unwrap().as_slice(),
+            [Token::Budget { unit: Some(u), .. }] if u == "m/s"
+        ));
+        for src in ["{_m;20_km}", "{_m;}", "{;_m}"] {
+            let e = lex(src).unwrap_err().to_string();
+            assert!(e.contains("a bare unit takes no bounds"), "{src}: {e}");
+        }
+        assert!(lex("{_}").unwrap_err().to_string().contains("names none"));
         assert!(lex("{1,3}").unwrap_err().to_string().contains("retired"));
         assert_eq!(quant("{2;}"), (2, None));
         assert_eq!(quant("{ 1 ; 3 }"), (1, Some(3)));
@@ -2936,7 +3083,8 @@ mod quant_tests {
                 Token::Slash,
                 Token::Quant {
                     min: 2,
-                    max: Some(2)
+                    max: Some(2),
+                    rule: None
                 }
             ]
         );
@@ -3403,19 +3551,25 @@ mod glued_operator_tests {
             lex("(+2;3)").unwrap(),
             vec![Token::Quant {
                 min: 2,
-                max: Some(3)
+                max: Some(3),
+                rule: None
             }]
         );
         assert_eq!(
             lex("(+2;2)").unwrap(),
             vec![Token::Quant {
                 min: 2,
-                max: Some(2)
+                max: Some(2),
+                rule: None
             }]
         );
         assert_eq!(
             lex("(+2;)").unwrap(),
-            vec![Token::Quant { min: 2, max: None }]
+            vec![Token::Quant {
+                min: 2,
+                max: None,
+                rule: None
+            }]
         );
         assert!(lex("(+2;3}").is_err());
         // the old `(;…)` quantifier is the shell literal now

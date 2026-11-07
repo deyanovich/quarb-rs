@@ -1023,6 +1023,7 @@ fn group_wrap(
                 min: 1,
                 max: Some(1),
                 budget: None,
+                rule: None,
             })
         && g.predicates.is_empty()
         && g.reach == Reach::All
@@ -1038,6 +1039,7 @@ fn group_wrap(
     vec![PathElem::Group(Group {
         alts: vec![elems],
         quant,
+        more: Vec::new(),
         predicates,
         traits: Vec::new(),
         reach,
@@ -3751,12 +3753,14 @@ impl Parser<'_> {
                     min: 1,
                     max: None,
                     budget: None,
+                    rule: None,
                 }
             } else {
                 Quant {
                     min: 0,
                     max: None,
                     budget: None,
+                    rule: None,
                 }
             });
             name = stripped.to_string();
@@ -4394,7 +4398,9 @@ impl Parser<'_> {
                         min: 1,
                         max: Some(1),
                         budget: None,
+                        rule: None,
                     },
+                    more: Vec::new(),
                     predicates: Vec::new(),
                     traits: Vec::new(),
                     reach: Reach::All,
@@ -4426,6 +4432,7 @@ impl Parser<'_> {
                     min: 1,
                     max: Some(1),
                     budget: None,
+                    rule: None,
                 }),
                 predicates,
                 reach,
@@ -5612,7 +5619,7 @@ impl Parser<'_> {
     /// `.v(body){N}` — a quantifier after a push repeats it; after
     /// any other command it is refused.
     fn quantified_push(&mut self, command: Command) -> Result<Command> {
-        let Some(&Token::Quant { min, max }) = self.peek() else {
+        let Some(&Token::Quant { min, max, .. }) = self.peek() else {
             return Ok(command);
         };
         if !matches!(
@@ -7373,10 +7380,12 @@ impl Parser<'_> {
                 step.labels = labels;
                 if matches!(self.peek(), Some(Token::Quant { .. })) {
                     let quant = self.group_quant()?.expect("peeked a quantifier");
+                    let more = self.more_braces(&quant, true)?;
                     let predicates = self.group_predicates()?;
                     return Ok(PathElem::Group(Group {
                         alts: vec![vec![PathElem::Step(step)]],
                         quant,
+                        more,
                         predicates,
                         traits: Vec::new(),
                         reach: self.reach(),
@@ -7425,11 +7434,17 @@ impl Parser<'_> {
                 predicates: Vec::new(),
                 leaf: false,
             };
+            let braced = matches!(
+                self.peek(),
+                Some(Token::Quant { .. } | Token::Budget { .. })
+            );
             let quant = self.group_quant()?.expect("peeked a quantifier");
+            let more = self.more_braces(&quant, braced)?;
             let predicates = self.group_predicates()?;
             return Ok(PathElem::Group(Group {
                 alts: vec![vec![PathElem::Step(hop)]],
                 quant,
+                more,
                 predicates,
                 traits: Vec::new(),
                 reach: self.reach(),
@@ -7441,11 +7456,17 @@ impl Parser<'_> {
         // (`/div{2}` ≡ `(/div){2}`); `+`/`*` are name characters, so
         // those two spellings need the parentheses.
         if matches!(self.peek(), Some(Token::Quant { .. })) {
+            let braced = matches!(
+                self.peek(),
+                Some(Token::Quant { .. } | Token::Budget { .. })
+            );
             let quant = self.group_quant()?.expect("peeked a quantifier");
+            let more = self.more_braces(&quant, braced)?;
             let predicates = self.group_predicates()?;
             return Ok(PathElem::Group(Group {
                 alts: vec![vec![PathElem::Step(step)]],
                 quant,
+                more,
                 predicates,
                 traits: Vec::new(),
                 reach: self.reach(),
@@ -7483,11 +7504,17 @@ impl Parser<'_> {
         };
         self.pattern_depth -= 1;
         alts_result?;
+        let braced = matches!(
+            self.peek(),
+            Some(Token::Quant { .. } | Token::Budget { .. })
+        );
         let quant = self.group_quant()?.unwrap_or(Quant {
             min: 1,
             max: Some(1),
             budget: None,
+            rule: None,
         });
+        let more = self.more_braces(&quant, braced)?;
         // `<trait>` after a quantified group filters its matches
         // like a step's trait does, in the step's order (traits,
         // then predicates): `(>token){2}<word>[::lower != "the"]`.
@@ -7497,6 +7524,7 @@ impl Parser<'_> {
         Ok(Group {
             alts,
             quant,
+            more,
             predicates,
             traits,
             reach,
@@ -7640,20 +7668,37 @@ impl Parser<'_> {
         match self.peek() {
             // A budget (spec: The budget quantifier): the bounds as
             // written, resolved at the walk under the run's units.
-            Some(Token::Budget { floor, ceiling }) => {
+            Some(Token::Budget {
+                floor,
+                ceiling,
+                unit,
+                rule,
+            }) => {
                 let budget = Budget {
                     floor: floor.clone(),
                     ceiling: ceiling.clone(),
+                    unit: unit.clone(),
                 };
+                let rule = rule
+                    .as_deref()
+                    .and_then(crate::syntax::ast::CostRule::parse);
                 self.pos += 1;
                 Ok(Some(Quant {
                     min: 0,
                     max: None,
                     budget: Some(budget),
+                    rule,
                 }))
             }
-            Some(Token::Quant { min, max }) => {
+            Some(Token::Quant { min, max, rule }) => {
                 let (min, max) = (*min, *max);
+                if let Some(r) = rule {
+                    return Err(QuarbError::parse(format!(
+                        "'{r}:' is a cost rule, and this brace counts hops: a rule folds a \
+                         weight's legs, so it takes a budget's bounds ('{{{r}:;12_m}}') or the \
+                         bare unit ('{{{r}:_m}}'); a count of hops is '{{m;n}}'"
+                    )));
+                }
                 if max.is_some_and(|n| n < min) {
                     return Err(QuarbError::parse(format!(
                         "quantifier {{{min},{}}} has max below min",
@@ -7665,6 +7710,7 @@ impl Parser<'_> {
                     min,
                     max,
                     budget: None,
+                    rule: None,
                 }))
             }
             Some(Token::Name {
@@ -7677,6 +7723,7 @@ impl Parser<'_> {
                     min: 1,
                     max: None,
                     budget: None,
+                    rule: None,
                 }))
             }
             Some(Token::Name {
@@ -7689,6 +7736,7 @@ impl Parser<'_> {
                     min: 0,
                     max: None,
                     budget: None,
+                    rule: None,
                 }))
             }
             _ => Ok(None),
@@ -7697,6 +7745,54 @@ impl Parser<'_> {
 
     /// Parse a step's tail (traits, predicates, leaf anchor) after its
     /// axis and matcher.
+    /// The braces stacked after a group's first quantifier (spec: Def.
+    /// Walk, the braces stack): each a condition of its own; a brace
+    /// never follows `+` or `*`, two braces of one dimension are
+    /// refused naming both.
+    fn more_braces(&mut self, first: &Quant, first_braced: bool) -> Result<Vec<Quant>> {
+        let mut more: Vec<Quant> = Vec::new();
+        while matches!(
+            self.peek(),
+            Some(Token::Quant { .. } | Token::Budget { .. })
+        ) {
+            if !first_braced {
+                return Err(QuarbError::parse(
+                    "a brace never follows '+' or '*': write the count as a brace too, \
+                     '{1;}{;10_km}'",
+                ));
+            }
+            let brace = self.group_quant()?.expect("peeked a brace");
+            let dim = |q: &Quant| -> String {
+                match &q.budget {
+                    None => "the hop count".to_string(),
+                    Some(b) => {
+                        let text = match (&b.unit, b.ceiling.as_deref().or(b.floor.as_deref())) {
+                            (Some(u), _) => format!("1 {u}"),
+                            (None, bound) => bound.unwrap_or("").replace('_', " "),
+                        };
+                        crate::value::quantity::parse_unit_text(&text)
+                            .map(|(_, base, _, _)| base)
+                            .unwrap_or_default()
+                    }
+                }
+            };
+            // a unit the run declares (`unit parasang …`) resolves only
+            // at the walk, where the same check runs on the bases
+            let d = dim(&brace);
+            if !d.is_empty()
+                && std::iter::once(first)
+                    .chain(more.iter())
+                    .any(|q| dim(q) == d)
+            {
+                return Err(QuarbError::parse(format!(
+                    "two braces measure {d}: one brace per dimension, each a condition of its own"
+                )));
+            }
+            more.push(brace);
+        }
+        Ok(more)
+    }
+
     fn finish_step(&mut self, axis: Axis, matcher: Matcher) -> Result<Step> {
         let mut traits = Vec::new();
         while let Some(clauses) = self.try_trait()? {
@@ -11167,16 +11263,16 @@ impl Parser<'_> {
                                 Some(Projection::CoreMeta(k))
                                     if matches!(
                                         k.as_str(),
-                                        "round" | "hops" | "total" | "labels"
+                                        "round" | "hops" | "total" | "costs" | "label" | "weights"
                                     ) => {}
                                 Some(Projection::CoreMeta(k)) => {
                                     return Err(QuarbError::parse(format!(
-                                        "an edge carries plain properties ($-::{k}), its ends ':source' and ':target', and the facts ':round', ':hops', ':total' and ':labels'; ':{k}' is none of them"
+                                        "an edge carries plain properties ($-::{k}), its ends ':source' and ':target', and the facts ':round', ':hops', ':total', ':costs', its label ':label' and its weights ':weights'; ':{k}' is none of them"
                                     )));
                                 }
                                 Some(Projection::AdapterMeta(_)) => {
                                     return Err(QuarbError::parse(
-                                        "an edge carries plain properties ($-::prop), its ends ':source', ':target', and the facts ':round', ':hops', ':total', ':labels'",
+                                        "an edge carries plain properties ($-::prop), its ends ':source', ':target', and the facts ':round', ':hops', ':total', ':costs', its label ':label', its weights ':weights'",
                                     ));
                                 }
                                 _ => {}
@@ -11482,7 +11578,9 @@ impl Parser<'_> {
                         min: 1,
                         max: Some(1),
                         budget: None,
+                        rule: None,
                     },
+                    more: Vec::new(),
                     predicates: Vec::new(),
                     traits: Vec::new(),
                     reach: Reach::All,

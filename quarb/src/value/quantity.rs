@@ -65,6 +65,24 @@ const BINARY_PREFIXES: &[(&str, i32)] = &[
 /// base expansion is an opaque unit.
 pub const BASE_NAMES: &[&str] = &["m", "kg", "s", "A", "K", "mol", "cd", "b"];
 
+/// The canonical order of dimensions by their base spelling (spec:
+/// the unit appendix): the bases m, kg, s, A, K, mol, cd, then the
+/// bit, then the opaque units by name in code point order; a compound
+/// base (`m/s`, `m^2`) sorts by its leading base after the plain ones.
+pub fn dimension_order(a: &str, b: &str) -> std::cmp::Ordering {
+    fn key(base: &str) -> (u8, usize, &str) {
+        if let Some(i) = BASE_NAMES.iter().position(|n| *n == base) {
+            return (0, i, "");
+        }
+        let lead = base.split(['*', '/', '^']).next().unwrap_or(base);
+        match BASE_NAMES.iter().position(|n| *n == lead) {
+            Some(i) => (1, i, base),
+            None => (2, 0, base),
+        }
+    }
+    key(a).cmp(&key(b))
+}
+
 /// The currency signs a prefix alias reads (`$12`, `€ 12.50`): the
 /// sign with its trailing dash, and the ISO 4217 code it stands for.
 const CURRENCY_SIGNS: &[(&str, &str)] = &[

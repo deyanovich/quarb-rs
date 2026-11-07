@@ -260,22 +260,21 @@ impl<A: AstAdapter> Host for A {
             }
             // the edge facts (spec: Edge facts): what the walk knows
             // of the edge, null outside a quantified group
-            // `$-:labels`: every label the edge carries, the one
-            // walked first (spec: the edge facts, 2026-11-06)
-            Some(Projection::CoreMeta(key)) if key == "labels" => {
-                let mut labels = vec![Value::Str(edge.label.clone())];
-                for (label, target, row) in AstAdapter::link_rows(self, edge.source) {
-                    if target == edge.target
-                        && (edge.row.is_none() || row == edge.row)
-                        && label != edge.label
-                        && !labels
-                            .iter()
-                            .any(|l| matches!(l, Value::Str(s) if *s == label))
-                    {
-                        labels.push(Value::Str(label));
-                    }
-                }
-                Value::list(labels)
+            // `$-:label`: the edge's one label (spec: the edge model,
+            // ruling 2026-11-07) — what bare `$-` answers
+            Some(Projection::CoreMeta(key)) if key == "label" => Value::Str(edge.label.clone()),
+            // `$-:weights`: the edge's declared weights, in the canonical
+            // dimension order, crossed as the thread crossed the edge
+            Some(Projection::CoreMeta(key)) if key == "weights" => {
+                let mut set = edge.weights(self, scope.ext.node == edge.target);
+                set.sort_by(|a, b| {
+                    let base = |v: &Value| match v {
+                        Value::Quantity { base, .. } => base.clone(),
+                        _ => String::new(),
+                    };
+                    crate::value::quantity::dimension_order(&base(a), &base(b))
+                });
+                Value::list(set)
             }
             Some(Projection::CoreMeta(key)) => {
                 scope.walk.and_then(|w| w.fact(key)).unwrap_or(Value::Null)

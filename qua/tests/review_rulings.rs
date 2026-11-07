@@ -583,19 +583,22 @@ fn a_prefix_on_a_unit_that_does_not_take_it_is_refused() {
 }
 
 #[test]
-fn the_edge_carries_every_label_it_has() {
+fn the_edge_carries_one_label() {
     let d = fixture("labels");
     let m = ["--model", "net.model"];
+    // an edge is one element with one label (spec: the edge model,
+    // ruling 2026-11-07): `$-:label` is that label, what bare `$-`
+    // answers; a reference reached under two labels is two edges
     assert_eq!(
         ok(
             &d,
             &[
                 &m[..],
-                &["/hops/*[::id = 1] | ::to_id--> | $-:labels", "net.db"]
+                &["/hops/*[::id = 1] | ::to_id--> | $-:label", "net.db"]
             ]
             .concat()
         ),
-        r#"@("to_id"; "to")"#
+        "to_id"
     );
     assert_eq!(
         ok(
@@ -605,7 +608,15 @@ fn the_edge_carries_every_label_it_has() {
         "to_id"
     );
     let e = refused(&d, &["/hops/*[::id = 1] | ::to_id--> | $-:depth", "net.db"]);
-    assert!(e.contains("':total' and ':labels'"), "{e}");
+    assert!(
+        e.contains("its label ':label' and its weights ':weights'"),
+        "{e}"
+    );
+    let e = refused(
+        &d,
+        &["/hops/*[::id = 1] | ::to_id--> | $-:labels", "net.db"],
+    );
+    assert!(e.contains("':label'"), "{e}");
 }
 
 #[test]

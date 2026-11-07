@@ -709,6 +709,28 @@ impl AstAdapter for MountAdapter {
         self.adapter(m).link_property(src, label, tgt, name)
     }
 
+    fn edge_weights(
+        &self,
+        source: NodeId,
+        label: &str,
+        target: NodeId,
+        row: Option<NodeId>,
+        forward: bool,
+    ) -> Vec<Value> {
+        let (Some((m, src)), Some((mt, tgt))) = (self.decode(source), self.decode(target)) else {
+            return Vec::new();
+        };
+        // An edge lives inside a single mount, its row with it.
+        if m != mt {
+            return Vec::new();
+        }
+        let row = row.and_then(|r| match self.decode(r) {
+            Some((mr, inner)) if mr == m => Some(inner),
+            _ => None,
+        });
+        self.adapter(m).edge_weights(src, label, tgt, row, forward)
+    }
+
     fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
         let (m, inner) = self.decode(node)?;
         // Resolution stays within the node's own mount.

@@ -10,7 +10,7 @@ unit stade, stades = 185 m;
 unit parasang, parasangs = 30 stade;
 ref /stages/*::from_id --> /stations/*[::id = $];
 ref /stages/*::to_id --> /stations/*[::id = $];
-edge /stages/*: ::from_id -- ::to_id as stage;
+edge /stages/*: ::from_id -- ::to_id as stage weights(::parasangs; ::days);
 ";
 
 fn fixture(tag: &str) -> PathBuf {
@@ -99,7 +99,13 @@ fn a_declared_edge_is_its_row() {
 #[test]
 fn an_acyclic_edge_expands_by_node_and_refuses_a_cycle() {
     let dir = fixture("acyclic");
-    let model = format!("{}", MODEL.replace("as stage;", "as stage acyclic;"));
+    let model = format!(
+        "{}",
+        MODEL.replace(
+            "as stage weights(::parasangs; ::days);",
+            "as stage weights(::parasangs; ::days) acyclic;"
+        )
+    );
     std::fs::write(dir.join("roads.model"), &model).unwrap();
     // the promise changes no answer: the exact forms expand by node
     // and round

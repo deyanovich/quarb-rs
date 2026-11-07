@@ -18,7 +18,7 @@ mod parse;
 
 pub use parse::{
     AliasDecl, AliasKind, AliasRule, EdgeDecl, Label, Model, Mount, NodeDecl, RefDecl, RelDecl,
-    UnitDecl, parse_model, parse_model_file, resolve_mount_target,
+    UnitDecl, WeightSpec, parse_model, parse_model_file, resolve_mount_target,
 };
 
 use quarb::{AstAdapter, NodeId, QueryResult, Value};
@@ -162,6 +162,15 @@ struct Fabric {
     /// the link carries (spec: Edge rows). The label named still
     /// walks them.
     consumed: HashSet<(NodeId, String)>,
+    /// An edge row's declared weight properties (`edge … weights(…)`).
+    row_weights: HashMap<NodeId, Vec<WeightSpec>>,
+    /// A reference edge's (source, label, target) → the row holding
+    /// its declared weight properties and their names
+    /// (`ref … weights(…)`), both directions keyed.
+    ref_weights: HashMap<(NodeId, String, NodeId), (NodeId, Vec<WeightSpec>)>,
+    /// The weight potentials: the scope's base nodes, the property,
+    /// the statement (spec: Weight Potentials).
+    potentials: Vec<(HashSet<NodeId>, String, Option<String>, String)>,
 }
 
 /// A base arbor enriched with a model's derived structure.
@@ -480,6 +489,7 @@ impl<A: AstAdapter> ModelAdapter<A> {
         }
         self.check_declared_traits()?;
         self.check_declaration_order()?;
+        self.check_weights()?;
         self.check_ref_targets()?;
         self.check_label_properties()?;
         self.check_trees()
@@ -945,7 +955,20 @@ impl<A: AstAdapter> ModelAdapter<A> {
                 acyclic: HashMap::new(),
                 renamed: HashSet::new(),
                 consumed: HashSet::new(),
+                row_weights: HashMap::new(),
+                ref_weights: HashMap::new(),
+                potentials: Vec::new(),
             };
+            for decl in &self.model.potentials {
+                let scope: HashSet<NodeId> =
+                    self.scope_nodes(&decl.scope, &defs).into_iter().collect();
+                f.potentials.push((
+                    scope,
+                    decl.prop.clone(),
+                    decl.unit.clone(),
+                    decl.stmt.clone(),
+                ));
+            }
             for (c, cont) in self.containers().iter().enumerate() {
                 for (i, m) in cont.members.iter().enumerate() {
                     if let Member::Node(n) = m {
@@ -1163,6 +1186,14 @@ impl<A: AstAdapter> ModelAdapter<A> {
                                 }
                             }
                         }
+                        if !decl.weights.is_empty() {
+                            f.ref_weights
+                                .insert((node, fwd.clone(), target), (node, decl.weights.clone()));
+                            f.ref_weights.insert(
+                                (back_node, back.clone(), target),
+                                (node, decl.weights.clone()),
+                            );
+                        }
                         f.ref_fwd.entry(node).or_default().push((fwd, target));
                         f.ref_back
                             .entry(target)
@@ -1266,6 +1297,9 @@ impl<A: AstAdapter> ModelAdapter<A> {
                                 // one under `as NAME`.
                                 f.edge_rows.insert((*na, fwd, *nb), node);
                                 f.edge_rows.insert((*na, back, *nb), node);
+                                if !decl.weights.is_empty() {
+                                    f.row_weights.insert(node, decl.weights.clone());
+                                }
                             }
                         }
                     }
@@ -2447,6 +2481,75 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
             .or_else(|| self.base.acyclic_link(label))
     }
 
+    /// The edge's declared weights (spec: the edge model, Weights;
+    /// Weight Potentials): the `weights(…)` clause of the edge's or
+    /// reference's declaration read on its row, then every potential
+    /// whose scope holds both ends — prop(target) − prop(source) in
+    /// the direction walked — in the canonical dimension order.
+    fn edge_weights(
+        &self,
+        source: NodeId,
+        label: &str,
+        target: NodeId,
+        row: Option<NodeId>,
+        forward: bool,
+    ) -> Vec<Value> {
+        let f = self.fabric();
+        let mut out: Vec<Value> = Vec::new();
+        let declared: Option<(NodeId, &Vec<WeightSpec>)> = match row {
+            Some(r) => f.row_weights.get(&r).map(|w| (r, w)),
+            None => f
+                .ref_weights
+                .get(&(source, label.to_string(), target))
+                .map(|(holder, w)| (*holder, w)),
+        };
+        if let Some((holder, specs)) = declared {
+            for spec in specs {
+                if let Some(q) = self
+                    .base
+                    .property(holder, &spec.prop)
+                    .and_then(|v| self.weight_quantity(v, spec.unit.as_deref()))
+                {
+                    out.push(q);
+                }
+            }
+        }
+        if !f.potentials.is_empty() {
+            let base_of = |n: NodeId| match self.decode(n) {
+                None => Some(n),
+                Some(_) => self.aliased(n),
+            };
+            if let (Some(s), Some(t)) = (base_of(source), base_of(target)) {
+                for (scope, prop, unit, _) in &f.potentials {
+                    if !(scope.contains(&s) && scope.contains(&t)) {
+                        continue;
+                    }
+                    let (Some(vs), Some(vt)) =
+                        (self.base.property(s, prop), self.base.property(t, prop))
+                    else {
+                        continue;
+                    };
+                    if let Some(mut d) = potential_difference(&vs, &vt, &|v| {
+                        self.weight_quantity(v, unit.as_deref())
+                    }) {
+                        if !forward && let Value::Quantity { value, written, .. } = &mut d {
+                            *value = -*value;
+                            if let Some((m, _)) = written {
+                                *m = -*m;
+                            }
+                        }
+                        out.push(d);
+                    }
+                }
+            }
+        }
+        if out.is_empty() {
+            return self.base.edge_weights(source, label, target, row, forward);
+        }
+        out.sort_by(|a, b| quarb::quantity::dimension_order(quantity_base(a), quantity_base(b)));
+        out
+    }
+
     fn link_property_names(&self, source: NodeId, label: &str, target: NodeId) -> Vec<String> {
         if let Some(row) = self
             .fabric()
@@ -2506,6 +2609,289 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
         };
         names.extend(self.base.unit_names());
         names
+    }
+}
+
+impl<A: AstAdapter> ModelAdapter<A> {
+    /// A property's value as a quantity: a quantity as it is, a text
+    /// read as quantity text under the model's units (`18 parasang`);
+    /// `None` for anything else — a bare number is no quantity.
+    fn as_quantity(&self, v: Value) -> Option<Value> {
+        match v {
+            q @ Value::Quantity { .. } => Some(q),
+            Value::Str(s) => {
+                let (bv, base, mag, unit) =
+                    quarb::quantity::parse_unit_text_with(&s, &|e| self.unit_scale(e))?;
+                Some(Value::Quantity {
+                    value: bv,
+                    base,
+                    written: Some((mag, unit)),
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// A declared weight's value as a quantity: under the typed
+    /// clause (`weights(::km<_km>)`) a bare number — or numeric text —
+    /// is read in the named unit, anything else as `as_quantity`
+    /// reads it; untyped, `as_quantity` alone (a bare number is no
+    /// weight).
+    fn weight_quantity(&self, v: Value, unit: Option<&str>) -> Option<Value> {
+        let Some(unit) = unit else {
+            return self.as_quantity(v);
+        };
+        let number = match &v {
+            Value::Int(n) => Some(*n as f64),
+            Value::Float(x) => Some(*x),
+            Value::Str(s) => s.trim().parse::<f64>().ok(),
+            _ => None,
+        };
+        match number {
+            Some(n) => {
+                let (f, base) = self.unit_scale(unit)?;
+                Some(Value::Quantity {
+                    value: n * f,
+                    base,
+                    written: Some((n, unit.to_string())),
+                })
+            }
+            None => self.as_quantity(v),
+        }
+    }
+
+    /// The weights declarations checked at load (spec: Weights): every
+    /// named property quantity-valued on the scoped nodes, none
+    /// dimensionless, pairwise distinct dimensions; a potential's
+    /// property an instant or a quantity, its dimension shared with
+    /// no declared weight.
+    pub fn check_weights(&self) -> Result<(), String> {
+        if self.model.potentials.is_empty()
+            && self.model.edges.iter().all(|d| d.weights.is_empty())
+            && self.model.refs.iter().all(|d| d.weights.is_empty())
+        {
+            return Ok(());
+        }
+        // the scopes list their containers whole, as the fabric does
+        self.base.whole_listings();
+        let defs = self.seeded_defs();
+        let dimensionless = |base: &str| base.is_empty() || base == "1";
+        let mut declared: Vec<(String, String)> = Vec::new();
+        let mut check = |scope: &str, specs: &[WeightSpec], what: &str| -> Result<(), String> {
+            let nodes = self.scope_nodes(scope, &defs);
+            let mut seen: Vec<(String, String)> = Vec::new();
+            for spec in specs {
+                let name = &spec.prop;
+                // spaced unit text reads no opaque unit: the unit is
+                // built in or declared, as a budget's bound demands
+                if let Some(u) = &spec.unit
+                    && quarb::quantity::parse_unit_text_with(&format!("1 {u}"), &|e| {
+                        self.unit_scale(e)
+                    })
+                    .is_none()
+                {
+                    return Err(format!(
+                        "{what}: weights(::{name}<_{u}>) — '{u}' is no unit; a unit statement \
+                         declares one ('unit {u};')"
+                    ));
+                }
+                if !nodes.is_empty() && nodes.iter().all(|n| self.base.property(*n, name).is_none())
+                {
+                    return Err(format!(
+                        "{what}: weights(::{name}) names no property of the rows"
+                    ));
+                }
+                let Some(q) = nodes
+                    .iter()
+                    .filter_map(|n| self.base.property(*n, name))
+                    .find(|v| !matches!(v, Value::Null))
+                else {
+                    continue;
+                };
+                let Some(Value::Quantity { base, .. }) =
+                    self.weight_quantity(q.clone(), spec.unit.as_deref())
+                else {
+                    return Err(match &spec.unit {
+                        Some(u) => format!(
+                            "{what}: weights(::{name}<_{u}>) names no number — the rows hold {q}"
+                        ),
+                        None => format!(
+                            "{what}: weights(::{name}) names no quantity — the rows hold {q} (a \
+                             bare number is no weight; a unit makes it one: 'weights(::{name}<_UNIT>)')"
+                        ),
+                    });
+                };
+                if dimensionless(&base) {
+                    return Err(format!(
+                        "{what}: weights(::{name}) is dimensionless — the hop count is the unit \
+                         weight, outside the set"
+                    ));
+                }
+                if let Some((_, other)) = seen.iter().find(|(b, _)| *b == base) {
+                    return Err(format!(
+                        "{what}: weights(::{name}) and weights(::{other}) share the dimension \
+                         {base} — one weight per dimension"
+                    ));
+                }
+                seen.push((base.clone(), name.clone()));
+                declared.push((base, format!("{what} ::{name}")));
+            }
+            Ok(())
+        };
+        for decl in &self.model.edges {
+            if !decl.weights.is_empty() {
+                check(
+                    &decl.scope,
+                    &decl.weights,
+                    &format!(
+                        "edge {}: ::{} -- ::{}",
+                        decl.scope, decl.field_a, decl.field_b
+                    ),
+                )?;
+            }
+        }
+        for decl in &self.model.refs {
+            if !decl.weights.is_empty() {
+                check(
+                    &decl.scope,
+                    &decl.weights,
+                    &format!("ref {}::{} --> {}", decl.scope, decl.field, decl.path),
+                )?;
+            }
+        }
+        for decl in &self.model.potentials {
+            if let Some(u) = &decl.unit
+                && quarb::quantity::parse_unit_text_with(&format!("1 {u}"), &|e| self.unit_scale(e))
+                    .is_none()
+            {
+                return Err(format!(
+                    "{}: '::{}<_{u}>' — '{u}' is no unit; a unit statement declares one ('unit \
+                     {u};')",
+                    decl.stmt, decl.prop
+                ));
+            }
+            let nodes = self.scope_nodes(&decl.scope, &defs);
+            if !nodes.is_empty()
+                && nodes
+                    .iter()
+                    .all(|n| self.base.property(*n, &decl.prop).is_none())
+            {
+                return Err(format!(
+                    "{}: '::{}' names no property of the nodes",
+                    decl.stmt, decl.prop
+                ));
+            }
+            let Some(v) = nodes
+                .iter()
+                .filter_map(|n| self.base.property(*n, &decl.prop))
+                .find(|v| !matches!(v, Value::Null))
+            else {
+                continue;
+            };
+            // a quantity (typed, text or as it stands) first; an instant
+            // or ISO text the elapsed time; a bare number has no dimension
+            let base = match self.weight_quantity(v.clone(), decl.unit.as_deref()) {
+                Some(Value::Quantity { base, .. }) => base,
+                _ => match &v {
+                    Value::Instant { .. } | Value::Period { .. } => "s".to_string(),
+                    Value::Str(_) if v.temporal_reading().is_some() => "s".to_string(),
+                    other => {
+                        return Err(format!(
+                            "{}: '::{}' is no potential — the nodes hold {other} (a potential is \
+                             an instant or a quantity; a bare number has no dimension, a unit \
+                             types it: '::{}<_UNIT>')",
+                            decl.stmt, decl.prop, decl.prop
+                        ));
+                    }
+                },
+            };
+            if dimensionless(&base) {
+                return Err(format!(
+                    "{}: '::{}' is dimensionless, and a weight has a dimension",
+                    decl.stmt, decl.prop
+                ));
+            }
+            if let Some((_, other)) = declared.iter().find(|(b, _)| *b == base) {
+                return Err(format!(
+                    "{}: the potential's dimension {base} is already a declared weight's \
+                     ({other}) — one weight per dimension on an edge",
+                    decl.stmt
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// prop(target) − prop(source) under the property's dimension: two
+/// instants a duration, two quantities of one base their difference,
+/// else nothing.
+fn potential_difference(
+    source: &Value,
+    target: &Value,
+    as_quantity: &dyn Fn(Value) -> Option<Value>,
+) -> Option<Value> {
+    match (source, target) {
+        (
+            Value::Instant {
+                secs: s0,
+                nanos: n0,
+                ..
+            },
+            Value::Instant {
+                secs: s1,
+                nanos: n1,
+                ..
+            },
+        ) => Some(Value::Quantity {
+            value: (s1 - s0) as f64 + (*n1 as f64 - *n0 as f64) / 1e9,
+            base: "s".to_string(),
+            written: None,
+        }),
+        _ => {
+            let (
+                Some(Value::Quantity {
+                    value: a, base: ba, ..
+                }),
+                Some(Value::Quantity {
+                    value: b, base: bb, ..
+                }),
+            ) = (as_quantity(source.clone()), as_quantity(target.clone()))
+            else {
+                // instants as text (an ISO column), or periods: their
+                // elapsed time — never a bare number, which has no
+                // dimension
+                let textual = |v: &Value| matches!(v, Value::Str(_) | Value::Period { .. });
+                if !(textual(source) && textual(target)) {
+                    return None;
+                }
+                let (Some((s0, n0)), Some((s1, n1))) =
+                    (source.temporal_reading(), target.temporal_reading())
+                else {
+                    return None;
+                };
+                return Some(Value::Quantity {
+                    value: (s1 - s0) as f64 + (n1 as f64 - n0 as f64) / 1e9,
+                    base: "s".to_string(),
+                    written: None,
+                });
+            };
+            if ba != bb {
+                return None;
+            }
+            Some(Value::Quantity {
+                value: b - a,
+                base: ba,
+                written: None,
+            })
+        }
+    }
+}
+
+fn quantity_base(v: &Value) -> &str {
+    match v {
+        Value::Quantity { base, .. } => base.as_str(),
+        _ => "",
     }
 }
 

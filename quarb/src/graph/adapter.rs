@@ -1525,6 +1525,28 @@ pub trait AstAdapter {
         Vec::new()
     }
 
+    /// The WEIGHTS an edge carries (spec: the edge model, ruling
+    /// 2026-11-07): quantities with pairwise distinct dimensions,
+    /// none dimensionless, in the canonical dimension order — what a
+    /// budget quantifier sums for its dimension and `--weight=UNIT`
+    /// reads, never inferred from the edge's properties. Empty by
+    /// default: a model declares them (`weights(::km)`, a
+    /// `weight-potential`); a substrate that carries weights of its
+    /// own mints them here. `row` is the edge's own row where the
+    /// edge is one; `forward` whether the walk crosses the edge from
+    /// its source to its target (a potential's difference flips its
+    /// sign with the traversal).
+    fn edge_weights(
+        &self,
+        _source: NodeId,
+        _label: &str,
+        _target: NodeId,
+        _row: Option<NodeId>,
+        _forward: bool,
+    ) -> Vec<Value> {
+        Vec::new()
+    }
+
     /// The promise that no walk over the link `label` returns to a
     /// node (spec: Model Files, Acyclic links): the declaration, or
     /// the source's own word, that makes it — for the refusal that
@@ -1769,7 +1791,7 @@ macro_rules! forward_ast_adapter {
             document_by_ref reverse_resolve descendants_named
             descendants_where may_hold_below select select_plan estimate count
             row_columns intrinsic row_text prefetch_properties
-            prefetch_links whole_listings link_property_names acyclic_link quantifier_bound frontier_bound
+            prefetch_links whole_listings link_property_names edge_weights acyclic_link quantifier_bound frontier_bound
             property_withheld withheld_properties nodes_withheld
             graph_bound graph_declarations graph_measure store_graph_measure
             provenance has_node
@@ -1847,6 +1869,7 @@ macro_rules! forward_ast_adapter {
     (@unless [$i:tt] [quantifier_bound $($r:ident)*] quantifier_bound) => {};
     (@unless [$i:tt] [frontier_bound $($r:ident)*] frontier_bound) => {};
     (@unless [$i:tt] [link_property_names $($r:ident)*] link_property_names) => {};
+    (@unless [$i:tt] [edge_weights $($r:ident)*] edge_weights) => {};
     (@unless [$i:tt] [acyclic_link $($r:ident)*] acyclic_link) => {};
     (@unless [$i:tt] [provenance $($r:ident)*] provenance) => {};
     (@unless [$i:tt] [has_node $($r:ident)*] has_node) => {};
@@ -2253,6 +2276,18 @@ macro_rules! forward_ast_adapter {
             target: $crate::NodeId,
         ) -> Vec<String> {
             $crate::forward_ast_adapter!(@target self $i).link_property_names(source, label, target)
+        }
+    };
+    (@fwd [$i:tt] edge_weights) => {
+        fn edge_weights(
+            &self,
+            source: $crate::NodeId,
+            label: &str,
+            target: $crate::NodeId,
+            row: Option<$crate::NodeId>,
+            forward: bool,
+        ) -> Vec<$crate::Value> {
+            $crate::forward_ast_adapter!(@target self $i).edge_weights(source, label, target, row, forward)
         }
     };
     (@fwd [$i:tt] acyclic_link) => {
@@ -2724,6 +2759,7 @@ mod forwarding {
         same!(quantifier_bound);
         same!(frontier_bound);
         same!(link_property_names, n(1), "e", n(2));
+        same!(edge_weights, n(1), "e", n(2), None, true);
         same!(provenance, n(2));
         same!(has_node, n(8));
         same!(has_node, n(9));

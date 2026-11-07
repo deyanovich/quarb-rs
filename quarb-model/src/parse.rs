@@ -41,6 +41,10 @@ pub struct Model {
     /// a library command is answered from it when its hop, options
     /// and context are the declared ones.
     pub graphs: Vec<GraphDecl>,
+    /// `weight-potential SCOPE-PATH::prop;` — the properties that are
+    /// potentials: an edge within the scope weighs their difference
+    /// (spec: Weight Potentials).
+    pub potentials: Vec<PotentialDecl>,
     /// `tree IDENTITY: PATH;` — the string other trees refer to this
     /// one by, and the path (a mount root or a node inside one) the
     /// tree stands at. An identity ending in a separator is a base.
@@ -67,6 +71,18 @@ pub struct UnitDecl {
     pub expr: String,
     /// The declaration as written, for messages.
     pub stmt: String,
+}
+
+/// One item of a `weights(…)` clause: the property, and under the
+/// typed form `::km<_km>` the unit a bare number in it is read in
+/// (spec: Weights, the typed clause; the unit spelled with its
+/// underscore as a quantity writes it, ruling 2026-11-07).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WeightSpec {
+    /// The property name, `::` stripped.
+    pub prop: String,
+    /// The unit of a bare number, as written between `<_` and `>`.
+    pub unit: Option<String>,
 }
 
 /// A declared trait: `trait <heading>: (h1|h2|h3);`.
@@ -331,6 +347,11 @@ pub struct RefDecl {
     /// `acyclic`: the promise that no walk over the link returns to
     /// a node (spec: Model Files, Acyclic links).
     pub acyclic: bool,
+    /// `weights(::a; ::b)`: the quantity-valued properties of the
+    /// scoped nodes that are the edge's weights (spec: the edge
+    /// model, Weights) — pairwise distinct dimensions, none
+    /// dimensionless, checked at load.
+    pub weights: Vec<WeightSpec>,
     /// The property resolved into the container.
     pub field: String,
     pub container: String,
@@ -444,6 +465,27 @@ pub struct EdgeDecl {
     /// `acyclic`: the promise that no walk over the edge returns to
     /// a node (spec: Model Files, Acyclic links).
     pub acyclic: bool,
+    /// `weights(::a; ::b)`: the quantity-valued properties of the
+    /// scoped rows that are the edge's weights (spec: the edge
+    /// model, Weights).
+    pub weights: Vec<WeightSpec>,
+}
+
+/// `weight-potential SCOPE-PATH::prop;` — the property of the
+/// scoped nodes is a potential: every crosslink edge with both ends
+/// in the scope gains the weight prop(target) − prop(source), in the
+/// direction walked, under the property's dimension (spec: Weight
+/// Potentials).
+#[derive(Debug, Clone)]
+pub struct PotentialDecl {
+    pub scope: String,
+    pub prop: String,
+    /// `::elevation<_m>`: the unit a bare number in the property is
+    /// read in, as the weights clause's typed item (spec: Weight
+    /// Potentials).
+    pub unit: Option<String>,
+    /// The statement as written, for messages.
+    pub stmt: String,
 }
 
 /// The trailing `acyclic` of a ref or edge declaration, split off.
@@ -453,6 +495,105 @@ fn split_acyclic(rest: &str) -> (&str, bool) {
         Some(head) if head.ends_with(char::is_whitespace) => (head.trim_end(), true),
         _ => (rest, false),
     }
+}
+
+/// The trailing `weights(::a; ::b)` clause of a ref or edge
+/// declaration, split off: the property names, `::` stripped, each
+/// with the unit of the typed form `::km<_km>`. The clause may stand
+/// before or after `acyclic`.
+fn split_weights(rest: &str) -> Result<(&str, Vec<WeightSpec>), String> {
+    let t = rest.trim_end();
+    let Some(head) = t.strip_suffix(')') else {
+        return Ok((rest, Vec::new()));
+    };
+    let Some(open) = head.rfind("weights(") else {
+        return Ok((rest, Vec::new()));
+    };
+    if open > 0 && !head[..open].ends_with(char::is_whitespace) {
+        return Ok((rest, Vec::new()));
+    }
+    let inner = &head[open + "weights(".len()..];
+    let mut names: Vec<WeightSpec> = Vec::new();
+    for item in inner.split(';') {
+        let item = item.trim();
+        let Some(name) = item.strip_prefix("::") else {
+            return Err(format!(
+                "weights names the edge's weight properties as '::name', separated by ';': \
+                 'weights(::duration; ::fare)' — found '{item}'"
+            ));
+        };
+        let (name, unit) = match name.split_once('<') {
+            Some((n, u)) => {
+                let Some(u) = u.trim().strip_suffix('>') else {
+                    return Err(format!(
+                        "weights: '{item}' opens a unit with '<' and never closes it: a typed \
+                         weight is '::km<_km>'"
+                    ));
+                };
+                let u = split_unit_type(u.trim()).map_err(|e| format!("weights: '{item}' {e}"))?;
+                (n.trim(), Some(u))
+            }
+            None => (name.trim(), None),
+        };
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(format!("weights: '{item}' is no property name"));
+        }
+        if names.iter().any(|n| n.prop == name) {
+            return Err(format!("weights names '::{name}' twice"));
+        }
+        names.push(WeightSpec {
+            prop: name.to_string(),
+            unit,
+        });
+    }
+    if names.is_empty() {
+        return Err("weights() names no property: 'weights(::km)'".to_string());
+    }
+    Ok((head[..open].trim_end(), names))
+}
+
+/// The unit between `<` and `>` of a typed weight or potential,
+/// `_km` of `::km<_km>`: the underscore the quantity spelling writes
+/// (`12_km`), then the unit's name (ruling 2026-11-07). The unit
+/// without its underscore is refused with a pointer at the spelling.
+fn split_unit_type(u: &str) -> Result<String, String> {
+    let Some(unit) = u.strip_prefix('_') else {
+        return Err(if u.is_empty() {
+            "names no unit between '<' and '>': a typed weight is '::km<_km>'".to_string()
+        } else {
+            format!(
+                "writes its unit without the underscore: a typed weight is '::km<_km>', the \
+                 unit spelled as a quantity writes it ('<_{u}>')"
+            )
+        });
+    };
+    let unit = unit.trim();
+    if unit.is_empty()
+        || !unit
+            .chars()
+            .next()
+            .is_some_and(quarb::quantity::is_name_char)
+        || !unit.chars().all(|c| {
+            quarb::quantity::is_name_char(c) || c.is_ascii_digit() || matches!(c, '*' | '/' | '^')
+        })
+    {
+        return Err(
+            "names no unit between '<_' and '>': a typed weight is '::km<_km>'".to_string(),
+        );
+    }
+    Ok(unit.to_string())
+}
+
+/// The weights clause and the acyclic word in either order.
+fn split_tail(rest: &str) -> Result<(&str, Vec<WeightSpec>, bool), String> {
+    let (rest, acyclic) = split_acyclic(rest);
+    let (rest, weights) = split_weights(rest)?;
+    let (rest, acyclic2) = split_acyclic(rest);
+    Ok((rest, weights, acyclic || acyclic2))
 }
 
 /// Split model-file text into statements at a lone `;` outside any
@@ -945,6 +1086,7 @@ fn parse_model_in(
                     n
                 }));
                 model.refs.extend(sub.refs);
+                model.potentials.extend(sub.potentials);
                 model.rels.extend(sub.rels);
                 model.edges.extend(sub.edges);
                 model.aliases.extend(sub.aliases);
@@ -979,7 +1121,7 @@ fn parse_model_in(
                 }
             }
             "ref" => {
-                let (rest, acyclic) = split_acyclic(rest);
+                let (rest, weights, acyclic) = split_tail(rest)?;
                 let (left, container) = rest
                     .split_once("-->")
                     .ok_or_else(|| format!("ref needs 'PATH::field --> container': '{stmt}'"))?;
@@ -999,6 +1141,7 @@ fn parse_model_in(
                 model.refs.push(RefDecl {
                     scope,
                     acyclic,
+                    weights,
                     field,
                     container,
                     path,
@@ -1026,7 +1169,7 @@ fn parse_model_in(
                 });
             }
             "edge" => {
-                let (rest, acyclic) = split_acyclic(rest);
+                let (rest, weights, acyclic) = split_tail(rest)?;
                 // the colon after the scope, outside any predicate
                 // the scope carries (`/flights/*[::carrier = "x"]:`)
                 let (scope_head, pair) = split_scope_colon(rest)
@@ -1049,6 +1192,7 @@ fn parse_model_in(
                     field_b,
                     label,
                     acyclic,
+                    weights,
                 });
             }
             "def" | "macro" => {
@@ -1205,10 +1349,54 @@ fn parse_model_in(
                 }
                 model.traits.push(decl);
             }
+            "weight-potential" => {
+                let (scope, prop) = split_field(rest).map_err(|_| {
+                    format!(
+                        "weight-potential needs 'SCOPE-PATH::prop' (the property of the scoped \
+                         nodes that is the potential): '{stmt}'"
+                    )
+                })?;
+                // the typed form `::elevation<_m>`, as the weights clause's
+                let (prop, unit) = match prop.split_once('<') {
+                    Some((n, u)) => {
+                        let Some(u) = u.trim().strip_suffix('>') else {
+                            return Err(format!(
+                                "weight-potential: '::{prop}' opens a unit with '<' and never \
+                                 closes it: a typed potential is '::elevation<_m>': '{stmt}'"
+                            ));
+                        };
+                        let u = split_unit_type(u.trim()).map_err(|e| {
+                            format!(
+                                "weight-potential: '::{prop}' {}: '{stmt}'",
+                                e.replace(
+                                    "a typed weight is '::km<_km>'",
+                                    "a typed potential is '::elevation<_m>'"
+                                )
+                            )
+                        })?;
+                        (n.trim().to_string(), Some(u))
+                    }
+                    None => (prop, None),
+                };
+                if model
+                    .potentials
+                    .iter()
+                    .any(|p| p.scope == scope && p.prop == prop)
+                {
+                    return Err(format!("weight-potential is declared twice: '{stmt}'"));
+                }
+                model.potentials.push(PotentialDecl {
+                    scope,
+                    prop,
+                    unit,
+                    stmt: stmt.to_string(),
+                });
+            }
             other => {
                 return Err(format!(
                     "unknown model statement '{other}' \
-                     (expected node/ref/rel/edge/mount/alias/trait/index/graph/tree/def/macro)"
+                     (expected node/ref/rel/edge/mount/alias/trait/index/graph/tree/unit/use/\
+                     weight-potential/def/macro)"
                 ));
             }
         }

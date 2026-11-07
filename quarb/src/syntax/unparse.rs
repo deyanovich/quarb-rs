@@ -10,8 +10,8 @@
 
 use crate::syntax::ast::{
     Arg, ArithOp, Axis, Branch, CmpOp, Command, Group, InterpSeg, Matcher, Operand, PatSeg,
-    PathElem, PredExpr, Predicate, Projection, PushBody, Query, Reach, RefProp, RegRef, Step,
-    TraitClause,
+    PathElem, PredExpr, Predicate, Projection, PushBody, Quant, Query, Reach, RefProp, RegRef,
+    Step, TraitClause,
 };
 use crate::value::Value;
 
@@ -239,24 +239,10 @@ pub(crate) fn group(g: &Group) -> String {
         .iter()
         .map(|alt| alt.iter().map(elem).collect())
         .collect();
-    let quant = match (g.quant.min, g.quant.max) {
-        // a budget prints as written: the bounds are quantities
-        _ if g.quant.budget.is_some() => {
-            let b = g.quant.budget.as_ref().expect("checked");
-            format!(
-                "{{{};{}}}",
-                b.floor.as_deref().unwrap_or(""),
-                b.ceiling.as_deref().unwrap_or("")
-            )
-        }
-        (1, Some(1)) => String::new(),
-        (1, None) => "+".to_string(),
-        (0, None) => "*".to_string(),
-        (m, Some(n)) if m == n => format!("{{{m}}}"),
-        // the semicolon separates the bounds; the regex comma is sugar
-        (m, Some(n)) => format!("{{{m};{n}}}"),
-        (m, None) => format!("{{{m};}}"),
-    };
+    let mut quant = quant_text(&g.quant);
+    for q in &g.more {
+        quant.push_str(&quant_text(q));
+    }
     let preds: String = g.predicates.iter().map(predicate).collect();
     format!(
         "({}){}{}{}{}",
@@ -266,6 +252,31 @@ pub(crate) fn group(g: &Group) -> String {
         preds,
         reach_mark(&g.reach)
     )
+}
+
+/// One brace as written: the cost rule before the bounds where it
+/// names one (spec: Def. Cost Rule).
+pub(crate) fn quant_text(q: &Quant) -> String {
+    let rule = q.rule.map(|r| format!("{}:", r.name())).unwrap_or_default();
+    match (q.min, q.max) {
+        _ if q.budget.is_some() => {
+            let b = q.budget.as_ref().expect("checked");
+            match &b.unit {
+                Some(u) => format!("{{{rule}_{u}}}"),
+                None => format!(
+                    "{{{rule}{};{}}}",
+                    b.floor.as_deref().unwrap_or(""),
+                    b.ceiling.as_deref().unwrap_or("")
+                ),
+            }
+        }
+        (1, Some(1)) => String::new(),
+        (1, None) => "+".to_string(),
+        (0, None) => "*".to_string(),
+        (m, Some(n)) if m == n => format!("{{{m}}}"),
+        (m, Some(n)) => format!("{{{m};{n}}}"),
+        (m, None) => format!("{{{m};}}"),
+    }
 }
 
 pub(crate) fn step(s: &Step) -> String {

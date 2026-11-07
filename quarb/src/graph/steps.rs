@@ -3,6 +3,7 @@
 use super::*;
 use crate::diagnostic::{FRONTIER_BOUND, QUANTIFIER_BOUND, WALK};
 use crate::graph::adapter::{Conjunct, PlanAxis, StepPlan, reference_label};
+use crate::syntax::ast::{CostRule, Quant};
 use crate::value::ambient::{record_debug, record_refusal_coded};
 
 /// Run the navigation path starting from `start`, per-path: each
@@ -161,6 +162,7 @@ pub(crate) fn navigate_paths(
                         node_level,
                         hops: 0,
                         total: 0.0,
+                        costs: Vec::new(),
                     };
                     let walks = expand_group(adapter, group, anchor, trace, outer, witness);
                     if walks.is_empty() {
@@ -350,30 +352,42 @@ pub(crate) struct GPath {
     pub(crate) node_level: bool,
     /// The hops the walk has taken to reach this path's node.
     pub(crate) hops: usize,
+    /// The cost so far under every budget brace, in budget order
+    /// (spec: Def. Walk, the braces stack); `None` before the first
+    /// leg (a `max`/`min` rule has no zero).
+    pub(crate) costs: Vec<Option<f64>>,
     /// Under a budget, the weight summed so far, in the budget's base
     /// unit (spec: The budget quantifier).
     pub(crate) total: f64,
 }
 
 /// A budget quantifier resolved under the run's units: the floor
-/// and the ceiling in the base unit, the base unit's name, and the
-/// bound's written unit with its scale (base per written), for the
-/// total a reader sees.
+/// and the ceiling in the base unit (an absent one is no bound,
+/// ruling 2026-11-07), the base unit's name, and the brace's written
+/// unit with its scale (base per written), for the total a reader
+/// sees.
 #[derive(Clone, Debug)]
 pub(crate) struct BudgetBounds {
-    pub(crate) floor: f64,
+    pub(crate) floor: Option<f64>,
     pub(crate) ceiling: Option<f64>,
     pub(crate) base: String,
     pub(crate) unit: String,
     pub(crate) scale: f64,
     pub(crate) written: String,
+    /// The cost rule the brace named (spec: Def. Cost Rule); the
+    /// signed sum by default.
+    pub(crate) rule: CostRule,
 }
 
 impl BudgetBounds {
     /// Resolve a budget's bounds (the floor, the ceiling, as
-    /// written) under the run's units; a bound that is no quantity,
-    /// or two bounds of two dimensions, refuse by name.
-    pub(crate) fn resolve(b: &crate::syntax::ast::Budget) -> Result<BudgetBounds, String> {
+    /// written) or its bare unit under the run's units; a bound that
+    /// is no quantity, a unit the run does not know, or two bounds of
+    /// two dimensions, refuse by name.
+    pub(crate) fn resolve(
+        b: &crate::syntax::ast::Budget,
+        rule: Option<CostRule>,
+    ) -> Result<BudgetBounds, String> {
         let read = |text: &str| -> Result<(f64, String, f64, String), String> {
             crate::value::quantity::parse_unit_text(&text.replace('_', " ")).ok_or_else(|| {
                 if text.trim().parse::<f64>().is_ok() {
@@ -392,10 +406,21 @@ impl BudgetBounds {
         };
         let floor = b.floor.as_deref().map(read).transpose()?;
         let ceiling = b.ceiling.as_deref().map(read).transpose()?;
-        let (anchor, written) = match (&ceiling, &floor) {
-            (Some(c), _) => (c.clone(), b.ceiling.clone().unwrap_or_default()),
-            (None, Some(f)) => (f.clone(), b.floor.clone().unwrap_or_default()),
-            (None, None) => return Err("a budget needs a floor or a ceiling".into()),
+        let (anchor, written) = match (&ceiling, &floor, &b.unit) {
+            (Some(c), _, _) => (c.clone(), b.ceiling.clone().unwrap_or_default()),
+            (None, Some(f), _) => (f.clone(), b.floor.clone().unwrap_or_default()),
+            // the bare unit: the dimension and the printing unit, no
+            // bound; spaced text, so the unit is built in or declared
+            (None, None, Some(u)) => (
+                crate::value::quantity::parse_unit_text(&format!("1 {u}")).ok_or_else(|| {
+                    format!(
+                        "'{{_{u}}}' names no unit the run knows: a unit statement declares one \
+                         ('unit {u};')"
+                    )
+                })?,
+                format!("_{u}"),
+            ),
+            (None, None, None) => return Err("a budget needs a floor or a ceiling".into()),
         };
         if let (Some(c), Some(f)) = (&ceiling, &floor)
             && c.1 != f.1
@@ -409,29 +434,30 @@ impl BudgetBounds {
             ));
         }
         let (bv, base, wmag, wunit) = anchor;
+        // the written unit's factor (base per unit) from the unit
+        // itself: a zero bound (`{min:0_t;}`) carries none
+        let scale = crate::value::quantity::parse_unit_text(&format!("1 {wunit}"))
+            .map(|(f, _, _, _)| f)
+            .filter(|f| *f != 0.0 && f.is_finite())
+            .unwrap_or(if wmag != 0.0 { bv / wmag } else { 1.0 });
         Ok(BudgetBounds {
-            floor: floor.map(|f| f.0).unwrap_or(0.0),
+            floor: floor.map(|f| f.0),
             ceiling: ceiling.map(|c| c.0),
             base,
             unit: wunit,
-            scale: if wmag != 0.0 { bv / wmag } else { 1.0 },
+            scale,
             written,
+            rule: rule.unwrap_or(CostRule::Sum),
         })
     }
 
-    /// The facts of a path under this budget: its total in the base
-    /// unit and as the budget wrote its unit.
-    pub(crate) fn facts(&self, path: &GPath) -> WalkFacts {
-        WalkFacts {
-            round: path.hops,
-            hops: path.hops,
-            total: Some((
-                path.total,
-                self.base.clone(),
-                path.total / self.scale,
-                self.unit.clone(),
-            )),
-            trail: path.trail(),
+    /// A cost in the budget's base unit as a quantity written in its
+    /// unit.
+    pub(crate) fn quantity(&self, cost: f64) -> Value {
+        Value::Quantity {
+            value: cost,
+            base: self.base.clone(),
+            written: Some((cost / self.scale, self.unit.clone())),
         }
     }
 
@@ -439,42 +465,89 @@ impl BudgetBounds {
     /// of the budget's dimension, read as a quantity under the run's
     /// units. `Ok(None)` is an edge without the property — not
     /// crossed; two properties of the dimension refuse naming both.
+    /// The edge's weight of the budget's dimension, read from the
+    /// edge's declared weights (spec: the edge model, ruling
+    /// 2026-11-07) — never from its properties; `None` where the
+    /// edge carries none of that dimension.
     pub(crate) fn weight(
         &self,
         adapter: &impl AstAdapter,
         edge: &EdgeCtx,
+        forward: bool,
     ) -> Result<Option<f64>, String> {
-        let mut found: Vec<(String, f64)> = Vec::new();
-        for name in edge.property_names(adapter) {
-            let Some(v) = edge.property(adapter, &name) else {
-                continue;
-            };
-            let q = match &v {
-                Value::Quantity { value, base, .. } => Some((*value, base.clone())),
-                Value::Str(s) => {
-                    crate::value::quantity::parse_unit_text(s).map(|(bv, b, _, _)| (bv, b))
-                }
+        let found: Vec<f64> = edge
+            .weights(adapter, forward)
+            .into_iter()
+            .filter_map(|w| match w {
+                Value::Quantity { value, base, .. } if base == self.base => Some(value),
                 _ => None,
-            };
-            if let Some((bv, b)) = q
-                && b == self.base
-            {
-                found.push((name, bv));
-            }
-        }
+            })
+            .collect();
         match found.as_slice() {
             [] => Ok(None),
-            [(_, w)] => Ok(Some(*w)),
-            many => Err(format!(
-                "two properties of one dimension on the edge '{}': {} — a budget sums one; name \
-                 the weight in the model or the query",
-                edge.label,
-                many.iter()
-                    .map(|(n, _)| n.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" and ")
+            [w] => Ok(Some(*w)),
+            _ => Err(format!(
+                "two weights of one dimension ({}) on the edge '{}' — a budget sums one",
+                self.base, edge.label
             )),
         }
+    }
+}
+
+/// The walk's facts at `path`: round and hops, the total under the
+/// last brace where it is a budget (spec: Def. Walk), and the costs
+/// under every brace in brace order (the braces stack): a count
+/// brace's hop count, a budget brace's cost as a quantity.
+pub(crate) struct WalkBraces<'a> {
+    /// The group's braces in writing order.
+    pub(crate) braces: &'a [&'a Quant],
+    /// The budget braces' bounds, in writing order.
+    pub(crate) budgets: &'a [BudgetBounds],
+    /// The index into `budgets` of the last brace, when it is a
+    /// budget: the total the reach orders by.
+    pub(crate) primary: Option<usize>,
+}
+
+impl WalkBraces<'_> {
+    pub(crate) fn facts(&self, path: &GPath) -> WalkFacts {
+        walk_facts(path, self.braces, self.budgets, self.primary)
+    }
+}
+
+pub(crate) fn walk_facts(
+    path: &GPath,
+    braces: &[&Quant],
+    budgets: &[BudgetBounds],
+    primary: Option<usize>,
+) -> WalkFacts {
+    let mut costs = Vec::new();
+    let mut j = 0;
+    for q in braces {
+        if q.budget.is_some() {
+            let b = &budgets[j];
+            costs.push(match path.costs.get(j).copied().flatten() {
+                Some(c) => b.quantity(c),
+                None => b.quantity(0.0),
+            });
+            j += 1;
+        } else {
+            costs.push(Value::Int(path.hops as i64));
+        }
+    }
+    WalkFacts {
+        round: path.hops,
+        hops: path.hops,
+        total: primary.map(|i| {
+            let b = &budgets[i];
+            (
+                path.total,
+                b.base.clone(),
+                path.total / b.scale,
+                b.unit.clone(),
+            )
+        }),
+        costs,
+        trail: path.trail(),
     }
 }
 
@@ -507,17 +580,7 @@ impl GPath {
             node_level: self.node_level,
             hops: self.hops + 1,
             total: self.total,
-        }
-    }
-
-    /// The walk's facts at this path for a reader without a budget
-    /// (`$-:round`, `$-:hops`; `$-:total` null).
-    fn facts(&self) -> WalkFacts {
-        WalkFacts {
-            round: self.hops,
-            hops: self.hops,
-            total: None,
-            trail: self.trail(),
+            costs: self.costs.clone(),
         }
     }
 
@@ -742,7 +805,66 @@ pub(crate) fn expand_group(
     witness: &[Option<NodeId>],
 ) -> Vec<GPath> {
     let n_max = quantifier_bound(adapter);
-    if let Some(n) = group.quant.max {
+    // The braces stack (spec: Def. Walk): the count brace bounds the
+    // rounds, every budget brace its own cost; the last brace's cost
+    // is the total the reach orders by.
+    let braces: Vec<&Quant> = std::iter::once(&group.quant)
+        .chain(group.more.iter())
+        .collect();
+    let count_quant: Quant = braces
+        .iter()
+        .find(|q| q.budget.is_none())
+        .map(|q| (*q).clone())
+        .unwrap_or(Quant {
+            min: 0,
+            max: None,
+            budget: None,
+            rule: None,
+        });
+    if braces.iter().filter(|q| q.budget.is_none()).count() > 1 {
+        record_refusal_coded(
+            crate::diagnostic::REFUSED,
+            "the quantifier",
+            "two braces count hops: one brace per dimension".to_string(),
+        );
+        return Vec::new();
+    }
+    let mut budgets: Vec<BudgetBounds> = Vec::new();
+    for q in &braces {
+        if let Some(b) = &q.budget {
+            match BudgetBounds::resolve(b, q.rule) {
+                Ok(bounds) => budgets.push(bounds),
+                Err(e) => {
+                    record_refusal_coded(crate::diagnostic::REFUSED, "the quantifier", e);
+                    return Vec::new();
+                }
+            }
+        }
+    }
+    let primary: Option<usize> = braces
+        .last()
+        .filter(|q| q.budget.is_some())
+        .map(|_| budgets.len() - 1);
+    for (i, a) in budgets.iter().enumerate() {
+        if let Some(b) = budgets[..i].iter().find(|b| b.base == a.base) {
+            record_refusal_coded(
+                crate::diagnostic::REFUSED,
+                "the quantifier",
+                format!(
+                    "two braces measure {}: '{{…{}}}' and '{{…{}}}'; one brace per dimension",
+                    a.base, b.written, a.written
+                ),
+            );
+            return Vec::new();
+        }
+    }
+    let budget: Option<&BudgetBounds> = primary.map(|i| &budgets[i]);
+    let shape = WalkBraces {
+        braces: &braces,
+        budgets: &budgets,
+        primary,
+    };
+    if let Some(n) = count_quant.max {
         if n > n_max {
             record_refusal_coded(
                 QUANTIFIER_BOUND,
@@ -754,14 +876,14 @@ pub(crate) fn expand_group(
             );
             return Vec::new();
         }
-    } else if group.quant.min > n_max {
+    } else if count_quant.min > n_max {
         record_refusal_coded(
             QUANTIFIER_BOUND,
             "the quantifier",
             format!(
                 "the pattern's minimum ({}) exceeds the quantifier bound \
                  ({n_max}); raise --quantifier-bound",
-                group.quant.min
+                count_quant.min
             ),
         );
         return Vec::new();
@@ -769,16 +891,8 @@ pub(crate) fn expand_group(
     let f_max = frontier_bound(adapter);
     // A budget (spec: The budget quantifier): the bounds resolved
     // under the run's units; a budgeted walk is exact.
-    let budget = match &group.quant.budget {
-        Some(b) => match BudgetBounds::resolve(b) {
-            Ok(bounds) => Some(bounds),
-            Err(e) => {
-                record_refusal_coded(crate::diagnostic::REFUSED, "the quantifier", e);
-                return Vec::new();
-            }
-        },
-        None => None,
-    };
+    let mut anchor = anchor;
+    anchor.costs = vec![None; budgets.len()];
     // The SET WALK (spec: Expansion paths): a group with no push and
     // no mark, under an open quantifier whose floor is at most one,
     // for all matches or the proximal reach — the forms whose answer
@@ -803,7 +917,7 @@ pub(crate) fn expand_group(
         && group_is_plain(group)
         && set_form(group)
         && (group.reach == Reach::Proximal || (group.reach == Reach::All && node_level))
-        && budget.is_none();
+        && budgets.is_empty();
     let anchor_was_set = anchor.set_walk;
     let anchor_ground = anchor.visited.clone();
     // The acyclic promise (spec: Model Files, Acyclic links): every
@@ -828,21 +942,26 @@ pub(crate) fn expand_group(
     // the histories only where nothing read could tell them apart —
     // a node-level reading, and no budget (the totals would tell);
     // its cycle refusal fires on every form, the budgeted too.
-    let merge_ok = node_level && budget.is_none();
-    let mut anchor = anchor;
+    let merge_ok = node_level && budgets.is_empty();
     anchor.set_walk = set_walk;
     let hi = if set_walk {
         usize::MAX
     } else {
-        group.quant.max.unwrap_or(n_max)
+        count_quant.max.unwrap_or(n_max)
     };
     // The group's predicates filter matches BEFORE reach — the
     // walk continues from the full frontier, but only survivors
     // are candidates. `(...)+[P]?` is therefore "the proximal
     // satisfying P": a shortest-path search.
+    // An absent floor is no bound (ruling 2026-11-07): a negative cost
+    // under max or min over a potential passes it; the start alone,
+    // with no leg folded, stands at zero against a written floor.
     let admits = |p: &GPath| {
-        group_admits(adapter, group, p, trace, outer, witness, budget.as_ref())
-            && budget.as_ref().is_none_or(|b| p.total >= b.floor)
+        group_admits(adapter, group, p, trace, outer, witness, &shape)
+            && budgets.iter().enumerate().all(|(i, b)| {
+                b.floor
+                    .is_none_or(|f| p.costs.get(i).copied().flatten().unwrap_or(0.0) >= f)
+            })
     };
     // The set walk's frontier: a position already reached — the
     // anchor at round 0 — is not expanded again, so the frontier is
@@ -868,7 +987,7 @@ pub(crate) fn expand_group(
                     trace,
                     outer,
                     witness,
-                    budget.as_ref(),
+                    &shape,
                     current.as_deref(),
                 ));
             }
@@ -939,7 +1058,7 @@ pub(crate) fn expand_group(
         fresh
     };
     let mut matches: Vec<(GPath, usize)> = Vec::new();
-    if group.quant.min == 0 && admits(&anchor) {
+    if count_quant.min == 0 && admits(&anchor) {
         matches.push((anchor.clone(), 0));
     }
     // The lightest walks under a budget (spec: The budget
@@ -947,7 +1066,7 @@ pub(crate) fn expand_group(
     // each node settled once, at its least total, the first
     // satisfying settlement the answer for that node. Weights are
     // non-negative (a negative one refuses on the hop).
-    if let (Some(b), Reach::Proximal) = (&budget, group.reach) {
+    if budget.is_some() && group.reach == Reach::Proximal {
         let mut settled: HashSet<NodeId> = HashSet::from([adapter.intrinsic(anchor.ext.node)]);
         let mut pending: Vec<GPath> = Vec::new();
         for alt in &group.alts {
@@ -958,7 +1077,7 @@ pub(crate) fn expand_group(
                 trace,
                 outer,
                 witness,
-                Some(b),
+                &shape,
                 promise.borrow().as_deref(),
             ));
         }
@@ -996,7 +1115,7 @@ pub(crate) fn expand_group(
                     trace,
                     outer,
                     witness,
-                    Some(b),
+                    &shape,
                     promise.borrow().as_deref(),
                 ) {
                     if !settled.contains(&adapter.intrinsic(p.ext.node)) {
@@ -1021,10 +1140,7 @@ pub(crate) fn expand_group(
                 return Vec::new();
             }
         }
-        return exit_walk(
-            matches.into_iter().map(|(p, _)| p).collect(),
-            budget.as_ref(),
-        );
+        return exit_walk(matches.into_iter().map(|(p, _)| p).collect(), &shape);
     }
     let mut frontier = vec![anchor];
     let mut answered = false;
@@ -1055,7 +1171,7 @@ pub(crate) fn expand_group(
             );
             return Vec::new();
         }
-        if count >= group.quant.min {
+        if count >= count_quant.min {
             let before = matches.len();
             matches.extend(
                 frontier
@@ -1076,7 +1192,7 @@ pub(crate) fn expand_group(
     // still in flight: probe one more round. If anything is still
     // walkable the closure is truncated — refuse out loud instead
     // of returning it as if complete.
-    if !set_walk && group.quant.max.is_none() && !answered && !frontier.is_empty() {
+    if !set_walk && count_quant.max.is_none() && !answered && !frontier.is_empty() {
         if !advance(&frontier, n_max + 1).is_empty() {
             record_refusal_coded(
                 QUANTIFIER_BOUND,
@@ -1130,7 +1246,7 @@ pub(crate) fn expand_group(
             .filter(|p| once.insert((adapter.intrinsic(p.ext.node), reg_key(&p.register))))
             .collect()
     };
-    let mut out = exit_walk(out, budget.as_ref());
+    let mut out = exit_walk(out, &shape);
     // An exact group inside a set walk: its results rejoin the set
     // walk with the anchor's ground, as set paths.
     if anchor_was_set && !set_walk {
@@ -1146,12 +1262,9 @@ pub(crate) fn expand_group(
 /// (spec: Edge facts): the one command after the group reads `$-`
 /// and `$-:round`, `$-:hops`, `$-:total` for the walk that ended
 /// there.
-fn exit_walk(mut out: Vec<GPath>, budget: Option<&BudgetBounds>) -> Vec<GPath> {
+fn exit_walk(mut out: Vec<GPath>, shape: &WalkBraces) -> Vec<GPath> {
     for p in &mut out {
-        p.ext.walk = Some(match budget {
-            Some(b) => b.facts(p),
-            None => p.facts(),
-        });
+        p.ext.walk = Some(shape.facts(p));
     }
     out
 }
@@ -1203,7 +1316,7 @@ pub(crate) fn group_admits(
     trace: &Trace,
     outer: Option<&Scope<'_, GraphExt>>,
     witness: &[Option<NodeId>],
-    budget: Option<&BudgetBounds>,
+    shape: &WalkBraces,
 ) -> bool {
     if !group.traits.is_empty() && !trait_clauses_ok(adapter, path.ext.node, &group.traits) {
         return false;
@@ -1222,10 +1335,7 @@ pub(crate) fn group_admits(
     // The path's own register: the marks the walk filed are read
     // from it (`$$.x` inside the group's guard); the walk's facts
     // beside the edge.
-    let facts = match budget {
-        Some(b) => b.facts(path),
-        None => path.facts(),
-    };
+    let facts = shape.facts(path);
     let scope = Scope {
         prov: None,
         outer,
@@ -1390,7 +1500,7 @@ pub(crate) fn expand_elems(
     trace: &Trace,
     outer: Option<&Scope<'_, GraphExt>>,
     witness: &[Option<NodeId>],
-    budget: Option<&BudgetBounds>,
+    shape: &WalkBraces,
     promise: Option<&str>,
 ) -> Vec<GPath> {
     for elem in elems {
@@ -1472,36 +1582,60 @@ pub(crate) fn expand_elems(
                         // weight, or not at all: a missing weight is no
                         // weight, never a free hop; past the ceiling the
                         // path ends here.
-                        if let Some(b) = budget {
+                        // Every budget brace weighs the leg under its rule
+                        // (spec: Def. Cost Rule); a leg without the weight is
+                        // not crossed, past a ceiling the path ends here.
+                        if !shape.budgets.is_empty() {
                             let Some(edge) = &p.last_edge else { continue };
-                            match b.weight(adapter, edge) {
-                                Ok(Some(w)) => {
-                                    if w < 0.0 {
+                            let forward = edge.target == p.ext.node;
+                            let mut dropped = false;
+                            if p.costs.len() < shape.budgets.len() {
+                                p.costs.resize(shape.budgets.len(), None);
+                            }
+                            for (i, b) in shape.budgets.iter().enumerate() {
+                                match b.weight(adapter, edge, forward) {
+                                    Ok(Some(w)) => {
+                                        if b.rule == CostRule::Sum && w < 0.0 {
+                                            record_refusal_coded(
+                                                crate::diagnostic::REFUSED,
+                                                "the quantifier",
+                                                format!(
+                                                    "a negative weight ({w} on '{}') under a budget: \
+                                                     the lightest walk needs weights of zero or more \
+                                                     (a rule that takes it: abs, rise, fall, max, min)",
+                                                    edge.label
+                                                ),
+                                            );
+                                            return Vec::new();
+                                        }
+                                        let c = b.rule.fold(p.costs.get(i).copied().flatten(), w);
+                                        if let Some(slot) = p.costs.get_mut(i) {
+                                            *slot = Some(c);
+                                        }
+                                        if Some(i) == shape.primary {
+                                            p.total = c;
+                                        }
+                                        if b.ceiling.is_some_and(|cl| c > cl) {
+                                            dropped = true;
+                                            break;
+                                        }
+                                    }
+                                    Ok(None) => {
+                                        dropped = true;
+                                        break;
+                                    }
+                                    Err(e) => {
                                         record_refusal_coded(
                                             crate::diagnostic::REFUSED,
                                             "the quantifier",
-                                            format!(
-                                                "a negative weight ({w} on '{}') under a budget: the \
-                                                 lightest walk needs weights of zero or more",
-                                                edge.label
-                                            ),
+                                            e,
                                         );
                                         return Vec::new();
                                     }
-                                    p.total += w;
-                                    if b.ceiling.is_some_and(|c| p.total > c) {
-                                        continue;
-                                    }
                                 }
-                                Ok(None) => continue,
-                                Err(e) => {
-                                    record_refusal_coded(
-                                        crate::diagnostic::REFUSED,
-                                        "the quantifier",
-                                        e,
-                                    );
-                                    return Vec::new();
-                                }
+                            }
+                            if dropped {
+                                continue;
                             }
                         }
                         next.push(p);
@@ -1525,10 +1659,7 @@ pub(crate) fn expand_elems(
                     // The body sees no marks (as before the frontier
                     // carried them): a bare attachment at the node.
                     let state = GraphExt::at(path.ext.node);
-                    let facts = match budget {
-                        Some(b) => b.facts(path),
-                        None => path.facts(),
-                    };
+                    let facts = shape.facts(path);
                     let scope = Scope {
                         prov: None,
                         outer,
@@ -3587,17 +3718,42 @@ pub(crate) fn select_links(
     }
     // the name algebra reads the labels one edge carries: a row is
     // one edge of its own, a plain link's labels those to its far end
-    let mut grouped: Vec<((NodeId, Option<NodeId>), Vec<String>)> = Vec::new();
-    for (l, n, r) in links {
-        match grouped.iter_mut().find(|(k, _)| *k == (*n, *r)) {
-            Some((_, ls)) => ls.push(l.clone()),
-            None => grouped.push(((*n, *r), vec![l.clone()])),
-        }
-    }
-    grouped
-        .into_iter()
-        .filter(|(_, ls)| step.labels.iter().all(|c| c.matches(ls)))
-        .map(|((n, r), mut ls)| (ls.swap_remove(0), n, r))
+    // The label algebra over single-label edges (spec: the edge model,
+    // ruling 2026-11-07). A clause with a positive alternative names a
+    // class of edges — those whose own label satisfies it — and the
+    // conjunction of classes `->(a && b)` is "a node reached by an edge
+    // of every class": the edges of any class whose other end lies in
+    // every class's set of ends, one edge each, one thread each
+    // (`$-:label` a and b); `||` within a clause is the union of the
+    // classes. A wholly negated clause (`!b`, `!(a || b)`) is the
+    // complement among the edges themselves: an edge whose own label
+    // is none of the named.
+    let fits = |c: &crate::syntax::ast::LabelClause, l: &str| {
+        c.matches(std::slice::from_ref(&l.to_string()))
+    };
+    let (negative, positive): (Vec<_>, Vec<_>) = step
+        .labels
+        .iter()
+        .partition(|c| c.alts.iter().all(|a| a.neg));
+    let class_ends: Vec<Vec<NodeId>> = positive
+        .iter()
+        .map(|c| {
+            links
+                .iter()
+                .filter(|(l, _, _)| fits(c, l))
+                .map(|(_, n, _)| *n)
+                .collect()
+        })
+        .collect();
+    links
+        .iter()
+        .filter(|(l, n, _)| {
+            negative.iter().all(|c| fits(c, l))
+                && (positive.is_empty()
+                    || (positive.iter().any(|c| fits(c, l))
+                        && class_ends.iter().all(|ends| ends.contains(n))))
+        })
+        .cloned()
         .collect()
 }
 

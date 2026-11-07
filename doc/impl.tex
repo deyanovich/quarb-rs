@@ -1973,6 +1973,15 @@ pub trait AstAdapter {
     fn prefetch_properties(&self, _nodes: &[NodeId], _names: &[&str]) {}
     /// A batching hint before a link sweep over `nodes`.
     fn prefetch_links(&self, _nodes: &[NodeId], _dir: LinkDir) {}
+    /// The weights an edge carries (spec: the edge model, ruling
+    /// 2026-11-07): quantities of pairwise distinct dimensions, none
+    /// dimensionless, in the canonical dimension order -- what a
+    /// budget sums for its dimension and `--weight=UNIT` reads,
+    /// never inferred from the properties. A model declares them
+    /// (`weights(::km)`); a substrate with weights of its own mints
+    /// them. `row` is the edge's own row where the edge is one.
+    fn edge_weights(&self, _s: NodeId, _label: &str, _t: NodeId,
+        _row: Option<NodeId>, _forward: bool) -> Vec<Value> { Vec::new() }
 
     // --- identity and provenance (defaulted) ---
 

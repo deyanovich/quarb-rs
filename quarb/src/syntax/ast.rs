@@ -713,6 +713,11 @@ pub struct Group {
     /// repetition takes the union over the alternatives.
     pub alts: Vec<Vec<PathElem>>,
     pub quant: Quant,
+    /// The braces stacked after the first (spec: Def. Walk, the
+    /// braces stack): each a condition of its own — its own weight,
+    /// rule and bounds — a walk admitted when every brace admits it;
+    /// the reach marker belongs to the last.
+    pub more: Vec<Quant>,
     /// `[...]` expression predicates on the group's matches,
     /// applied per repetition count BEFORE reach — so
     /// `(...)+[P]?` is "the proximal satisfying P" (a shortest
@@ -737,20 +742,88 @@ pub struct Group {
 pub struct Quant {
     pub min: usize,
     pub max: Option<usize>,
+    /// The cost rule the brace names before its bounds, `{abs:2_km;3_km}`
+    /// (spec: Def. Cost Rule): the fold of the legs' weights the
+    /// bounds measure; `None` is the signed sum.
+    pub rule: Option<CostRule>,
     /// A budget instead of a count (spec: The budget quantifier):
     /// `{;100_km}`, `{10_km;100_km}`, `{2_h;}` — the floor and the
     /// ceiling as written, quantities the walk sums an edge weight
-    /// against. With a budget `min` is 0 and `max` is `None`.
+    /// against — or the bare unit `{_km}`, the dimension named and
+    /// no bound. With a budget `min` is 0 and `max` is `None`.
     pub budget: Option<Budget>,
 }
 
-/// A budget quantifier's bounds, as written: each a quantity
-/// literal (`100_km`, `2_h`), resolved at the walk under the run's
-/// declared units; an absent floor includes the start at zero.
+/// A budget quantifier's bounds, as written: each a signed quantity
+/// literal (`100_km`, `2_h`, `-200_m`), resolved at the walk under
+/// the run's declared units; an absent bound is no bound (ruling
+/// 2026-11-07: the formalia's `a ≤ c ≤ b`, either side absent). The
+/// bare-unit brace `{_km}` / `{min:_m}` names the dimension and the
+/// printing unit alone, both bounds absent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Budget {
     pub floor: Option<String>,
     pub ceiling: Option<String>,
+    /// The bare unit, `km` of `{_km}`, when the brace names its
+    /// dimension without bounds.
+    pub unit: Option<String>,
+}
+
+/// A cost rule (spec: Def. Cost Rule, ruling 2026-11-07): how the
+/// legs' weights x_i of a brace's weight fold into the walk's cost
+/// under it. `Sum` is the signed sum, the unnamed default; `Abs` Σ|x|
+/// (total variation), `Rise` Σ max(x, 0) (total ascent), `Fall`
+/// Σ max(−x, 0) (total descent, positive), `Max` and `Min` the
+/// extreme leg.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CostRule {
+    Sum,
+    Abs,
+    Rise,
+    Fall,
+    Max,
+    Min,
+}
+
+impl CostRule {
+    /// The rule a brace names, or `None` for a name that is no rule.
+    pub fn parse(name: &str) -> Option<CostRule> {
+        Some(match name {
+            "abs" => CostRule::Abs,
+            "rise" => CostRule::Rise,
+            "fall" => CostRule::Fall,
+            "max" => CostRule::Max,
+            "min" => CostRule::Min,
+            _ => return None,
+        })
+    }
+
+    /// The rule's name as written in the brace.
+    pub fn name(self) -> &'static str {
+        match self {
+            CostRule::Sum => "",
+            CostRule::Abs => "abs",
+            CostRule::Rise => "rise",
+            CostRule::Fall => "fall",
+            CostRule::Max => "max",
+            CostRule::Min => "min",
+        }
+    }
+
+    /// The cost after one more leg of weight `w`, from the cost so far
+    /// (`None` before the first leg).
+    pub fn fold(self, so_far: Option<f64>, w: f64) -> f64 {
+        match (self, so_far) {
+            (CostRule::Sum, c) => c.unwrap_or(0.0) + w,
+            (CostRule::Abs, c) => c.unwrap_or(0.0) + w.abs(),
+            (CostRule::Rise, c) => c.unwrap_or(0.0) + w.max(0.0),
+            (CostRule::Fall, c) => c.unwrap_or(0.0) + (-w).max(0.0),
+            (CostRule::Max, None) => w,
+            (CostRule::Max, Some(c)) => c.max(w),
+            (CostRule::Min, None) => w,
+            (CostRule::Min, Some(c)) => c.min(w),
+        }
+    }
 }
 
 /// One navigation step.

@@ -1747,6 +1747,30 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
         }
     }
 
+    fn edge_weights(
+        &self,
+        source: NodeId,
+        label: &str,
+        target: NodeId,
+        row: Option<NodeId>,
+        forward: bool,
+    ) -> Vec<Value> {
+        match (self.split(source), self.split(target)) {
+            (None, None) => self.outer.edge_weights(source, label, target, row, forward),
+            (Some((g, s)), Some((h, t))) if g == h => {
+                let row = row.and_then(|r| match self.split(r) {
+                    Some((k, inner)) if k == g => Some(inner),
+                    _ => None,
+                });
+                self.grafts.borrow()[g]
+                    .inner
+                    .adapter()
+                    .edge_weights(s, label, t, row, forward)
+            }
+            _ => Vec::new(),
+        }
+    }
+
     fn prefetch_properties(&self, nodes: &[NodeId], names: &[&str]) {
         let outer: Vec<NodeId> = nodes
             .iter()

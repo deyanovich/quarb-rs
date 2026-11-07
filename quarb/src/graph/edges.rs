@@ -56,12 +56,46 @@ impl Hop {
         self.label.is_none() && self.labels.is_empty()
     }
 
-    fn admits(&self, label: &str) -> bool {
+    /// Whether the hop's explicit label admits `label`.
+    fn named(&self, label: &str) -> bool {
         self.label.as_deref().is_none_or(|l| l == label)
-            && self
-                .labels
-                .iter()
-                .all(|c| c.matches(std::slice::from_ref(&label.to_string())))
+    }
+
+    /// The edges of `edges` (label, other end, row) the hop walks,
+    /// read as the crosslink hop reads its label algebra over
+    /// single-label edges (spec: the edge model): a positive clause
+    /// a class of edges, the conjunction of classes the edges of any
+    /// class whose other end every class reaches, a wholly negated
+    /// clause the complement among the edges themselves.
+    fn select<'a>(
+        &self,
+        edges: &'a [(String, NodeId, Option<NodeId>)],
+    ) -> Vec<&'a (String, NodeId, Option<NodeId>)> {
+        let fits = |c: &LabelClause, l: &str| c.matches(std::slice::from_ref(&l.to_string()));
+        let (negative, positive): (Vec<_>, Vec<_>) = self
+            .labels
+            .iter()
+            .partition(|c| c.alts.iter().all(|a| a.neg));
+        let class_ends: Vec<Vec<NodeId>> = positive
+            .iter()
+            .map(|c| {
+                edges
+                    .iter()
+                    .filter(|(l, _, _)| fits(c, l))
+                    .map(|(_, n, _)| *n)
+                    .collect()
+            })
+            .collect();
+        edges
+            .iter()
+            .filter(|(l, n, _)| {
+                self.named(l)
+                    && negative.iter().all(|c| fits(c, l))
+                    && (positive.is_empty()
+                        || (positive.iter().any(|c| fits(c, l))
+                            && class_ends.iter().all(|ends| ends.contains(n))))
+            })
+            .collect()
     }
 }
 
@@ -80,8 +114,10 @@ pub struct EdgesSpec {
 /// (a unit never starts with the sigil, a property always does).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Weight {
+    /// `--weight=UNIT`: the edges' declared weight of that unit's
+    /// dimension (spec: the edge model) — a property is no weight
+    /// unless the model declares it one.
     Unit(String),
-    Property(String),
 }
 
 /// What the graph-table command draws, or the graph library ranks.
@@ -333,7 +369,10 @@ impl GraphTable {
                 } if opt == "--weight" || opt == "-w" => {
                     spec.weight = Some(Weight::Unit(v.to_string()));
                 }
-                // `--weight=::prop`: the property by name
+                // `--weight=::prop` is retired (spec: the edge model,
+                // ruling 2026-11-07): a property is a weight only where
+                // the model declares it one, and a weight is read by
+                // its unit; a count of hops is the count form
                 Arg::Opt {
                     name: opt,
                     value:
@@ -343,11 +382,16 @@ impl GraphTable {
                             anchor: Anchor::Current,
                         }),
                 } if (opt == "--weight" || opt == "-w") && steps.is_empty() => {
-                    spec.weight = Some(Weight::Property(prop.clone()));
+                    return Err(format!(
+                        "{shown}: --weight=::{prop} names a property, and a property is no weight: \
+                         declare it one in the model ('edge …: ::a -- ::b weights(::{prop});') and \
+                         read it by its unit (--weight=km); a count of hops needs no weight"
+                    ));
                 }
                 Arg::Opt { name: opt, .. } if opt == "--weight" || opt == "-w" => {
                     return Err(format!(
-                        "{shown}: --weight takes a unit (--weight=km) or a property (--weight=::weight)"
+                        "{shown}: --weight takes a unit (--weight=km), the edges' declared weight of \
+                         that dimension"
                     ));
                 }
                 Arg::Opt {
@@ -686,11 +730,9 @@ fn collect_rows(
         let mut found: Vec<(Row, NodeId)> = Vec::new();
         for &n in nodes {
             if matches!(hop.collect, Collect::Out | Collect::Both | Collect::Any) {
-                for (label, t, row) in adapter.edge_rows(n) {
-                    if hop.admits(&label)
-                        && inside.contains(&t)
-                        && !(hop.wild() && adapter.link_consumed(n, &label))
-                    {
+                let rows = adapter.edge_rows(n);
+                for (label, t, row) in hop.select(&rows).into_iter().cloned() {
+                    if inside.contains(&t) && !(hop.wild() && adapter.link_consumed(n, &label)) {
                         found.push((
                             Row {
                                 from: n,
@@ -705,11 +747,9 @@ fn collect_rows(
                 }
             }
             if matches!(hop.collect, Collect::In | Collect::Both | Collect::Any) {
-                for (label, s, row) in adapter.backlink_rows(n) {
-                    if hop.admits(&label)
-                        && inside.contains(&s)
-                        && !(hop.wild() && adapter.link_consumed(s, &label))
-                    {
+                let rows = adapter.backlink_rows(n);
+                for (label, s, row) in hop.select(&rows).into_iter().cloned() {
+                    if inside.contains(&s) && !(hop.wild() && adapter.link_consumed(s, &label)) {
                         found.push((
                             Row {
                                 from: s,
@@ -723,7 +763,13 @@ fn collect_rows(
                     }
                 }
             }
-            if hop.collect == Collect::Any && hop.admits(CHILD) {
+            if hop.collect == Collect::Any
+                && hop.named(CHILD)
+                && hop
+                    .labels
+                    .iter()
+                    .all(|c| c.matches(std::slice::from_ref(&CHILD.to_string())))
+            {
                 for c in adapter.children(n) {
                     if inside.contains(&c) {
                         found.push((
@@ -1160,19 +1206,20 @@ pub(crate) fn edge_weights(
                 crate::value::quantity::parse_unit_text(&format!("1 {}", unit.replace('_', " ")))
                     .ok_or_else(|| format!("'{unit}' is no unit the run knows (--weight=km)"))?;
             let b = BudgetBounds {
-                floor: 0.0,
+                floor: None,
                 ceiling: None,
                 base,
                 unit: written,
                 scale: bv / mag,
                 written: unit.clone(),
+                rule: crate::syntax::ast::CostRule::Sum,
             };
             rows.iter()
                 .map(|r| {
                     let w = if r.tree {
                         None
                     } else {
-                        b.weight(adapter, &r.ctx())?
+                        b.weight(adapter, &r.ctx(), true)?
                     };
                     Ok(match w {
                         Some(w) => (
@@ -1188,27 +1235,6 @@ pub(crate) fn edge_weights(
                 })
                 .collect()
         }
-        Weight::Property(prop) => Ok(rows
-            .iter()
-            .map(|r| {
-                let v = if r.tree {
-                    None
-                } else {
-                    r.ctx().property(adapter, prop)
-                };
-                let n =
-                    v.as_ref().and_then(|v| match v {
-                        Value::Int(i) => Some(*i as f64),
-                        Value::Float(f) => Some(*f),
-                        Value::Quantity { value, .. } => Some(*value),
-                        Value::Str(t) => t.trim().parse::<f64>().ok().or_else(|| {
-                            crate::value::quantity::parse_unit_text(t).map(|(bv, ..)| bv)
-                        }),
-                        _ => None,
-                    });
-                (v.unwrap_or(Value::Null), n)
-            })
-            .collect()),
     }
 }
 
@@ -1357,7 +1383,7 @@ pub(crate) fn distance_values(
     seeds: &[NodeId],
     trace: &crate::graph::correlate::Trace,
 ) -> Result<Vec<Value>, String> {
-    let (triples, cells, _) = index_edges(adapter, nodes, spec, trace)?;
+    let (triples, _cells, _) = index_edges(adapter, nodes, spec, trace)?;
     let edges = quarb_lib_graph::Edges::fold(nodes.len(), triples);
     let seeds: Vec<usize> = seeds
         .iter()
@@ -1378,23 +1404,6 @@ pub(crate) fn distance_values(
                     value: d,
                     base,
                     written: Some((d / (bv / mag), written)),
-                }
-            }
-            Some(Weight::Property(_)) => {
-                if cells.iter().all(|c| matches!(c, Value::Int(_))) {
-                    Value::Int(d.round() as i64)
-                } else if let Some(Value::Quantity { base, .. }) = cells.first()
-                    && cells
-                        .iter()
-                        .all(|c| matches!(c, Value::Quantity { base: b, .. } if b == base))
-                {
-                    Value::Quantity {
-                        value: d,
-                        base: base.clone(),
-                        written: None,
-                    }
-                } else {
-                    Value::Float(d)
                 }
             }
         }

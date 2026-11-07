@@ -422,6 +422,48 @@ impl AstAdapter for MockTree {
             .find(|(k, _)| k == name)
             .map(|(_, v)| v.clone())
     }
+    /// The mock is a substrate that carries weights of its own: every
+    /// quantity-valued edge property is one (spec: the edge model,
+    /// Weights — an adapter whose substrate carries weights mints them).
+    fn edge_weights(
+        &self,
+        source: NodeId,
+        label: &str,
+        target: NodeId,
+        _row: Option<NodeId>,
+        _forward: bool,
+    ) -> Vec<Value> {
+        let Some(props) = self
+            .edge_props
+            .get(&(source.0, label.to_string(), target.0))
+        else {
+            return Vec::new();
+        };
+        let mut out: Vec<Value> = props
+            .iter()
+            .filter_map(|(_, v)| match v {
+                q @ Value::Quantity { .. } => Some(q.clone()),
+                Value::Str(t) => {
+                    crate::value::quantity::parse_unit_text(t).map(|(bv, base, mag, unit)| {
+                        Value::Quantity {
+                            value: bv,
+                            base,
+                            written: Some((mag, unit)),
+                        }
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            let base = |v: &Value| match v {
+                Value::Quantity { base, .. } => base.clone(),
+                _ => String::new(),
+            };
+            base(a).cmp(&base(b))
+        });
+        out
+    }
     fn provenance(&self, node: NodeId) -> Provenance {
         self.prov.get(&node.0).cloned().unwrap_or_default()
     }
@@ -672,19 +714,19 @@ fn label_algebra() {
             ("ref".to_string(), 5),
         ],
     );
-    assert_eq!(run("/a/x.rs->(ref && doc)", &t), vec![7]);
+    assert_eq!(run("/a/x.rs->(ref && doc)", &t), vec![7, 7]);
     // (a label selection reads the labels to one node together,
     // one thread per node — spec: Label Selections)
-    assert_eq!(run("/a/x.rs->(ref || doc)", &t), vec![7, 5]);
-    assert_eq!(run("/a/x.rs->(doc || ref)", &t), vec![7, 5]);
-    assert_eq!(run("/a/x.rs->(!doc)", &t), vec![5]);
+    assert_eq!(run("/a/x.rs->(ref || doc)", &t), vec![7, 7, 5]);
+    assert_eq!(run("/a/x.rs->(doc || ref)", &t), vec![7, 7, 5]);
+    assert_eq!(run("/a/x.rs->(!doc)", &t), vec![7, 5]);
     assert_eq!(run("/a/x.rs->(!(ref || doc))", &t), Vec::<u64>::new());
-    assert_eq!(run("/a/x.rs->(ref && !doc)", &t), vec![5]);
-    assert_eq!(run("/a/x.rs->(r* && !d*)", &t), vec![5]);
+    assert_eq!(run("/a/x.rs->(ref && !doc)", &t), vec![7, 5]);
+    assert_eq!(run("/a/x.rs->(r* && !d*)", &t), vec![7, 5]);
     // every crosslink carries a label: `!*` selects nothing
     assert_eq!(run("/a/x.rs->(!*)", &t), Vec::<u64>::new());
     // the incoming arrow mirrors it
-    assert_eq!(run("//w.rs<-(ref && doc)", &t), vec![2]);
+    assert_eq!(run("//w.rs<-(ref && doc)", &t), vec![2, 2]);
     assert_eq!(run("//z.rs<-(!doc)", &t), vec![2]);
     assert_eq!(run("//z.rs<-(ref && doc)", &t), Vec::<u64>::new());
     // a quantifier applies to the hop whatever it carries
@@ -692,15 +734,15 @@ fn label_algebra() {
     assert_eq!(run("/a/x.rs->(mgr && !x){2}", &c), vec![7]);
     assert_eq!(run("/a/x.rs(->(mgr || x)){2}", &c), vec![7]);
     // the plain alternation is the union of two hops under its
-    // older spelling: one thread per edge, so 7 twice; collapsed,
-    // the selection's node set
+    // older spelling, one thread per edge, as the class union is
+    // (spec: the edge model); collapsed, both are the node set
     assert_eq!(run("/a/x.rs->(ref|doc)", &t), vec![7, 5, 7]);
     assert_eq!(
         run("/a/x.rs->(ref|doc) @| collapse", &t),
-        run("/a/x.rs->(ref || doc)", &t)
+        run("/a/x.rs->(ref || doc) @| collapse", &t)
     );
     // the words of the family spell the operators too
-    assert_eq!(run("/a/x.rs->(ref .and. .not. doc)", &t), vec![5]);
+    assert_eq!(run("/a/x.rs->(ref .and. .not. doc)", &t), vec![7, 5]);
 }
 
 #[test]
@@ -1445,6 +1487,16 @@ fn the_acyclic_promise_expands_by_node_and_round() {
         fn backlinks(&self, node: NodeId) -> Vec<(String, NodeId)> {
             self.0.backlinks(node)
         }
+        fn edge_weights(
+            &self,
+            source: NodeId,
+            label: &str,
+            target: NodeId,
+            row: Option<NodeId>,
+            forward: bool,
+        ) -> Vec<Value> {
+            self.0.edge_weights(source, label, target, row, forward)
+        }
         fn acyclic_link(&self, label: &str) -> Option<String> {
             self.1
                 .contains(&label)
@@ -1643,7 +1695,9 @@ fn a_budget_sums_an_edge_weight_along_the_walk() {
     // An edge without the weight is not crossed: a time budget sees
     // only a→y (2 h); y→deep carries no time.
     assert_eq!(run("//a(->e){;3_h}", &t), vec![1, 3]);
-    // Two lengths on one edge refuse naming both.
+    // Two lengths on one edge refuse naming the dimension (a model's
+    // declaration refuses them at load naming both; a substrate that
+    // mints two is refused at the walk).
     let mut two = MockTree::roads();
     two.edge_props
         .get_mut(&(3, "e".to_string(), 6))
@@ -1651,7 +1705,11 @@ fn a_budget_sums_an_edge_weight_along_the_walk() {
         .push(("detour".into(), Value::Str("5 km".into())));
     // (the refusal is recorded; the library voids the answer)
     let _ = run("//a(->e){;5_km}", &two);
-    assert!(take_refusal().unwrap().contains("len and detour"));
+    assert!(
+        take_refusal()
+            .unwrap()
+            .contains("two weights of one dimension")
+    );
     // One dimension per quantifier.
     assert!(run("//a(->e){1;5_km}", &t).is_empty());
     assert!(
@@ -3829,15 +3887,15 @@ fn graph_distance_counts_hops_or_sums_weights_from_the_seeds() {
         matches!(&km[3], Value::Quantity { value, .. } if (*value - 3000.0).abs() < 1e-9),
         "{km:?}"
     );
-    // weights by property: integers stay integers
+    // a property is no weight (spec: the edge model): the property
+    // form of the option is retired with the pointer to the model
     let w = MockTree::weighted();
-    assert_eq!(
-        vals(
-            "//a(->e)* @| graph:distance(->e; --from=/a --weight=::qty)",
-            &w
-        ),
-        vec![Value::Int(0), Value::Int(4), Value::Int(1), Value::Int(16)]
-    );
+    let why = refused(
+        "//a(->e)* @| graph:distance(->e; --from=/a --weight=::qty)",
+        &w,
+    )
+    .unwrap();
+    assert!(why.contains("a property is no weight"), "{why}");
     // the seeds are required
     let why = refused("//a(->e)* @| graph:distance(->e)", &t).unwrap();
     assert!(why.contains("--from"), "{why}");

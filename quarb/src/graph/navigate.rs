@@ -45,6 +45,10 @@ pub(crate) struct WalkFacts {
     pub(crate) hops: usize,
     /// (base value, base unit, written magnitude, written unit)
     pub(crate) total: Option<(f64, String, f64, String)>,
+    /// The costs under every brace in brace order (spec: Def. Walk,
+    /// the braces stack): a count brace's hop count, a budget brace's
+    /// cost as a quantity; one entry under a single brace.
+    pub(crate) costs: Vec<Value>,
     /// A digest of the walk's history (the nodes it crossed), so
     /// two walks ending alike stay two threads (spec: Expansion
     /// paths).
@@ -66,6 +70,7 @@ impl WalkFacts {
                 },
                 None => Value::Null,
             }),
+            "costs" => Some(Value::list(self.costs.clone())),
             _ => None,
         }
     }
@@ -361,6 +366,12 @@ impl EdgeCtx {
             Some(row) => adapter.property_names(row),
             None => adapter.link_property_names(self.source, &self.label, self.target),
         }
+    }
+
+    /// The edge's declared weights (spec: the edge model), crossed
+    /// `forward` from its source to its target or against it.
+    pub(crate) fn weights(&self, adapter: &impl AstAdapter, forward: bool) -> Vec<Value> {
+        adapter.edge_weights(self.source, &self.label, self.target, self.row, forward)
     }
 }
 

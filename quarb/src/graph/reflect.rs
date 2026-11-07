@@ -294,6 +294,14 @@ impl QueryArbor {
         if let Some(mark) = reach_mark(g.reach) {
             props.push(("reach".to_string(), Value::Str(mark.to_string())));
         }
+        // the cost rule of the last brace, the one the reach orders by
+        // (spec: Def. Cost Rule); absent for the signed sum
+        if let Some(rule) = g.more.last().map_or(g.quant.rule, |q| q.rule) {
+            props.push(("rule".to_string(), Value::Str(rule.name().to_string())));
+        }
+        if !g.more.is_empty() {
+            props.push(("braces".to_string(), Value::Int(1 + g.more.len() as i64)));
+        }
         props.push((
             "form".to_string(),
             Value::Str(crate::syntax::unparse::group(g)),
