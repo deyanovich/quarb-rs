@@ -55,6 +55,24 @@ pub fn parse(tokens: &[Token]) -> Result<Query> {
 
 /// Parse a token stream into a [`Query`] with a pre-seeded fragment
 /// table (`--defs`); inline `def` statements extend it.
+thread_local! {
+    /// Whether the runner supplies a topic to the expression head (the
+    /// calculator's piped input): `Some(true)` admits a bare read
+    /// there, `Some(false)` refuses it, `None` — a parse that is no
+    /// run's (a defs check, the calculator's path read, an expansion)
+    /// — leaves the judgment to the run's parse. Set by
+    /// [`crate::Query::parse_with`] and [`crate::Query::parse`].
+    static HEAD_TOPIC: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Run `f` with the head-topic flag set to `supplied`.
+pub(crate) fn with_head_topic<T>(supplied: bool, f: impl FnOnce() -> T) -> T {
+    let before = HEAD_TOPIC.with(|c| c.replace(Some(supplied)));
+    let out = f();
+    HEAD_TOPIC.with(|c| c.set(before));
+    out
+}
+
 pub fn parse_with_defs(tokens: &[Token], defs: Defs) -> Result<Query> {
     parse_with_data(tokens, defs, &crate::graph::reflect::Reflector::new(None))
 }
@@ -1060,6 +1078,32 @@ pub(crate) enum PipeMode {
 /// that produces or transforms a topic enters scalar mode; a
 /// navigation command ends in the mode its optional projection
 /// implies.
+/// Whether a push body's last position is navigation — its pipeline's
+/// mode out is navigation, or, with no pipeline, its last branch
+/// carries no projection (ruling 2026-11-06: a push body ends in a
+/// value; the static test, never data-dependent).
+pub(crate) fn body_ends_in_navigation(body: &Query) -> bool {
+    let start = match body.branches.last() {
+        Some(b) if b.projection.is_some() => PipeMode::Scalar,
+        Some(_) => PipeMode::Nav,
+        // no branch: an expression head, a value
+        None => PipeMode::Scalar,
+    };
+    // a body ending in a spliced quarq or a hole is judged when the
+    // expansion re-parses it, not here
+    if matches!(
+        body.pipeline.last(),
+        Some(Command::Splice(_) | Command::SpliceAs { .. })
+    ) {
+        return false;
+    }
+    let mode = body
+        .pipeline
+        .iter()
+        .fold(start, |cur, c| command_mode_out(c, cur));
+    matches!(mode, PipeMode::Nav)
+}
+
 pub(crate) fn command_mode_out(command: &Command, cur: PipeMode) -> PipeMode {
     match command {
         // the session push leaves the cursor untouched, as a push does
@@ -1539,6 +1583,21 @@ impl Parser<'_> {
             // any rung, is a projector (draft 166), so
             // `= %(::Name; ::Fare)` stores two property projections
             head_projections(&mut expr);
+            // The head opens one thread with no position and the
+            // expression's value as its topic (ruling 2026-11-06): a
+            // bare read there — `= ::lang`, `= :name`, `= $_` — has
+            // nothing to project from, and a projector is an operand
+            // of the commands that take it, never a value of its own.
+            // A runner that pipes a topic into the head (the calculator's
+            // stdin) gives the bare read something to read: admitted.
+            let refuse_bare = HEAD_TOPIC.with(|c| c.get()) == Some(false);
+            if bare_read_at_head(&expr) && refuse_bare {
+                return Err(QuarbError::parse(
+                    "the expression head stands on no node and holds no topic yet: nothing \
+                     to project from — write the path ('= /html::lang'), or give the projector \
+                     to a command that takes one ('map(::lang)')",
+                ));
+            }
             branches.push(Branch {
                 steps: Vec::new(),
                 projection: None,
@@ -2025,6 +2084,18 @@ impl Parser<'_> {
                 && matches!(self.peek(), Some(Token::RParen))
             {
                 self.pos += 1;
+                // A push body ends in a value (ruling 2026-11-06): a
+                // body that ends in navigation is refused here, static,
+                // never by what the data holds.
+                if self.def_params.is_empty() && body_ends_in_navigation(&body) {
+                    let shown = name.as_deref().unwrap_or("m");
+                    return Err(QuarbError::parse(format!(
+                        "a push body ends in a value, and this one ends in navigation: \
+                         project it ('.{shown}(/manager::name)'), reduce it over the pipe \
+                         ('.{shown}(/members/* @| count)'), or mark the node itself \
+                         ('/manager | .{shown}')"
+                    )));
+                }
                 return Ok(Command::Subcontext {
                     name,
                     body: Box::new(body),
@@ -2153,7 +2224,7 @@ impl Parser<'_> {
                     // live topic.
                     if !matches!(self.peek(), Some(Token::LParen)) {
                         return Err(QuarbError::parse(
-                            "cannot navigate in scalar mode — the topic is live \
+                            "cannot navigate in value mode — the topic is live \
                              and a hop would drop it; file it first with '| .' \
                              (or '| .name') and navigation resumes. \
                              (Parenthesize the path for a value expression.)",
@@ -2726,9 +2797,27 @@ impl Parser<'_> {
             {
                 true
             }
-            Some(Token::LParen) => self.toks.get(self.pos + 1).is_some_and(axis),
+            // `(::p-->)+`, `(-->)+`: a quantified group opening with a
+            // reference hop is navigation as `(->e)+` is
+            Some(Token::LParen) => {
+                self.toks.get(self.pos + 1).is_some_and(axis) || self.resolution_at(self.pos + 1)
+            }
             _ => false,
         }
+    }
+
+    /// Whether a resolution hop opens at `pos`: `::property-->`,
+    /// `::property=>(…)`, or the bare `-->` / `<--(…)`.
+    fn resolution_at(&self, pos: usize) -> bool {
+        matches!(
+            self.toks.get(pos),
+            Some(Token::Resolve | Token::ReverseResolve)
+        ) || (matches!(self.toks.get(pos), Some(Token::ColonColon))
+            && matches!(self.toks.get(pos + 1), Some(Token::Name { .. }))
+            && matches!(
+                self.toks.get(pos + 2),
+                Some(Token::Resolve | Token::ReverseResolve | Token::ValueMatch)
+            ))
     }
 
     /// Whether the next token continues a value expression after a
@@ -9579,10 +9668,21 @@ impl Parser<'_> {
                     "the value match compares a VALUE: '(x ?= k ? r : else)'                      — a boolean condition belongs to the plain conditional",
                 ));
             };
+            // `true`/`false` as the scrutinee is a condition, and the
+            // value match compares a value (the review's row 9039)
+            if matches!(scrutinee, Operand::Lit(Value::Bool(_))) {
+                return Err(QuarbError::parse(
+                    "the value match compares a VALUE, and 'true'/'false' is a condition: \
+                     the plain conditional is '(cond ? a : b)'",
+                ));
+            }
             let mut arms = Vec::new();
             let other = loop {
                 let (test, regex) = if let Some(Token::Regex(pat)) = self.peek() {
                     let pat = pat.clone();
+                    Regex::new(&pat).map_err(|e| {
+                        QuarbError::parse(format!("bad regex '/{pat}/': {}", regex_reason(&e)))
+                    })?;
                     self.pos += 1;
                     (Operand::Lit(Value::Str(pat)), true)
                 } else {
@@ -10569,6 +10669,11 @@ impl Parser<'_> {
                 })
             }
             Some(Token::Name { text, quoted, .. }) => {
+                // `1_KB` is refused at the literal, as `convert(KB)` is:
+                // the kilobyte is ambiguous (the review's row 15489)
+                if !*quoted && let Some(msg) = crate::value::quantity::refused_literal(text) {
+                    return Err(QuarbError::parse(msg));
+                }
                 let value = literal_value(text, *quoted, &|e| self.expander.unit_scale(e));
                 // In a body a bare word names a command applied to
                 // the body's seed (`.n(cc)`, `%(total = count)`);
@@ -10649,6 +10754,12 @@ impl Parser<'_> {
                 Ok(Operand::Interp(segs))
             }
             Some(Token::Regex(pat)) => {
+                // a construct the regex has no reading of (look-around,
+                // a back-reference) refuses here, naming it, rather than
+                // matching nothing (the review's row 6674)
+                Regex::new(pat).map_err(|e| {
+                    QuarbError::parse(format!("bad regex '/{pat}/': {}", regex_reason(&e)))
+                })?;
                 let value = Value::Str(pat.clone());
                 self.pos += 1;
                 Ok(Operand::Lit(value))
@@ -10911,6 +11022,19 @@ impl Parser<'_> {
                             let digits = text[1..].to_string();
                             self.pos += 1;
                             if digits.is_empty() {
+                                // `$*` — the join's bound nodes, legal
+                                // inside a join condition only (ruling
+                                // 2026-11-06): the enclosing correlation
+                                // is lexically decidable, so the miss is
+                                // a parse error rather than a silent null.
+                                if self.correlation_depth == 0 && !self.in_def_body {
+                                    return Err(QuarbError::parse(
+                                        "'$*' reads the join's bound nodes and stands inside a join \
+                                         condition only; outside one there is no join to read — \
+                                         '$_' is the topic, '$$_' the position, '@@_' the context's \
+                                         positions",
+                                    ));
+                                }
                                 None
                             } else {
                                 return Err(QuarbError::parse(format!(
@@ -10927,6 +11051,19 @@ impl Parser<'_> {
                         }) if text.starts_with('.') => {
                             let rest = text[1..].to_string();
                             self.pos += 1;
+                            // `$."3"` — the recall of a push named by a quoted
+                            // string glued to the dot, as `."3"(…)` pushes it
+                            if rest.is_empty()
+                                && let Some(Token::Name {
+                                    text: q,
+                                    quoted: true,
+                                    glued: true,
+                                }) = self.peek()
+                            {
+                                let q = q.clone();
+                                self.pos += 1;
+                                return Ok(Operand::Recall(RegRef::Named(q)));
+                            }
                             return Ok(Operand::Recall(reg_ref(&rest)?));
                         }
                         // `$,name` — the session read (draft 166)
@@ -11028,15 +11165,18 @@ impl Parser<'_> {
                             }
                             match &projection {
                                 Some(Projection::CoreMeta(k))
-                                    if matches!(k.as_str(), "round" | "hops" | "total") => {}
+                                    if matches!(
+                                        k.as_str(),
+                                        "round" | "hops" | "total" | "labels"
+                                    ) => {}
                                 Some(Projection::CoreMeta(k)) => {
                                     return Err(QuarbError::parse(format!(
-                                        "an edge carries plain properties ($-::{k}), its ends ':source' and ':target', and the facts ':round', ':hops' and ':total'; ':{k}' is none of them"
+                                        "an edge carries plain properties ($-::{k}), its ends ':source' and ':target', and the facts ':round', ':hops', ':total' and ':labels'; ':{k}' is none of them"
                                     )));
                                 }
                                 Some(Projection::AdapterMeta(_)) => {
                                     return Err(QuarbError::parse(
-                                        "an edge carries plain properties ($-::prop), its ends ':source', ':target', and the facts ':round', ':hops', ':total'",
+                                        "an edge carries plain properties ($-::prop), its ends ':source', ':target', and the facts ':round', ':hops', ':total', ':labels'",
                                     ));
                                 }
                                 _ => {}
@@ -12339,10 +12479,11 @@ fn is_record_convention(name: &str) -> bool {
 }
 
 fn validate_record_convention(call: &FnCall, what: &str) -> Result<()> {
+    // `%()` is the empty record, the value the engine prints as `%()`
+    // (a printed value reads back as itself; the review's row 3160,
+    // 2026-11-06): nothing to check.
     if call.args.is_empty() {
-        return Err(QuarbError::parse(format!(
-            "{what} needs at least one field, e.g. {what}(::name)"
-        )));
+        return Ok(());
     }
     // Field names are fully static — literals or auto-named
     // projections — so a collision is a parse error, never a
@@ -12882,6 +13023,19 @@ fn mark_reach(mark: char) -> Reach {
         '!' => Reach::Distal,
         _ => Reach::All,
     }
+}
+
+/// The one-line reason of a regex compile error: the library's
+/// message spans lines with the pattern and a caret; the last line
+/// names the construct ("look-around … is not supported").
+fn regex_reason(e: &regex::Error) -> String {
+    let text = e.to_string();
+    let last = text
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("");
+    last.trim().trim_start_matches("error: ").to_string()
 }
 
 /// An identifier-shaped word: a letter or `_` first, then letters,
@@ -13996,6 +14150,17 @@ fn fold_record(args: &[Arg]) -> Option<Value> {
         }
     }
     Some(Value::Record(fields.into()))
+}
+
+/// Whether the head's operand is a bare read of the node or topic the
+/// head does not have: a projector made of `::k` / `:k` / `:::k`,
+/// typed or not, or the topic `$_` itself.
+fn bare_read_at_head(op: &Operand) -> bool {
+    match op {
+        Operand::Lit(Value::Projection { .. }) | Operand::Topic => true,
+        Operand::Typed { inner, .. } => bare_read_at_head(inner),
+        _ => false,
+    }
 }
 
 fn head_projections(op: &mut Operand) {

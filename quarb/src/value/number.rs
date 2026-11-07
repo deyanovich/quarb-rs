@@ -169,6 +169,20 @@ pub fn canonical(text: &str, decimal: Decimal) -> Option<String> {
 /// locale's language decides, with the regions that differ from
 /// their language's rule listed by themselves. Unknown locales
 /// have no table and the reading is `None`.
+/// The languages whose decimal convention is carried, by convention:
+/// the point, then the comma. What `number(LOCALE)` names when it
+/// refuses a locale it does not carry.
+pub const POINT_LANGUAGES: &[&str] = &[
+    "en", "ja", "zh", "ko", "th", "hi", "he", "ms", "fil", "sw", "ga", "cy", "mt", "ur", "ta",
+    "te", "kn", "ml", "bn", "gu", "mr", "pa", "my", "km", "lo", "si", "ne", "ar", "fa",
+];
+pub const COMMA_LANGUAGES: &[&str] = &[
+    "ru", "uk", "be", "bg", "sr", "hr", "bs", "sl", "mk", "cs", "sk", "pl", "hu", "ro", "de", "fr",
+    "it", "es", "pt", "nl", "da", "sv", "nb", "nn", "no", "fi", "is", "et", "lv", "lt", "el", "tr",
+    "az", "kk", "ky", "uz", "tg", "mn", "ka", "hy", "sq", "ca", "eu", "gl", "af", "id", "vi", "lb",
+    "fo", "fy", "rm", "br", "oc", "sc", "co",
+];
+
 pub fn locale_convention(locale: &str) -> Option<Decimal> {
     let locale = locale.trim().replace('_', "-");
     let lower = locale.to_ascii_lowercase();
@@ -181,17 +195,13 @@ pub fn locale_convention(locale: &str) -> Option<Decimal> {
         });
     }
     let lang = lower.split('-').next().unwrap_or("");
-    Some(match lang {
-        "en" | "ja" | "zh" | "ko" | "th" | "hi" | "he" | "ms" | "fil" | "sw" | "ga" | "cy"
-        | "mt" | "ur" | "ta" | "te" | "kn" | "ml" | "bn" | "gu" | "mr" | "pa" | "my" | "km"
-        | "lo" | "si" | "ne" | "ar" | "fa" => Decimal::Point,
-        "ru" | "uk" | "be" | "bg" | "sr" | "hr" | "bs" | "sl" | "mk" | "cs" | "sk" | "pl"
-        | "hu" | "ro" | "de" | "fr" | "it" | "es" | "pt" | "nl" | "da" | "sv" | "nb" | "nn"
-        | "no" | "fi" | "is" | "et" | "lv" | "lt" | "el" | "tr" | "az" | "kk" | "ky" | "uz"
-        | "tg" | "mn" | "ka" | "hy" | "sq" | "ca" | "eu" | "gl" | "af" | "id" | "vi" | "lb"
-        | "fo" | "fy" | "rm" | "br" | "oc" | "sc" | "co" => Decimal::Comma,
-        _ => return None,
-    })
+    if POINT_LANGUAGES.contains(&lang) {
+        return Some(Decimal::Point);
+    }
+    if COMMA_LANGUAGES.contains(&lang) {
+        return Some(Decimal::Comma);
+    }
+    None
 }
 
 #[cfg(test)]

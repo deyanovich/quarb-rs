@@ -145,7 +145,7 @@ fn numeric_aggregation_over_string_attributes() {
     assert_eq!(vals("//s::rank @| avg"), vec!["3.2"]);
     assert_eq!(vals("//s::rank @| max"), vec!["5"]);
     // per-user average (subcontext), then the average of those
-    assert_eq!(vals("//user | .(/s::rank @| avg) | $."), vec!["2", "5"]);
+    assert_eq!(vals("//user | .(/s::rank @| avg) | $."), vec!["2.0", "5.0"]);
     assert_eq!(vals("//user | .(/s::rank @| avg) | $. @| avg"), vec!["3.5"]);
     // max is a numeric reduction: names have no numeric reading, so
     // they are skipped and an all-non-numeric input reduces to null.

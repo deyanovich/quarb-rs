@@ -222,6 +222,13 @@ pub(crate) trait Host {
     /// context (`.name($$_)`) and the `$$_` operand; `None` where no
     /// arbor stands under the thread (the calculator).
     fn node_ref(&self, ext: &Self::Ext) -> Option<Value>;
+    /// The key of the node `ext` stands for (identity is intrinsic,
+    /// ruling 2026-11-06): a model's role node keys as its source, so
+    /// `collapse` and `unique` see one node; the attachment's own key
+    /// everywhere else.
+    fn intrinsic_key(&self, ext: &Self::Ext) -> <Self::Ext as crate::thread::Attachment>::Key {
+        ext.key()
+    }
     /// The construct the thread's node stands for, where the arbor
     /// is a reflected query (design paper: the quasiquote): what a
     /// template expansion reaching the node grafts.

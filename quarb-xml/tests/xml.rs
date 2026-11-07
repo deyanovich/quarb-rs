@@ -121,7 +121,7 @@ fn resolve_idref() {
 #[test]
 fn numeric_aggregation_over_string_attributes() {
     assert_eq!(values("//book::pages @| sum"), vec!["544"]);
-    assert_eq!(values("//book::pages @| avg"), vec!["272"]);
+    assert_eq!(values("//book::pages @| avg"), vec!["272.0"]);
     assert_eq!(values("//book::pages @| max"), vec!["352"]);
 }
 

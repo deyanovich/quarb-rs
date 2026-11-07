@@ -51,6 +51,14 @@ pub(crate) fn eval_operand<H: Host>(
             other,
         } => {
             let subject = discard(|| operand_scalar(host, ext, scrutinee, trace, scope));
+            if matches!(subject, Value::Bool(_)) {
+                record_refusal(
+                    "the value match compares a VALUE, and its scrutinee is a boolean: \
+                     the plain conditional is '(cond ? a : b)'"
+                        .to_string(),
+                );
+                return vec![Value::Null];
+            }
             for (test, regex, result) in arms {
                 let hit = discard(|| {
                     if *regex {
@@ -956,9 +964,13 @@ pub(crate) fn eval_operand<H: Host>(
                 .map(|(k, v)| (k.clone(), Value::Str(v.clone())))
                 .collect(),
         )],
+        // `$ord`: the thread's position in its context; in a regula
+        // fold's reducing command, the group's ordinal in the fold's
+        // order (spec: the fold by a regula).
         Operand::Ordinal => vec![
             scope
                 .ordinal
+                .or_else(|| crate::pipeline::with_run(|s| s.fold_ordinal))
                 .map(|i| Value::Int(i as i64))
                 .unwrap_or(Value::Null),
         ],
@@ -1338,7 +1350,11 @@ pub(crate) fn eval_operand<H: Host>(
                 trace,
                 *d,
             ),
-            None => vec![Value::Null],
+            // `$$0` in the driver's own pipeline after a join is the
+            // driver's own node, what `$$_` is there (ruling
+            // 2026-11-06); never a silent null
+            None if bare_cursor(inner) => host.node_ref(ext).into_iter().collect(),
+            None => eval_operand(host, ext, inner, trace, scope),
         },
         Operand::Interp(segs) => {
             let mut out = String::new();
@@ -1346,7 +1362,19 @@ pub(crate) fn eval_operand<H: Host>(
                 match seg {
                     InterpSeg::Text(t) => out.push_str(t),
                     InterpSeg::Expr(e) => {
-                        let v = operand_scalar(host, ext, e, trace, scope);
+                        // a forking expression is refused (ruling
+                        // 2026-11-06): one string wants `@| join`, the
+                        // per-thread form its own interpolation
+                        let vs = eval_operand(host, ext, e, trace, scope);
+                        if vs.len() > 1 {
+                            record_refusal(format!(
+                                "'${{…}}' takes one value, and the expression forks into {}: write \
+                                 '${{… @| join(\", \")}}' for one string, or interpolate per thread",
+                                vs.len()
+                            ));
+                            return vec![Value::Null];
+                        }
+                        let v = vs.into_iter().next().unwrap_or(Value::Null);
                         out.push_str(&v.to_string());
                     }
                     // Ruling #34: the strict expansion refuses instead of

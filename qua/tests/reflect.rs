@@ -119,19 +119,19 @@ fn numpy_functions_over_the_stream() {
     if !installed() {
         return;
     }
-    assert_eq!(run("/v/* | :: @| np:mean").unwrap(), vec!["4"]);
-    assert_eq!(run("/v/* | :: @| np:percentile(50)").unwrap(), vec!["3"]);
+    assert_eq!(run("/v/* | :: @| np:mean").unwrap(), vec!["4.0"]);
+    assert_eq!(run("/v/* | :: @| np:percentile(50)").unwrap(), vec!["3.0"]);
     // A matrix from records: numeric fields, labels dropped; the
     // array stays a library value; `| @` reads its rows.
     // After `|` the rows are one list value; after `@|` they are the
     // stream.
     assert_eq!(
         run(r#"/rows/* | %(::book; ::x; ::y) @| np:transpose | @"#).unwrap(),
-        vec!["@(@(1; 3; 5; 6); @(2; 1; 0; 0.5))"]
+        vec!["@(@(1.0; 3.0; 5.0; 6.0); @(2.0; 1.0; 0.0; 0.5))"]
     );
     assert_eq!(
         run(r#"/rows/* | %(::book; ::x; ::y) @| np:transpose @| @"#).unwrap(),
-        vec!["@(1; 3; 5; 6)", "@(2; 1; 0; 0.5)"]
+        vec!["@(1.0; 3.0; 5.0; 6.0)", "@(2.0; 1.0; 0.0; 0.5)"]
     );
     // A one-dimensional array comes back as a sample (a one-column
     // table without a header, the matrix whose rows print as lists),
@@ -147,10 +147,13 @@ fn numpy_functions_over_the_stream() {
     );
     assert_eq!(run("/v/* | :: @| np:cumsum | [2]").unwrap(), vec!["3"]);
     // a list literal on the pipe is the sample itself
-    assert_eq!(run("= @(-1; 1) @| np:log @| @").unwrap(), vec!["nan", "0"]);
+    assert_eq!(
+        run("= @(-1; 1) @| np:log @| @").unwrap(),
+        vec!["nan", "0.0"]
+    );
     assert_eq!(
         run("/rows/* | %(::book; ::x; ::y) @| np:transpose").unwrap(),
-        vec!["#(@(1; 3; 5; 6);\n  @(2; 1; 0; 0.5))"]
+        vec!["#(@(1.0; 3.0; 5.0; 6.0);\n  @(2.0; 1.0; 0.0; 0.5))"]
     );
     // Chaining: the sample is the input of the next function, on
     // either pipe.
@@ -192,7 +195,7 @@ fn numeric_text_enters_arrays_and_frames_as_numbers() {
     // its first parameter is its data; the operands go on.
     let a = run("/series/* | :: @| pd:Series.rolling.mean(3) @| @ @| [3]").unwrap();
     let b = run("/series/* | :: @| pd:rolling.mean(3) @| @ @| [3]").unwrap();
-    assert_eq!(a, vec!["2"]);
+    assert_eq!(a, vec!["2.0"]);
     assert_eq!(a, b);
 }
 
@@ -213,7 +216,7 @@ fn pandas_frames_chain_and_export() {
     // The row reading carries the index back as the first field.
     let out =
         run(r#"/rows/* | %(::book; ::x; ::y) @| pd:corr(--method=spearman) @| @ @| [1]"#).unwrap();
-    assert_eq!(out, vec![r#"%(index = "x"; x = 1; y = -0.8)"#]);
+    assert_eq!(out, vec![r#"%(index = "x"; x = 1.0; y = -0.8)"#]);
     // The label is the index; the frame's text columns stay.
     let out =
         run(r#"/rows/* | %(::book; ::x; ::y) @| pd:sort_values(x; --ascending=false) @| @ @| [1]"#)
@@ -297,7 +300,7 @@ fn operands_keep_their_kind_and_the_input_fills_the_data_slot() {
         "{x} @| sklearn:naive_bayes.GaussianNB.fit({y}) @| sklearn:naive_bayes.GaussianNB.score({xr}; {y})"
     ))
     .unwrap();
-    assert_eq!(r, vec!["1"]);
+    assert_eq!(r, vec!["1.0"]);
     // a constructor without a data parameter: the input passes it by
     let r = run("= 1 @| sklearn:naive_bayes.GaussianNB(--var-smoothing=0.5)").unwrap();
     assert_eq!(r, vec!["GaussianNB(var_smoothing=0.5)"]);
@@ -324,14 +327,14 @@ fn operands_keep_their_kind_and_the_input_fills_the_data_slot() {
     assert_eq!(r, vec!["2"]);
     // a boolean field reads 1 or 0: a column, not a gap
     let r = run("/rows/* | %(::book; ::x; big = (::x > 2)) @| np:transpose @| @ @| [2]").unwrap();
-    assert_eq!(r, vec!["@(0; 1; 1; 1)"]);
+    assert_eq!(r, vec!["@(0.0; 1.0; 1.0; 1.0)"]);
     let r = run("/rows/* | %(::book; ::x; big = (::x > 2)) @| pd:DataFrame | % | :big").unwrap();
     assert_eq!(r, vec!["@(0; 1; 1; 1)"]);
     let r = run("/rows/* | %(::book; big = (::x > 2)) @| sp:describe(--digits=2) | :mean").unwrap();
     assert_eq!(r, vec!["0.75"]);
     // numeric text in an operand list reads as numbers, as the input's
     let r = run("/csv/* | ::tip @| np:add((^/csv/* | ::tip)) @| @").unwrap();
-    assert_eq!(r, vec!["3", "5", "7"]);
+    assert_eq!(r, vec!["3.0", "5.0", "7.0"]);
     // a hole in an operand table refuses as the input's would
     let e = refuse(&format!(
         "{x} @| sklearn:naive_bayes.GaussianNB.fit({y}) @| sklearn:naive_bayes.GaussianNB.predict((^/kv/* | %(::k; v = ::v; w = (::k = \"p\" ? ::v : null))))"

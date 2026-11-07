@@ -30,7 +30,7 @@ fn refuse(q: &str) -> String {
 fn the_head_sigil_is_optional_before_a_value_only_token() {
     // a literal of any kind, a constructor, a quarq, a session read
     assert_eq!(one(r#""ab" | upper"#), "AB");
-    assert_eq!(one("@(1; 3; 5) | mean"), "3");
+    assert_eq!(one("@(1; 3; 5) | mean"), "3.0");
     assert_eq!(one("5 | round"), "5");
     assert_eq!(one("2013-01-01 | year"), "2013");
     assert_eq!(one("5_min | type"), "duration");
@@ -82,7 +82,7 @@ fn scalar_commands_broadcast_one_level_deep() {
 fn a_reducer_over_records_of_one_shape_goes_column_by_column() {
     assert_eq!(
         one("@(%(a = 1; b = 2); %(a = 3; b = 4)) | mean"),
-        "%(a = 2; b = 3)"
+        "%(a = 2.0; b = 3.0)"
     );
     assert_eq!(
         one("@(%(a = 1; b = 2); %(a = 3; b = 4)) | sum"),
@@ -137,7 +137,7 @@ fn a_list_of_one_item_is_a_list() {
     // the one collapse runs the other way: a value where a list is
     // expected is a list of one
     assert_eq!(one("5 | count"), "1");
-    assert_eq!(one("5 | mean"), "5");
+    assert_eq!(one("5 | mean"), "5.0");
 }
 
 #[test]

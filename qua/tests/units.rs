@@ -217,7 +217,9 @@ fn an_undeclared_name_is_an_opaque_unit_through_the_underscore() {
     assert_eq!(one("= '5_apples' | quantity"), "5_apples");
     // its own kind: comparable and summable with itself only
     assert_eq!(one("= 12_EUR + 3_EUR"), "15_EUR");
-    assert_eq!(one("= 12_EUR + 3_USD"), "null");
+    // two opaque units are two dimensions: the sum refuses (the refusal
+    // principle, ruling 2026-11-06)
+    assert!(refuse("= 12_EUR + 3_USD").contains("unlike dimensions"));
     assert_eq!(one("= (12_EUR < 13_EUR)"), "true");
     assert_eq!(one("= (12_EUR < 13_USD)"), "false");
     // never scaled: no prefix is stripped from an opaque name
@@ -232,10 +234,7 @@ fn an_undeclared_name_is_an_opaque_unit_through_the_underscore() {
     assert_eq!(one("= '¥ 500' | quantity"), "500_JPY");
     assert_eq!(one("= '12 EUR/kg' | quantity"), "12_EUR/kg");
     assert_eq!(one("= '12 EUR' | quantity | dimension"), "EUR");
-    assert_eq!(
-        one("= ('12 EUR' | quantity) + ('3 USD' | quantity)"),
-        "null"
-    );
+    assert!(refuse("= ('12 EUR' | quantity) + ('3 USD' | quantity)").contains("unlike dimensions"));
     assert_eq!(one("= ('12 EUR' | quantity) | convert(USD)"), "null");
     assert_eq!(one("= '12 UAH' | quantity"), "12_UAH");
     assert_eq!(one("= '₦500' | quantity"), "500_NGN");

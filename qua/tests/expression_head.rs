@@ -43,7 +43,7 @@ fn a_literal_after_a_pipe_opens_an_expression() {
     assert_eq!(one("= 3 | true | type"), "bool");
     assert_eq!(one("= 3 | -1 * $_"), "-3");
     assert_eq!(one("= 3 | 2_km | type"), "quantity");
-    assert_eq!(one("= 3 | 1.5 * 2"), "3");
+    assert_eq!(one("= 3 | 1.5 * 2"), "3.0");
     // per thread, the thread's own topic in reach
     assert_eq!(run("/rows/* | ::x | 10 + $_").unwrap(), vec!["11", "13"]);
     // a bare word is still a command

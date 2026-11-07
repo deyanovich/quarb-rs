@@ -81,7 +81,7 @@ fn aggregation() {
     assert_eq!(values("/row::age @| median"), vec!["38.5"]);
     assert_eq!(values("/row::age @| max"), vec!["64"]);
     assert_eq!(values("/row::name @| sort @| first"), vec!["Ada"]);
-    assert_eq!(values("/row[::dept = \"eng\"]::age @| mean"), vec!["50"]);
+    assert_eq!(values("/row[::dept = \"eng\"]::age @| mean"), vec!["50.0"]);
 }
 
 /// Keyed aggregates over rows: node-preserving, with missing keys
@@ -119,7 +119,7 @@ fn records_and_json() {
     assert_eq!(
         values(r#"/row[::dept = "eng"] | %(::name; monthly = ::salary div 12)"#),
         vec![
-            "%(name = \"Ada\"; monthly = 10000)",
+            "%(name = \"Ada\"; monthly = 10000.0)",
             "%(name = \"Cy\"; monthly = 7916.666666666667)"
         ]
     );
@@ -154,8 +154,8 @@ fn grouping() {
              @| sort_by($.m)"
         ),
         vec![
-            "%(dept = \"sales\"; mean = 45000)",
-            "%(dept = \"eng\"; mean = 107500)",
+            "%(dept = \"sales\"; mean = 45000.0)",
+            "%(dept = \"eng\"; mean = 107500.0)",
             "%(dept = \"ops, misc\"; mean = null)"
         ]
     );
@@ -645,7 +645,7 @@ fn correlated_subqueries() {
             "/row @| [..2] | .d(::dept) \
              | .m(^/row[::dept = $.d]::salary @| mean) | $.m"
         ),
-        vec!["107500", "45000"]
+        vec!["107500.0", "45000.0"]
     );
     // `_` is the served node inside the body — its core metadata too
     assert_eq!(

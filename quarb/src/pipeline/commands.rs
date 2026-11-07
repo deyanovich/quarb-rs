@@ -154,9 +154,13 @@ pub(crate) fn apply_commands<H: Host>(
             host.note_step(&commands[i], &inputs, &mut caps);
         }
         mode = command_mode_out(&commands[i], mode);
-        // A walk's facts are in scope for the one command after it.
-        for c in &mut caps {
-            c.ext.end_walk();
+        // A walk's facts are in scope for the one command after it:
+        // a navigation stage's own walk (`| (->e)+`) is read by the
+        // command that follows it, as the head's walk is.
+        if !matches!(&commands[i], Command::Nav(_)) {
+            for c in &mut caps {
+                c.ext.end_walk();
+            }
         }
         // a trailing `session(…)` that sets answers nothing, as a push
         // does (draft 166): no thread, so no line
@@ -864,7 +868,20 @@ pub(crate) fn apply_command_in<H: Host>(
         // exactly as in the path: same predicate scope law (no
         // capsa of their own), same group/breadcrumb machinery,
         // same (node, register) dedup as a branch union.
-        Command::Nav(branch) => host.navigate(branch, caps, trace, outer, peers),
+        Command::Nav(branch) => {
+            // A root-anchored path after an aggregation pipe goes on
+            // from the root, and says so (ruling 2026-11-06): the
+            // context had no node to stand on.
+            if caps.iter().any(|c| host.node_ref(&c.ext).is_none()) {
+                crate::value::ambient::record_diagnostic(crate::diagnostic::Diagnostic::warning(
+                    "NAVIGATION_RESTARTED",
+                    "pipeline",
+                    "navigation restarted from the root after the aggregation pipe: the \
+                     context stood on no node",
+                ));
+            }
+            host.navigate(branch, caps, trace, outer, peers)
+        }
         // Push the topic onto the register — or, in a node context
         // (no topic), MARK the node: `.name` is `.name($$_)`, a
         // reference to the position filed as a regula like any
@@ -2178,7 +2195,9 @@ pub(crate) fn map_cells_command<H: Host>(
                 let redeclared: Result<Value, String> = match &topic {
                     Value::Table(t) => {
                         let on: Vec<bool> = match &to {
-                            None => vec![true; t.width()],
+                            // the data columns; the index is touched
+                            // through `--to=:::index` alone
+                            None => (0..t.width()).map(|j| j >= t.index).collect(),
                             Some(To::Labels) => {
                                 if t.index == 0 {
                                     Err("--to=:::index names the labels, and the table has no index".to_string())
@@ -2519,8 +2538,12 @@ pub(crate) fn map_cells_command<H: Host>(
                         _ => t,
                     };
                     let names: Vec<String> = (0..t.width()).map(|j| t.column_name(j)).collect();
+                    // a plain `map` maps the data columns and leaves the
+                    // index column(s) as they are (spec: the index is
+                    // touched through `--to=:::index` alone)
+                    let index = t.index;
                     let on_cell: Box<dyn Fn(usize, usize) -> bool> = match (&to, &mask) {
-                        (None, _) => Box::new(|_, _| true),
+                        (None, _) => Box::new(move |_, j| j >= index),
                         (Some(To::Columns(names)), _) => match &t.header {
                             Some(h) => {
                                 if let Some(missing) = names.iter().find(|n| !h.contains(n)) {
@@ -3078,7 +3101,7 @@ pub(crate) fn collapse_command<H: Host>(
     let mut index: HashMap<(<H::Ext as Attachment>::Key, Option<String>), usize> = HashMap::new();
     for c in caps {
         let key = (
-            c.ext.key(),
+            host.intrinsic_key(&c.ext),
             if by_edge { c.ext.crossing_key() } else { None },
         );
         match index.get(&key) {
@@ -3207,7 +3230,7 @@ pub(crate) fn order_command<H: Host>(
             let scale = |e: &str| host.scale_of(e);
             for (c, node) in caps.drain(..).zip(is_node.iter()) {
                 let seen = if *node {
-                    by_node.get(&c.ext.key()).copied()
+                    by_node.get(&host.intrinsic_key(&c.ext)).copied()
                 } else {
                     by_value.get(&topic_of(&c).sort_key_with(&scale)).copied()
                 };
@@ -3215,7 +3238,7 @@ pub(crate) fn order_command<H: Host>(
                     Some(i) => kept[i].prov.origins.union(&c.prov.origins),
                     None => {
                         if *node {
-                            by_node.insert(c.ext.key(), kept.len());
+                            by_node.insert(host.intrinsic_key(&c.ext), kept.len());
                         } else {
                             by_value.insert(topic_of(&c).sort_key_with(&scale), kept.len());
                         }
@@ -4198,12 +4221,15 @@ pub(crate) fn fold_command<H: Host>(
     };
     let mut pool: Vec<Option<Thread<H::Ext>>> = caps.into_iter().map(Some).collect();
     let mut out = Vec::new();
-    for (slots, members) in groups {
+    for (k, (slots, members)) in groups.into_iter().enumerate() {
         let members: Vec<Thread<H::Ext>> = members
             .into_iter()
             .map(|i| pool[i].take().expect("each member in one partition"))
             .collect();
+        // the group's ordinal, for `$ord` in a reducing command
+        let before = crate::pipeline::with_run(|s| s.fold_ordinal.replace(k + 1));
         let mut folded = apply_command_in(command, mode, members, host, trace, outer);
+        crate::pipeline::with_run(|s| s.fold_ordinal = before);
         let node = slots.iter().rev().find_map(|(v, _, _)| match v {
             Value::Node(n) => Some(crate::NodeId(n.id)),
             _ => None,

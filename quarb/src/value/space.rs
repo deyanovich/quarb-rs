@@ -390,7 +390,13 @@ impl Record {
     /// The field whose key equals `k` AS A VALUE (`r[[k]]`): a text
     /// key equals its text, a typed key its value.
     pub fn find_key(&self, k: &Value) -> Option<usize> {
-        (0..self.fields.len()).find(|&i| self.key(i) == *k)
+        // keys are equal as values (the review's Values pass,
+        // 2026-11-06): 1 and 1.0 are one number, 1 and "1" two keys
+        let same = |a: &Value, b: &Value| match (a, b) {
+            (Value::Int(x), Value::Float(y)) | (Value::Float(y), Value::Int(x)) => *x as f64 == *y,
+            _ => a == b,
+        };
+        (0..self.fields.len()).find(|&i| same(&self.key(i), k))
     }
 
     /// The field under the text key `k` (`:name`).
@@ -3655,7 +3661,7 @@ impl fmt::Display for Value {
                 Some((v, u)) => write!(
                     f,
                     "{}_{}",
-                    format_float(*v),
+                    format_magnitude(*v),
                     crate::value::quantity::canonical_unit(u)
                 ),
                 // a span with no written unit prints in the full
@@ -3667,7 +3673,7 @@ impl fmt::Display for Value {
                         crate::value::quantity::duration_text(*value, false)
                     )
                 }
-                None => write!(f, "{}_{}", format_float(*value), base),
+                None => write!(f, "{}_{}", format_magnitude(*value), base),
             },
             Value::Foreign(x) => write!(f, "{}", x.display()),
             Value::Table(t) => write!(f, "{}", t.to_quarb()),
@@ -3773,8 +3779,8 @@ fn year_word(s: &str) -> Option<crate::period::Period> {
 /// jq and PostgreSQL print it, in exponent form when the decimal
 /// exponent is below -4 or at least 16, exactly Python's repr
 /// (`2.89e-82`, `1e-05`, `1.2345678901234568e+29`), positional
-/// otherwise (`0.001`, `1234567890123456`); a whole double prints
-/// without a fraction (`3`), the engine's policy since the first
+/// otherwise (`0.001`, `1234567890123456`); a whole double keeps
+/// its point (`3.0`), as every printer does since ruling 2026-11-06,
 /// release. NaN and the infinities as Rust spells them.
 /// A float as `pretty` draws it (spec: Output Commands, draft 166):
 /// at most `precision` digits after the point, trailing zeros
@@ -3795,13 +3801,26 @@ pub fn pretty_float(f: f64, precision: usize) -> String {
             } else {
                 whole
             };
+            // a whole float keeps its point in every printer (ruling
+            // 2026-11-06), the pretty one too
             if frac.is_empty() {
-                whole.to_string()
+                format!("{whole}.0")
             } else {
                 format!("{whole}.{frac}")
             }
         }
         None => fixed,
+    }
+}
+
+/// A quantity's magnitude or a span's count: the float's text with
+/// a whole value's point dropped (`16_km`, `3d`), the value itself
+/// being no float.
+pub(crate) fn format_magnitude(f: f64) -> String {
+    let s = format_float(f);
+    match s.strip_suffix(".0") {
+        Some(whole) => whole.to_string(),
+        None => s,
     }
 }
 
@@ -3812,14 +3831,23 @@ pub(crate) fn format_float(f: f64) -> String {
     if f.is_infinite() {
         return if f > 0.0 { "inf" } else { "-inf" }.to_string();
     }
+    // a whole float keeps its point (ruling 2026-11-06: `2.0` prints
+    // `2.0`, never `2`, so the type survives the round trip)
+    let plain = |f: f64| -> String {
+        if f.fract() == 0.0 {
+            format!("{f:.1}")
+        } else {
+            f.to_string()
+        }
+    };
     if f == 0.0 {
-        return f.to_string();
+        return plain(f);
     }
     let sci = format!("{f:e}");
     let (mantissa, exponent) = sci.split_once('e').expect("an exponent");
     let exponent: i32 = exponent.parse().expect("a decimal exponent");
     if (-4..16).contains(&exponent) {
-        return f.to_string();
+        return plain(f);
     }
     format!(
         "{mantissa}e{}{:02}",
@@ -3906,10 +3934,10 @@ mod tests {
             (1.2345678901234568e29, "1.2345678901234568e+29"),
             (0.001, "0.001"),
             (0.0001, "0.0001"),
-            (1234567890123456.0, "1234567890123456"),
-            (3.0, "3"),
+            (1234567890123456.0, "1234567890123456.0"),
+            (3.0, "3.0"),
             (-5e-8, "-5e-08"),
-            (0.0, "0"),
+            (0.0, "0.0"),
         ] {
             assert_eq!(format_float(f), want, "{f}");
             assert_eq!(Value::Float(f).to_string(), want);

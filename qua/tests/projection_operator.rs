@@ -82,7 +82,13 @@ fn a_register_or_an_expression_supplies_the_structure() {
     // keeps them as projectors, read at the operator
     assert_eq!(one("= %(:A; :B)"), "%(A = :A; B = :B)");
     assert_eq!(one("= @(:A; :B)"), "@(:A; :B)");
-    assert_eq!(one("= :name"), ":name");
+    // a bare read at the head has nothing to project from (ruling 2026-11-06)
+    assert!(
+        run("= :name")
+            .unwrap_err()
+            .to_string()
+            .contains("nothing to project from")
+    );
     assert_eq!(
         one("= %(:A; :B) | .p | %(A = 1; B = 2) | $_:$.p"),
         "%(A = 1; B = 2)"

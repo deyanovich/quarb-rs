@@ -236,7 +236,7 @@ fn a_graft_inside_a_subcontext_opens_the_way_for_a_hop() {
     );
     // ... and a hop with nothing filed before it still refuses.
     let e = refuse("/rows/* | %(t = (::body | /t::))");
-    assert!(e.contains("cannot navigate in scalar mode"), "{e}");
+    assert!(e.contains("cannot navigate in value mode"), "{e}");
 }
 
 #[test]

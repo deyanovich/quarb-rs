@@ -1958,6 +1958,9 @@ pub trait AstAdapter {
     /// `node` belongs to: a source whose rows are records of one
     /// shape (a CSV's) names them; `None` where they have no one shape.
     fn row_columns(&self, _node: NodeId) -> Option<Vec<String>> { None }
+    /// The node `node` stands for (identity is intrinsic, ruling
+    /// 2026-11-06): a model's role node answers the source it aliases.
+    fn intrinsic(&self, node: NodeId) -> NodeId { node }
     /// A row node's cells as text in the columns' order, handed to
     /// `f` once (an empty text: null) and `true`; `false` where the
     /// node is no row of that shape. The one-pass typed table build

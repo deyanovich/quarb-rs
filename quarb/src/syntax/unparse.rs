@@ -1935,7 +1935,15 @@ mod tests {
     /// it prints as written, not as its bare key.
     #[test]
     fn head_projector_keeps_its_ladder() {
-        for q in ["= ::a", "= :a", "= :::a", "= ::a | count", "= :A<int>"] {
+        // a projector is an operand of a command that takes one; a bare
+        // read at the head refuses (ruling 2026-11-06)
+        for q in [
+            "/x | map(::a)",
+            "/x | map(:a)",
+            "/x | map(:::a)",
+            "/x | map(::a) | count",
+            "/x | map(:A<int>)",
+        ] {
             assert_eq!(assert_fixpoint(q), q);
         }
         // grouping prints only where the parse needs it

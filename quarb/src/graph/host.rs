@@ -60,6 +60,9 @@ impl<A: AstAdapter> Host for A {
     fn node_ref(&self, ext: &GraphExt) -> Option<Value> {
         (!ext.unplaced).then(|| node_ref(self, ext.node))
     }
+    fn intrinsic_key(&self, ext: &GraphExt) -> NodeId {
+        AstAdapter::intrinsic(self, ext.node)
+    }
     fn node_form(&self, ext: &GraphExt) -> Option<crate::syntax::expand::Form> {
         if ext.unplaced {
             return None;
@@ -257,6 +260,23 @@ impl<A: AstAdapter> Host for A {
             }
             // the edge facts (spec: Edge facts): what the walk knows
             // of the edge, null outside a quantified group
+            // `$-:labels`: every label the edge carries, the one
+            // walked first (spec: the edge facts, 2026-11-06)
+            Some(Projection::CoreMeta(key)) if key == "labels" => {
+                let mut labels = vec![Value::Str(edge.label.clone())];
+                for (label, target, row) in AstAdapter::link_rows(self, edge.source) {
+                    if target == edge.target
+                        && (edge.row.is_none() || row == edge.row)
+                        && label != edge.label
+                        && !labels
+                            .iter()
+                            .any(|l| matches!(l, Value::Str(s) if *s == label))
+                    {
+                        labels.push(Value::Str(label));
+                    }
+                }
+                Value::list(labels)
+            }
             Some(Projection::CoreMeta(key)) => {
                 scope.walk.and_then(|w| w.fact(key)).unwrap_or(Value::Null)
             }
@@ -632,11 +652,22 @@ impl<A: AstAdapter> Host for A {
 /// Turn the final capsa context into a query result. `projected` is
 /// the query's static value-vs-node typing (see [`eval_query`]); it
 /// decides the empty case, where no capsa is left to inspect.
-pub(crate) fn to_result(caps: Vec<Capsa>, projected: bool) -> QueryResult {
+pub(crate) fn to_result(
+    caps: Vec<Capsa>,
+    projected: bool,
+    adapter: &impl AstAdapter,
+) -> QueryResult {
     if projected || caps.iter().any(|c| c.topic.is_some()) {
+        // a thread still standing on a node among the values (the
+        // branch of a union without a projector, `//h2 || //nav:name`)
+        // answers the node itself, printed as a node is
         QueryResult::Values(
             caps.into_iter()
-                .map(|c| c.topic.unwrap_or(Value::Null))
+                .map(|c| match c.topic {
+                    Some(v) => v,
+                    None if c.ext.unplaced => Value::Null,
+                    None => node_ref(adapter, c.ext.node),
+                })
                 .collect(),
         )
     } else {

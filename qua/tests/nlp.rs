@@ -80,7 +80,7 @@ fn vocabulary_statistics() {
     assert_eq!(values("/words/* | :: @| hapax"), ["sat", "ran"]);
     // Over values: the distribution's entropy; over counts: as before.
     assert_eq!(values("/words/* | :: @| entropy | round(4)"), ["1.9183"]);
-    assert_eq!(values("/counts/* | :: @| entropy"), ["1"]);
+    assert_eq!(values("/counts/* | :: @| entropy"), ["1.0"]);
 }
 
 #[test]

@@ -522,7 +522,7 @@ fn a_link_to_a_redirect_lands_on_its_target() {
         strs(&a, "//page[::in_degree = 0]::path @| count"),
         strs(&a, "//page<orphan> @| count")
     );
-    assert_eq!(strs(&a, "//redirect::pagerank"), ["0"]);
+    assert_eq!(strs(&a, "//redirect::pagerank"), ["0.0"]);
 }
 
 #[test]
@@ -620,7 +620,10 @@ fn a_link_to_no_page_points_at_a_resource() {
         ["Recipes", "The spec"]
     );
     // the pagerank graph is pages alone; a missing page stays red
-    assert_eq!(strs(&a, "//resource::pagerank"), ["0", "0", "0", "0"]);
+    assert_eq!(
+        strs(&a, "//resource::pagerank"),
+        ["0.0", "0.0", "0.0", "0.0"]
+    );
     assert_eq!(
         strs(&a, "/sites/example.org/pages/spec.html::redlinks"),
         ["1"]

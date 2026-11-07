@@ -34,7 +34,7 @@ fn table(rows: &[&str]) -> String {
 fn map_applies_the_command_to_every_cell() {
     assert_eq!(
         one(&format!("{T} | map(round(1))")),
-        table(&["%(1.3; null)", "%(-2.5; 4)", "%(null; 6)"])
+        table(&["%(1.3; null)", "%(-2.5; 4.0)", "%(null; 6.0)"])
     );
     assert_eq!(
         one(&format!("{T} | map(abs)")),
@@ -42,7 +42,7 @@ fn map_applies_the_command_to_every_cell() {
     );
     assert_eq!(
         one(&format!("{T} | map(?? 0)")),
-        table(&["%(1.26; 0)", "%(-2.5; 4)", "%(0; 6)"])
+        table(&["%(1.26; 0)", "%(-2.5; 4)", "%(0.0; 6)"])
     );
     // the pipe may be written; the cell stands at any position
     assert_eq!(
@@ -63,7 +63,7 @@ fn map_applies_the_command_to_every_cell() {
     );
     assert_eq!(
         one("= #(@(a; b); %(1; null); %(-2; 4)) | map(round(1) | * 2)"),
-        "#(@(a; b);\n  %(2; null);\n  %(-4; 8))"
+        "#(@(a; b);\n  %(2.0; null);\n  %(-4.0; 8.0))"
     );
     // a list, a record, a scalar; a structure in a cell is one value
     assert_eq!(one("= @(1; null; 3) | map(?? 0)"), "@(1; 0; 3)");
@@ -85,7 +85,7 @@ fn to_restricts_the_mapping() {
     );
     assert_eq!(
         one(&format!("{T} | map(?? 0; --to=(:a; :b))")),
-        table(&["%(1.26; 0)", "%(-2.5; 4)", "%(0; 6)"])
+        table(&["%(1.26; 0)", "%(-2.5; 4)", "%(0.0; 6)"])
     );
     assert_eq!(
         one(&format!("{T} | map(?? 0; --to=[1])")),
@@ -93,11 +93,11 @@ fn to_restricts_the_mapping() {
     );
     assert_eq!(
         one(&format!("{T} | map(?? 0; --to=[2..3])")),
-        table(&["%(1.26; null)", "%(-2.5; 4)", "%(0; 6)"])
+        table(&["%(1.26; null)", "%(-2.5; 4)", "%(0.0; 6)"])
     );
     assert_eq!(
         one(&format!("{T} | map(?? 0; --to=[@(1; 3)])")),
-        table(&["%(1.26; 0)", "%(-2.5; 4)", "%(0; 6)"])
+        table(&["%(1.26; 0)", "%(-2.5; 4)", "%(0.0; 6)"])
     );
     assert_eq!(
         one(&format!("{T} | map(?? 0; --to=[..2]:b)")),

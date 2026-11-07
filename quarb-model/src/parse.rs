@@ -317,6 +317,11 @@ pub struct NodeDecl {
     /// defaults to the role.
     pub trait_name: String,
     pub query: String,
+    /// How many `trait` declarations precede this constructor in
+    /// the file: the traits its query sees (a constructor sees the
+    /// traits declared before it; one declared later is refused at
+    /// load — spec: Node Constructors, 2026-11-06).
+    pub traits_before: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -857,6 +862,7 @@ fn parse_model_in(
                     role,
                     trait_name,
                     query: query.trim().to_string(),
+                    traits_before: model.traits.len(),
                 });
             }
             "mount" => {
@@ -931,7 +937,13 @@ fn parse_model_in(
                         ),
                     });
                 }
-                model.nodes.extend(sub.nodes);
+                // the used file's constructors see the traits declared
+                // before them in their own file, after the user's so far
+                let traits_so_far = model.traits.len();
+                model.nodes.extend(sub.nodes.into_iter().map(|mut n| {
+                    n.traits_before += traits_so_far;
+                    n
+                }));
                 model.refs.extend(sub.refs);
                 model.rels.extend(sub.rels);
                 model.edges.extend(sub.edges);

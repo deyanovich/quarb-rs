@@ -127,10 +127,10 @@ fn jaccard_takes_the_other_set_from_any_list_value() {
     // A sub-pipeline's values: the other text's distinct words.
     assert_eq!(
         values("/words/* | :: @| jaccard((^/short/* | :: @| unique))"),
-        ["0"]
+        ["0.0"]
     );
     assert_eq!(
         values("/words/* | :: @| unique @| jaccard((^/words/* | :: @| unique))"),
-        ["1"]
+        ["1.0"]
     );
 }

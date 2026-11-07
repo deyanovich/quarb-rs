@@ -1477,6 +1477,15 @@ pub trait AstAdapter {
     fn row_columns(&self, _node: NodeId) -> Option<Vec<String>> {
         None
     }
+    /// The node `node` stands for (ruling 2026-11-06, identity is
+    /// intrinsic): a node of a model's role answers the source node
+    /// it aliases, so `:id`, `:name` and `:path` are the source's and
+    /// `collapse`, `unique`, `((!N))` and the cycle check see one
+    /// node; the role stays visible to navigation alone. Every other
+    /// node stands for itself.
+    fn intrinsic(&self, node: NodeId) -> NodeId {
+        node
+    }
     /// The cells of a row node as text, in the order of
     /// `row_columns`, handed to `f` once — an empty text a cell the
     /// row lacks (null), each text in the source's canonical form —
@@ -1759,7 +1768,7 @@ macro_rules! forward_ast_adapter {
             resolve_fragment ref_property ref_label link_property
             document_by_ref reverse_resolve descendants_named
             descendants_where may_hold_below select select_plan estimate count
-            row_columns row_text prefetch_properties
+            row_columns intrinsic row_text prefetch_properties
             prefetch_links whole_listings link_property_names acyclic_link quantifier_bound frontier_bound
             property_withheld withheld_properties nodes_withheld
             graph_bound graph_declarations graph_measure store_graph_measure
@@ -1830,6 +1839,7 @@ macro_rules! forward_ast_adapter {
     (@unless [$i:tt] [estimate $($r:ident)*] estimate) => {};
     (@unless [$i:tt] [count $($r:ident)*] count) => {};
     (@unless [$i:tt] [row_columns $($r:ident)*] row_columns) => {};
+    (@unless [$i:tt] [intrinsic $($r:ident)*] intrinsic) => {};
     (@unless [$i:tt] [row_text $($r:ident)*] row_text) => {};
     (@unless [$i:tt] [prefetch_properties $($r:ident)*] prefetch_properties) => {};
     (@unless [$i:tt] [prefetch_links $($r:ident)*] prefetch_links) => {};
@@ -2198,6 +2208,11 @@ macro_rules! forward_ast_adapter {
     (@fwd [$i:tt] row_columns) => {
         fn row_columns(&self, node: $crate::NodeId) -> Option<Vec<String>> {
             $crate::forward_ast_adapter!(@target self $i).row_columns(node)
+        }
+    };
+    (@fwd [$i:tt] intrinsic) => {
+        fn intrinsic(&self, node: $crate::NodeId) -> $crate::NodeId {
+            $crate::forward_ast_adapter!(@target self $i).intrinsic(node)
         }
     };
     (@fwd [$i:tt] row_text) => {

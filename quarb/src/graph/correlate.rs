@@ -32,7 +32,7 @@ pub(crate) fn eval_query_outer(
     // (positional selection, keyed aggregates) keep a node context a
     // node context.
     let (caps, projected) = eval_query_caps_outer(query, adapter, start, base, outer);
-    to_result(caps, projected)
+    to_result(caps, projected, adapter)
 }
 
 /// [`eval_query`]'s capsa-level form: the final capsae plus the
@@ -644,7 +644,10 @@ pub(crate) fn eval_query_caps_outer(
         None
     };
     if prefix.is_some() {
-        crate::pipeline::with_run(|s| s.prefix_limit = prefix);
+        crate::pipeline::with_run(|s| {
+            s.prefix_limit = prefix;
+            s.walk_captures.clear();
+        });
     }
     let _clear = PrefixClear(prefix.is_some());
     let first_new = base.contexts.len();
@@ -1025,6 +1028,7 @@ pub(crate) fn union_branches(
                 node_level && branch.projection.is_none(),
                 None,
             ) {
+                let walked = crate::pipeline::with_run(|s| s.walk_captures.get(&ext.node).cloned());
                 caps.push(Capsa {
                     window: None,
                     prov: if branch.projection.is_some() {
@@ -1038,8 +1042,14 @@ pub(crate) fn union_branches(
                         .as_ref()
                         .map(|p| project(adapter, ext.node, p)),
                     members: Vec::new(),
-                    captures: outer.map(|s| s.captures.to_vec()).unwrap_or_default(),
-                    named: outer.map(|s| s.named.to_vec()).unwrap_or_default(),
+                    captures: match &walked {
+                        Some((numbered, _)) => numbered.clone(),
+                        None => outer.map(|s| s.captures.to_vec()).unwrap_or_default(),
+                    },
+                    named: match &walked {
+                        Some((_, named)) => named.clone(),
+                        None => outer.map(|s| s.named.to_vec()).unwrap_or_default(),
+                    },
                     ext: GraphExt {
                         bindings: trace
                             .witnesses
@@ -1094,16 +1104,20 @@ pub(crate) fn arrival_key(ext: &GraphExt) -> ArrivalKey {
 /// same value reached the same way was read there too.
 pub(crate) fn dedup_merge(caps: Vec<Capsa>) -> Vec<Capsa> {
     let mut kept: Vec<Capsa> = Vec::new();
-    let mut index: HashMap<(NodeId, ArrivalKey, RegKey), usize> = HashMap::new();
+    // threads at one node, by arrival and register; among them, one
+    // per topic — a union's node and the value another branch reads
+    // at that node (`/b/1 || /b/*::title`) are two answers
+    let mut index: HashMap<(NodeId, ArrivalKey, RegKey), Vec<usize>> = HashMap::new();
     for c in caps {
         let key = (c.ext.node, arrival_key(&c.ext), reg_key(&c.register));
-        match index.get(&key) {
+        let slots = index.entry(key).or_default();
+        match slots.iter().find(|&&i| kept[i].topic == c.topic) {
             Some(&i) => {
                 merge_prov(&mut kept[i], &c);
                 crate::graph::threads::merge_into(&mut kept[i].ext.trail, c.ext.trail.clone());
             }
             None => {
-                index.insert(key, kept.len());
+                slots.push(kept.len());
                 kept.push(c);
             }
         }

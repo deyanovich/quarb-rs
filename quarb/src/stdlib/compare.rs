@@ -426,6 +426,11 @@ pub(crate) fn value_eq(a: &Value, b: &Value, scale: UnitScale) -> bool {
                         && r.iter().zip(s.iter()).all(|(a, b)| value_eq(&a, &b, scale))
                 })
         }
+        // structures are equal item by item, nested or not (the
+        // review's row 2335, 2026-11-06)
+        (Value::List(x), Value::List(y)) => {
+            x.len() == y.len() && x.iter().zip(y.iter()).all(|(a, b)| value_eq(a, b, scale))
+        }
         _ => false,
     }
 }

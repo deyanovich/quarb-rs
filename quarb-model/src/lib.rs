@@ -479,6 +479,7 @@ impl<A: AstAdapter> ModelAdapter<A> {
             return Err(e.clone());
         }
         self.check_declared_traits()?;
+        self.check_declaration_order()?;
         self.check_ref_targets()?;
         self.check_label_properties()?;
         self.check_trees()
@@ -488,6 +489,45 @@ impl<A: AstAdapter> ModelAdapter<A> {
     /// is no text: a label is a name, and a number or a list there
     /// is a model error, named by its statement and its row. Null or
     /// missing is no error — that row declares no edge.
+    /// A node constructor's path into a container declared later,
+    /// and a trait filter in a constructor naming a trait declared
+    /// later, are refused at load (spec: Node Constructors, ruling
+    /// 2026-11-06): declarations read in order.
+    pub fn check_declaration_order(&self) -> Result<(), String> {
+        for (i, decl) in self.model.nodes.iter().enumerate() {
+            let earlier = |name: &str| self.model.nodes[..=i].iter().any(|n| n.name == name);
+            for head in root_heads(&decl.query) {
+                if !earlier(&head)
+                    && let Some(later) = self.model.nodes[i + 1..].iter().find(|n| n.name == head)
+                {
+                    return Err(format!(
+                        "node /{}/{}: its path /{} names a container declared later (node /{}/{}): \
+                         declare that container first",
+                        decl.name, decl.role, head, later.name, later.role
+                    ));
+                }
+            }
+            for t in trait_filters(&decl.query) {
+                let before = self.model.traits[..decl.traits_before.min(self.model.traits.len())]
+                    .iter()
+                    .any(|d| d.name == t);
+                if !before
+                    && let Some(later) = self.model.traits
+                        [decl.traits_before.min(self.model.traits.len())..]
+                        .iter()
+                        .find(|d| d.name == t)
+                {
+                    return Err(format!(
+                        "node /{}/{}: its filter <{}> names a trait declared later (trait <{}>): \
+                         declare the trait first",
+                        decl.name, decl.role, t, later.name
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn check_label_properties(&self) -> Result<(), String> {
         let defs = self.seeded_defs();
         let check = |prop: &str, nodes: Vec<NodeId>, statement: String| -> Result<(), String> {
@@ -637,7 +677,18 @@ impl<A: AstAdapter> ModelAdapter<A> {
         if let Some(&d) = self.decided.borrow().get(&(i, node)) {
             return d;
         }
-        let bodies = self.bodies.get_or_init(|| {
+        let bodies = self.trait_bodies();
+        let was = self.visible.get();
+        self.visible.set(i);
+        let d = quarb::node_matches_step_body(self, node, &bodies[i]);
+        self.visible.set(was);
+        self.decided.borrow_mut().insert((i, node), d);
+        d
+    }
+
+    /// The declared traits' step bodies, parsed once.
+    fn trait_bodies(&self) -> &[quarb::StepBody] {
+        self.bodies.get_or_init(|| {
             self.model
                 .traits
                 .iter()
@@ -645,13 +696,7 @@ impl<A: AstAdapter> ModelAdapter<A> {
                     quarb::parse_step_body(&t.step).expect("validated when the model was parsed")
                 })
                 .collect()
-        });
-        let was = self.visible.get();
-        self.visible.set(i);
-        let d = quarb::node_matches_step_body(self, node, &bodies[i]);
-        self.visible.set(was);
-        self.decided.borrow_mut().insert((i, node), d);
-        d
+        })
     }
 
     pub fn base(&self) -> &A {
@@ -691,7 +736,7 @@ impl<A: AstAdapter> ModelAdapter<A> {
             let defs = self.seeded_defs();
             let mut built: Vec<Container> = Vec::new();
             for decl in &self.model.nodes {
-                let members = self.members(&decl.query, &defs, &built);
+                let members = self.members(&decl.query, &defs, &built, decl.traits_before);
                 // A second statement naming an existing container
                 // fills it further under its own role.
                 let idx = match built.iter().position(|c| c.name == decl.name) {
@@ -765,16 +810,26 @@ impl<A: AstAdapter> ModelAdapter<A> {
     /// already built (so a constructor may navigate an earlier
     /// derived container) — exposed by wrapping the base in a partial
     /// [`ModelAdapter`] over those.
-    fn members(&self, query: &str, defs: &quarb::Defs, prior: &[Container]) -> Vec<Member> {
+    fn members(
+        &self,
+        query: &str,
+        defs: &quarb::Defs,
+        prior: &[Container],
+        visible: usize,
+    ) -> Vec<Member> {
         // A constructor over the base alone is the common case; one
         // that reaches an earlier derived container runs against a
         // scratch enrichment holding just those.
-        let result = if prior.is_empty() {
+        let visible = visible.min(self.model.traits.len());
+        let result = if prior.is_empty() && visible == 0 {
             quarb::run_with_defs(query, defs, &self.base)
         } else {
+            let bodies = self.trait_bodies();
             let scratch = PriorView {
                 base: &self.base,
                 prior,
+                traits: &self.model.traits[..visible],
+                bodies: &bodies[..visible],
             };
             quarb::run_with_defs(query, defs, &scratch)
         };
@@ -941,6 +996,8 @@ impl<A: AstAdapter> ModelAdapter<A> {
                         let view = PriorView {
                             base: &self.base,
                             prior: self.containers(),
+                            traits: &[],
+                            bodies: &[],
                         };
                         // The bare form (`--> authors`) with no derived
                         // container of that name is the root-level
@@ -1234,6 +1291,8 @@ impl<A: AstAdapter> ModelAdapter<A> {
         let view = PriorView {
             base: &self.base,
             prior: self.containers(),
+            traits: &[],
+            bodies: &[],
         };
         match quarb::run_with_defs(path, defs, &view) {
             Ok(QueryResult::Nodes(ns)) => ns,
@@ -1251,6 +1310,8 @@ impl<A: AstAdapter> ModelAdapter<A> {
         let view = PriorView {
             base: &self.base,
             prior: self.containers(),
+            traits: &[],
+            bodies: &[],
         };
         let b: Vec<char> = cond.chars().collect();
         let mut out = String::new();
@@ -1332,6 +1393,11 @@ fn literal(v: Value) -> String {
 struct PriorView<'a, A: AstAdapter> {
     base: &'a A,
     prior: &'a [Container],
+    /// The traits declared before the constructor this view serves,
+    /// with their parsed bodies: a constructor sees the traits
+    /// declared before it (spec: Node Constructors).
+    traits: &'a [parse::TraitDecl],
+    bodies: &'a [quarb::StepBody],
 }
 
 impl<A: AstAdapter> AstAdapter for PriorView<'_, A> {
@@ -1425,7 +1491,13 @@ impl<A: AstAdapter> AstAdapter for PriorView<'_, A> {
                 _ => Vec::new(),
             };
         }
-        self.base.traits(node)
+        let mut out = self.base.traits(node);
+        for (t, body) in self.traits.iter().zip(self.bodies) {
+            if !out.contains(&t.name) && quarb::node_matches_step_body(self, node, body) {
+                out.push(t.name.clone());
+            }
+        }
+        out
     }
     fn parent(&self, node: NodeId) -> Option<NodeId> {
         if node.0 & MODEL_TAG != 0 {
@@ -1884,6 +1956,19 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
     /// own nodes (a model's `mount` of a CSV builds in the file's
     /// order as the command line's does; lang's finding 2026-11-06);
     /// a model's node has neither.
+    /// A role's member node stands for the source node it aliases
+    /// (identity is intrinsic, ruling 2026-11-06); a container and
+    /// an elevated value stand for themselves.
+    fn intrinsic(&self, node: NodeId) -> NodeId {
+        match self.aliased(node) {
+            Some(base) => self.base.intrinsic(base),
+            None => match self.decode(node) {
+                Some(_) => node,
+                None => self.base.intrinsic(node),
+            },
+        }
+    }
+
     fn row_columns(&self, node: NodeId) -> Option<Vec<String>> {
         match self.decode(node) {
             Some((_, v)) if v > 0 => self.aliased(node).and_then(|b| self.base.row_columns(b)),
@@ -2425,6 +2510,102 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
 }
 
 /// An unnamed node answers to no written name.
+/// The names a query's root-anchored heads open: `/name` at the
+/// query's start or after an operator, outside string literals and
+/// regex literals.
+fn root_heads(query: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let chars: Vec<char> = query.chars().collect();
+    let mut i = 0;
+    let mut quote: Option<char> = None;
+    while i < chars.len() {
+        let c = chars[i];
+        if let Some(q) = quote {
+            if c == '\\' {
+                i += 2;
+                continue;
+            }
+            if c == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        if c == '"' || c == '\'' {
+            quote = Some(c);
+            i += 1;
+            continue;
+        }
+        if c == '/' {
+            let before = if i == 0 { ' ' } else { chars[i - 1] };
+            let anchored = matches!(
+                before,
+                ' ' | '\t' | '\n' | '(' | '|' | '^' | '=' | ';' | ','
+            ) && !(i + 1 < chars.len() && chars[i + 1] == '/');
+            if anchored {
+                let mut j = i + 1;
+                while j < chars.len()
+                    && (chars[j].is_alphanumeric() || chars[j] == '_' || chars[j] == '-')
+                {
+                    j += 1;
+                }
+                if j > i + 1 {
+                    out.push(chars[i + 1..j].iter().collect());
+                }
+                i = j;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The trait names a query's step filters `<name>` carry, outside
+/// string literals; a `<` after whitespace is the comparison.
+fn trait_filters(query: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let chars: Vec<char> = query.chars().collect();
+    let mut i = 0;
+    let mut quote: Option<char> = None;
+    while i < chars.len() {
+        let c = chars[i];
+        if let Some(q) = quote {
+            if c == '\\' {
+                i += 2;
+                continue;
+            }
+            if c == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        if c == '"' || c == '\'' {
+            quote = Some(c);
+        } else if c == '<' && i > 0 && !chars[i - 1].is_whitespace() {
+            let mut j = i + 1;
+            while j < chars.len()
+                && (chars[j].is_alphanumeric()
+                    || matches!(chars[j], '_' | '-' | ':' | '!' | '.' | '*' | '|'))
+            {
+                j += 1;
+            }
+            if j < chars.len() && chars[j] == '>' && j > i + 1 {
+                for alt in chars[i + 1..j].iter().collect::<String>().split('|') {
+                    let name = alt.trim().trim_start_matches('!');
+                    if !name.is_empty() && !name.contains(['.', '*', ':']) {
+                        out.push(name.to_string());
+                    }
+                }
+                i = j;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
 fn canonical_none(_name: &str) -> bool {
     false
 }

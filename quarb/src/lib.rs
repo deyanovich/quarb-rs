@@ -303,12 +303,14 @@ impl Query {
     ) -> Result<Query> {
         let _scope = graph::run::enter(Some(run.clone()));
         let (tokens, spans) = lexer::lex_spanned(text)?;
-        let ast = parser::parse_with_data_spanned(
-            &tokens,
-            Some(&spans),
-            defs.clone(),
-            &graph::reflect::Reflector::new(Some(adapter)),
-        )?;
+        let ast = parser::with_head_topic(run.topic.is_some(), || {
+            parser::parse_with_data_spanned(
+                &tokens,
+                Some(&spans),
+                defs.clone(),
+                &graph::reflect::Reflector::new(Some(adapter)),
+            )
+        })?;
         Ok(Query { ast, closing: None })
     }
 

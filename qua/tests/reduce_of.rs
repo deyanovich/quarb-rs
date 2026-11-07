@@ -41,7 +41,7 @@ fn the_option_reads_an_expression_on_each_item_over_the_context() {
     assert_eq!(one("/rows/* @| sum(-o=::x)"), "9");
     assert_eq!(one("/rows/* @| count(--of=::x)"), "3");
     assert_eq!(one("/rows/* @| max(--of=::x)"), "5");
-    assert_eq!(one("/rows/* @| mean(--of=::x * ::p)"), "5");
+    assert_eq!(one("/rows/* @| mean(--of=::x * ::p)"), "5.0");
     // an ordering reduction keeps the context, the results its topics
     assert_eq!(
         run("/rows/* @| sort(--of=::x * 2)").unwrap(),
@@ -53,7 +53,7 @@ fn the_option_reads_an_expression_on_each_item_over_the_context() {
         run("/rows/* @| first(2; --of=::x)").unwrap(),
         vec!["1", "3"]
     );
-    assert_eq!(one("/rows/* @| variance(--sample --of=::x)"), "4");
+    assert_eq!(one("/rows/* @| variance(--sample --of=::x)"), "4.0");
     // the position stays in reach: a node's own property
     assert_eq!(one("/rows/* | ::k @| join(\", \"; --of=$$_::x)"), "1, 3, 5");
     // a null result is a missing value
@@ -68,7 +68,7 @@ fn after_group_the_option_reads_each_member() {
     );
     assert_eq!(
         run("/rows/* | %(::k; ::x; ::p) | .k(::k) @|{.k} mean(-o=:x * :p)").unwrap(),
-        vec!["6", "3"]
+        vec!["6.0", "3.0"]
     );
     // the spec's own example
     assert_eq!(

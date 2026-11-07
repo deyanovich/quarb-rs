@@ -124,7 +124,7 @@ fn the_grouped_reduction() {
     let d = fixture();
     assert_eq!(
         ok(&d, &format!("{T} | mean(--by=:Sex)")),
-        "#(@(Sex; Class_mean; Age_mean; Fare_mean);\n  %(\"male\"; 1.5; 24; 8);\n  %(\"female\"; 1.5; 36.5; 62.3))"
+        "#(@(Sex; Class_mean; Age_mean; Fare_mean);\n  %(\"male\"; 1.5; 24.0; 8.0);\n  %(\"female\"; 1.5; 36.5; 62.3))"
     );
     assert_eq!(
         ok(&d, &format!("{T} | max(-b=:Sex)")),
@@ -149,12 +149,12 @@ fn the_grouped_reduction() {
     // the composite key
     assert_eq!(
         ok(&d, &format!("{T} | mean(--by=(:Sex; :Class)) | [..2]")),
-        "#(@(Sex; Class; Age_mean; Fare_mean);\n  %(\"male\"; 1; 22; 7.25);\n  %(\"female\"; 1; 38; 71.5))"
+        "#(@(Sex; Class; Age_mean; Fare_mean);\n  %(\"male\"; 1; 22.0; 7.25);\n  %(\"female\"; 1; 38.0; 71.5))"
     );
     // the answer is indexed by the key: a column reads as a record
     assert_eq!(
         ok(&d, &format!("{T} | mean(--by=:Sex) | $_:Age_mean")),
-        "%(male = 24; female = 36.5)"
+        "%(male = 24.0; female = 36.5)"
     );
     // an index the input had is dropped unless named
     assert_eq!(
@@ -199,7 +199,7 @@ fn tables_concatenate_by_the_header_rule() {
                 "{T} | min(--of=:Age --by=:Sex) ++ max(--of=:Age --by=:Sex) ++ mean(--of=:Fare --by=:Sex)"
             )
         ),
-        "#(@(Sex; Age_min; Age_max; Fare_mean);\n  %(\"male\"; 22; 26; 8);\n  %(\"female\"; 35; 38; 62.3))"
+        "#(@(Sex; Age_min; Age_max; Fare_mean);\n  %(\"male\"; 22; 26; 8.0);\n  %(\"female\"; 35; 38; 62.3))"
     );
     assert_eq!(
         ok(
@@ -253,14 +253,14 @@ fn tables_concatenate_by_the_header_rule() {
                 "{T} | (mean(--by=:Sex) ++! (mean(--by=:Sex) + mean(--by=:Sex))) | $_:Age_mean"
             )
         ),
-        "%(male = 48; female = 73)"
+        "%(male = 48.0; female = 73.0)"
     );
     assert_eq!(
         ok(
             &d,
             &format!("{T} | (mean(--by=:Sex) ++! ($_[..1] | mean(--by=:Sex) + 100)) | $_:Age_mean")
         ),
-        "%(male = 122; female = 36.5)"
+        "%(male = 122.0; female = 36.5)"
     );
     assert_eq!(
         ok(
@@ -269,7 +269,7 @@ fn tables_concatenate_by_the_header_rule() {
                 "{T} | (mean(--by=:Sex) ++! #(@(Sex; Class_mean; Age_mean; Fare_mean); %(\"child\"; 3; 5; 1))) | $_:Age_mean"
             )
         ),
-        "%(male = 24; female = 36.5; child = 5)"
+        "%(male = 24.0; female = 36.5; child = 5.0)"
     );
     // `++!` under overlapping headers: the columns, the right side's under the shared names
     assert_eq!(
@@ -320,14 +320,14 @@ fn tables_concatenate_by_the_header_rule() {
             &d,
             &format!("{T} | mean(--of=:Age --by=(:Sex; :Class)) ++ max(--of=:Fare --by=:Class)")
         ),
-        "#(@(Sex; Class; Age_mean; Fare_max);\n  %(\"male\"; 1; 22; 71.5);\n  %(\"female\"; 1; 38; 71.5);\n  %(\"male\"; 2; 26; 53.1);\n  %(\"female\"; 2; 35; 53.1))"
+        "#(@(Sex; Class; Age_mean; Fare_max);\n  %(\"male\"; 1; 22.0; 71.5);\n  %(\"female\"; 1; 38.0; 71.5);\n  %(\"male\"; 2; 26.0; 53.1);\n  %(\"female\"; 2; 35.0; 53.1))"
     );
     assert_eq!(
         ok(
             &d,
             &format!("{T} | max(--of=:Fare --by=:Class) ++ mean(--of=:Age --by=(:Sex; :Class))")
         ),
-        "#(@(Sex; Class; Fare_max; Age_mean);\n  %(\"male\"; 1; 71.5; 22);\n  %(\"female\"; 1; 71.5; 38);\n  %(\"male\"; 2; 53.1; 26);\n  %(\"female\"; 2; 53.1; 35))"
+        "#(@(Sex; Class; Fare_max; Age_mean);\n  %(\"male\"; 1; 71.5; 22.0);\n  %(\"female\"; 1; 71.5; 38.0);\n  %(\"male\"; 2; 53.1; 26.0);\n  %(\"female\"; 2; 53.1; 35.0))"
     );
     let e = err(
         &d,
@@ -369,7 +369,7 @@ fn indexed_tables_under_an_operator_and_unstack() {
             &d,
             &format!("{T} | (mean(--by=:Sex) + mean(--by=:Sex)) | $_:Age_mean")
         ),
-        "%(male = 48; female = 73)"
+        "%(male = 48.0; female = 73.0)"
     );
     assert_eq!(
         ok(&d, &format!("{T} | #(-i=:Sex) | ($_ + $_) | [..1]")),
@@ -377,7 +377,7 @@ fn indexed_tables_under_an_operator_and_unstack() {
     );
     assert_eq!(
         ok(&d, &format!("{T} | mean(--by=:Sex) | stack | unstack")),
-        "#(@(Sex; Class_mean; Age_mean; Fare_mean);\n  %(\"male\"; 1.5; 24; 8);\n  %(\"female\"; 1.5; 36.5; 62.3))"
+        "#(@(Sex; Class_mean; Age_mean; Fare_mean);\n  %(\"male\"; 1.5; 24.0; 8.0);\n  %(\"female\"; 1.5; 36.5; 62.3))"
     );
     let e = err(&d, &format!("{T} | #(-i=:Sex) | stack | unstack"));
     assert!(e.contains("stands on several rows"), "{e}");
@@ -395,7 +395,7 @@ fn keyed_commands_over_a_table_value() {
             &d,
             &format!("{T} | mean(--by=:Sex) | sort_by(:::index) | $_:Age_mean")
         ),
-        "%(female = 36.5; male = 24)"
+        "%(female = 36.5; male = 24.0)"
     );
     assert_eq!(
         ok(
@@ -422,7 +422,7 @@ fn keyed_commands_over_a_table_value() {
             &d,
             &format!("{T} | mean(--by=(:Sex; :Class)) | sort_by(:::index) | $_:Age_mean")
         ),
-        "%(female = %(1 = 38; 2 = 35); male = %(1 = 22; 2 = 26))"
+        "%(female = %(1 = 38.0; 2 = 35.0); male = %(1 = 22.0; 2 = 26.0))"
     );
     assert_eq!(ok(&d, "= @(3; 1; 2) | sort_by($_)"), "@(1; 2; 3)");
     assert_eq!(ok(&d, "= @(3; 1; 2) | top(2; $_)"), "@(3; 2)");

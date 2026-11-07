@@ -795,6 +795,13 @@ impl AstAdapter for MountAdapter {
         self.adapter(m).row_columns(inner)
     }
 
+    fn intrinsic(&self, node: NodeId) -> NodeId {
+        match self.decode(node) {
+            Some((m, inner)) => self.encode(m, self.adapter(m).intrinsic(inner)),
+            None => node,
+        }
+    }
+
     fn row_text(&self, node: NodeId, f: &mut dyn FnMut(&[&str])) -> bool {
         match self.decode(node) {
             Some((m, inner)) => self.adapter(m).row_text(inner, f),

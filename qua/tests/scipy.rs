@@ -115,10 +115,10 @@ fn a_sample_per_label_and_one_result_shape() {
     // order the labels first appear. The century column is numeric
     // text, which reads as a number, so the label is spelled out.
     let r = run(r#"/rows/* | %(c = (::century = "18" ? "old" : "new"); v = ::mean) @| sp:mannwhitneyu(--digits=4)"#).unwrap();
-    assert_eq!(r, vec!["%(statistic = 9; pvalue = 0.1)"]);
+    assert_eq!(r, vec!["%(statistic = 9.0; pvalue = 0.1)"]);
     let r = run(r#"/rows/* | %(c = (::century = "18" ? "old" : "new"); v = ::mean) @| sp:ttest(--digits=3)"#).unwrap();
     assert!(
-        r[0].starts_with("%(statistic = 3.03; pvalue = 0.0387; df = 4)"),
+        r[0].starts_with("%(statistic = 3.03; pvalue = 0.0387; df = 4.0)"),
         "{r:?}"
     );
     // Numeric text reads as a number: century and mean are the two

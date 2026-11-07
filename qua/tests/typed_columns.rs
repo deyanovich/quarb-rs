@@ -33,16 +33,15 @@ const T: &str = r#"#(@(name; age); %("Braund"; 22); %("Allen"; 35))"#;
 fn a_typed_projector_is_a_projector_with_its_declaration() {
     // it prints as written, is a projector, and `:::type` reads the
     // declared type, null under the star or on a bare projector
-    assert_eq!(one("= :A<int>"), ":A<int>");
-    assert_eq!(one("= ::price<float>"), "::price<float>");
+    // a bare typed projector at the head has nothing to project from
+    // (ruling 2026-11-06); a list of them is a value still
+    for q in ["= :A<int>", "= ::price<float>", "= :A<int> | type"] {
+        assert!(refuse(q).contains("nothing to project from"), "{q}");
+    }
     assert_eq!(
         one("= @(:zip<text>; :amount<*; float>; :paid<*>)"),
         "@(:zip<text>; :amount<*; float>; :paid<*>)"
     );
-    assert_eq!(one("= :A<int> | type"), "projector");
-    assert_eq!(one("= :A<int> | :::type"), "int");
-    assert_eq!(one("= :A<*; int> | :::type"), "null");
-    assert_eq!(one("= :A | :::type"), "null");
     // the type words are checked when the query is read
     let e = refuse("= :A<nope>");
     assert!(

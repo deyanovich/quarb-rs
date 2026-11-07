@@ -191,7 +191,7 @@ fn transpose_yields_a_matrix_of_one_type() {
     // every cell coerced together first, then the exchange
     assert_eq!(
         one("= @(@(1; 2.5); @(3; 4)) | transpose"),
-        "#(@(1; 3);\n  @(2.5; 4))"
+        "#(@(1.0; 3.0);\n  @(2.5; 4.0))"
     );
     assert_eq!(
         one("= @(@(1; 2.5); @(3; 4)) | transpose | type"),

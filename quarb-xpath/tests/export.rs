@@ -91,6 +91,15 @@ fn differential_against_xmllint() {
                 .join("\n"),
             quarb::QueryResult::Nodes(_) => panic!("expected values for {quarb}"),
         };
-        assert_eq!(got, lint, "differential mismatch for: {quarb}");
+        // xmllint prints a whole XPath number bare; Quarb keeps the
+        // float's point (ruling 2026-11-06): compare without it
+        let got_bare = got
+            .strip_suffix(".0")
+            .map(str::to_string)
+            .unwrap_or(got.clone());
+        assert!(
+            got == lint || got_bare == lint,
+            "differential mismatch for: {quarb}: {got} vs {lint}"
+        );
     }
 }

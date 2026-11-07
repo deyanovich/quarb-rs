@@ -230,6 +230,15 @@ pub(crate) struct RunState {
     /// in the step plan's `limit`; an adapter that lists its rows
     /// lazily stops there, every other ignores it.
     pub(crate) prefix_limit: Option<usize>,
+    /// The regex captures a navigation predicate made at a node
+    /// (`/books/*[::title == (/^The (\w+)/)]`), for the capsa made
+    /// of that node to carry as `$1`… and `%+` (the review's row
+    /// 9293, 2026-11-06); cleared when a top-level query starts.
+    pub(crate) walk_captures: std::collections::HashMap<crate::NodeId, crate::pipeline::Captured>,
+    /// The ordinal of the group a regula fold (`@|{.name}`) is
+    /// reducing, 1-based in the fold's order: what `$ord` reads in
+    /// the fold's reducing command, whose own scope has no position.
+    pub(crate) fold_ordinal: Option<usize>,
     /// Whether the hop in progress is that last step, with no test of
     /// its own that would thin the prefix after the adapter cut it.
     pub(crate) limit_armed: bool,

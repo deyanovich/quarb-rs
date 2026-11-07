@@ -3758,7 +3758,15 @@ fn print_result(
             }
             nodes.into_iter().map(|n| Value::Str(render(n))).collect()
         }
-        QueryResult::Values(values) => values,
+        // a node among the values (a union's branch without a
+        // projector) prints as a node does
+        QueryResult::Values(values) => values
+            .into_iter()
+            .map(|v| match v {
+                Value::Node(n) => Value::Str(render(NodeId(n.id))),
+                v => v,
+            })
+            .collect(),
     };
     emit_values(&mut out, values, mode, oc)?;
     out.finish()

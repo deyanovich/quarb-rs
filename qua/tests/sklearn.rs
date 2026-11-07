@@ -88,7 +88,7 @@ fn rows_project_and_cluster_with_their_labels() {
     assert_eq!(r, vec!["abcd"]);
     let r =
         run("/rows/* | %(::book; ::x; ::y) @| sklearn:pca(--variance --digits=3) @| [1]").unwrap();
-    assert!(r[0].starts_with("0.99") || r[0] == "1", "{r:?}");
+    assert!(r[0].starts_with("0.99") || r[0] == "1.0", "{r:?}");
     let r = run("/rows/* | %(::book; ::x; ::y) @| sklearn:silhouette(-k=2 --digits=2)").unwrap();
     assert!(r[0].starts_with("0.9"), "{r:?}");
 }

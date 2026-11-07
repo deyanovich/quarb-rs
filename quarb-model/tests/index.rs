@@ -58,7 +58,7 @@ fn the_value_match_answers_the_same_with_and_without_the_index() {
             &indexed,
             "/customers/*[::id = \"ada\"]::id=>(/orders/*::customer)::total"
         ),
-        ["90", "50", "1"]
+        ["90", "50", "1.0"]
     );
     // The index is consulted: the adapter answers the lookup.
     assert_eq!(
@@ -108,7 +108,7 @@ fn the_reverse_arrow_over_the_indexed_scope_answers_the_same() {
             &indexed,
             "//client[::id = \"ada\"]<--(/orders/*::customer)::total"
         ),
-        ["90", "50", "1"]
+        ["90", "50", "1.0"]
     );
     assert!(
         indexed

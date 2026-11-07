@@ -131,27 +131,31 @@ fn durational_coercion_and_lift() {
     // Duration ± span text stays a duration.
     let sum = arith(ArithOp::Add, &two_h, &Value::Str("30min".into()), sc);
     assert_eq!(sum.to_string(), "2h 30min");
-    // A quantity is no scaling factor: Duration × Quantity (and
-    // ÷) is dimensional nonsense — null, like Q × Q — never the
-    // base magnitude leaking in as a bare number (5 kg × 2 h
-    // must not be PT10H).
+    // A quantity is no scaling factor: Duration × Quantity is a
+    // quantity of the compound dimension (ruling 2026-11-06: two
+    // quantities multiply into one), never the base magnitude
+    // leaking in as a bare number (5 kg × 2 h must not be PT10H).
     let five_kg = Value::Quantity {
         value: 5.0,
         base: "kg".into(),
         written: Some((5.0, "kg".into())),
     };
-    assert!(matches!(
+    let kg_s = crate::value::quantity::compose_base("s", "kg", true).unwrap();
+    for product in [
         arith(ArithOp::Mul, &two_h, &five_kg, sc),
-        Value::Null
-    ));
-    assert!(matches!(
         arith(ArithOp::Mul, &five_kg, &two_h, sc),
-        Value::Null
-    ));
-    assert!(matches!(
-        arith(ArithOp::Div, &two_h, &five_kg, sc),
-        Value::Null
-    ));
+    ] {
+        assert!(
+            matches!(&product, Value::Quantity { value, base, .. } if *value == 36000.0 && *base == kg_s),
+            "{product:?}"
+        );
+    }
+    let s_per_kg = crate::value::quantity::compose_base("s", "kg", false).unwrap();
+    let quotient = arith(ArithOp::Div, &two_h, &five_kg, sc);
+    assert!(
+        matches!(&quotient, Value::Quantity { value, base, .. } if *value == 1440.0 && *base == s_per_kg),
+        "{quotient:?}"
+    );
 }
 
 /// A tiny in-memory arbor for testing navigation without I/O.
@@ -1116,6 +1120,7 @@ fn set_walk_and_exact_walk_on_a_diamond() {
     let t = MockTree::diamond();
     assert_eq!(run("//a(->e)+", &t), vec![2, 3, 6, 6, 2]);
     assert_eq!(run("//a(->e)+ @| collapse", &t), vec![2, 3, 6]);
+    // the proximal marker keeps the equidistant set (ruling 2026-11-07)
     assert_eq!(run("//a(->e)+?", &t), vec![2, 3]);
     assert_eq!(run("//a(->e)*", &t).len(), 6);
     assert_eq!(run("//a(->e)* @| collapse", &t).len(), 4);
@@ -2675,8 +2680,8 @@ fn nav_command_mode_discipline() {
             .to_string()
     };
     // Scalar mode: a hop would drop the live topic.
-    assert!(refuse("/a:name | /b").contains("scalar mode"));
-    assert!(refuse("/a | :name | /b").contains("scalar mode"));
+    assert!(refuse("/a:name | /b").contains("value mode"));
+    assert!(refuse("/a | :name | /b").contains("value mode"));
     // Hops are per-thread: neither `@|` nor `$|` takes them.
     assert!(refuse("/a @| /b").contains("per-thread"));
     assert!(refuse("/a | ... $| /b").contains("map pipe"));

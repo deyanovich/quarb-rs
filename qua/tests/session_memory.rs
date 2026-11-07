@@ -146,7 +146,7 @@ fn the_session_settings_are_set_by_the_session_command() {
     // `session` alone answers a record: a hop after it refuses as
     // after any value
     let e = s.run("session | /rows/*").unwrap_err().to_string();
-    assert!(e.contains("cannot navigate in scalar mode"), "{e}");
+    assert!(e.contains("cannot navigate in value mode"), "{e}");
     // the diagnostics level is a setting like the others (spec:
     // Diagnostics): set, it rides the record; a bad word refuses
     assert_eq!(

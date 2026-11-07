@@ -425,8 +425,14 @@ pub(crate) fn core_meta(adapter: &impl AstAdapter, node: NodeId, key: &str) -> O
             .map(|p| adapter.children(p).len().saturating_sub(1))
     };
     match key {
-        "name" => Some(adapter.name(node).map_or(Value::Null, Value::Str)),
-        "id" => Some(Value::Int(node.0 as i64)),
+        // identity is intrinsic (ruling 2026-11-06): a role's node
+        // answers the source's name, id and path
+        "name" => Some(
+            adapter
+                .name(adapter.intrinsic(node))
+                .map_or(Value::Null, Value::Str),
+        ),
+        "id" => Some(Value::Int(adapter.intrinsic(node).0 as i64)),
         "index" => Some(index().map_or(Value::Null, |i| Value::Int(i as i64))),
         "depth" => Some(Value::Int(depth_of(adapter, node) as i64)),
         "parent-name" => Some(
@@ -513,7 +519,7 @@ pub(crate) fn core_meta(adapter: &impl AstAdapter, node: NodeId, key: &str) -> O
                 .map_or(Value::Null, Value::Str),
         ),
         "path" => Some(
-            resolved_provenance(adapter, node)
+            resolved_provenance(adapter, adapter.intrinsic(node))
                 .first()
                 .path
                 .map_or(Value::Null, Value::Str),

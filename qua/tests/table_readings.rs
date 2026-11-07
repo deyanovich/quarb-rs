@@ -524,7 +524,7 @@ fn table_columns_are_typed() {
         "#(@(n);\n  %(1);\n  %(2))"
     );
     assert_eq!(one(r#"= #(@(x); %(1); %("2.5")) | type"#), "float");
-    assert_eq!(one(r#"= #(@(x); %(1); %("2.5")) | :x"#), "@(1; 2.5)");
+    assert_eq!(one(r#"= #(@(x); %(1); %("2.5")) | :x"#), "@(1.0; 2.5)");
     // the types of their own
     assert_eq!(
         one(r#"= #(@(d); %("2020-01-02"); %("2020-01-03T10:00:00Z")) | type"#),
@@ -604,7 +604,7 @@ fn the_header_is_typed_and_a_declared_header_casts() {
     );
     assert_eq!(
         one(r#"= @("1"; "2"; "3"; "4") | #(-h=@(:a<text>; :b<float>))"#),
-        "#(@(a; b);\n  %(\"1\"; 2);\n  %(\"3\"; 4))"
+        "#(@(a; b);\n  %(\"1\"; 2.0);\n  %(\"3\"; 4.0))"
     );
     assert_eq!(
         one(r#"= @("1"; "2.5") | #(-h=@(:n<int>; f)) | header"#),
@@ -626,7 +626,7 @@ fn the_header_is_typed_and_a_declared_header_casts() {
         one(
             r#"= @(%(a = "1"; b = "x"); %(a = "2"; b = "y")) | #(--header=@(:b<text>; :a<float>)) | :a"#
         ),
-        "@(1; 2)"
+        "@(1.0; 2.0)"
     );
     let e = refuse(&format!("{t} | #(--header=@(:zip<text>))"));
     assert!(

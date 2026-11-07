@@ -100,7 +100,7 @@ fn elementary_and_keyness_scalars() {
     close(&floats("/n/* | :: | sqrt | round(3)"), &[1.414, 2.0, 2.449]);
     assert_eq!(
         values("/n/* | %(e = (:: | exp | log | round(6)))")[0],
-        "%(e = 2)"
+        "%(e = 2.0)"
     );
     // The expression form takes the base as the topic.
     assert_eq!(
@@ -205,6 +205,6 @@ fn distance_dispersion_and_agreement() {
     // on both sides: null.
     assert_eq!(
         values("/gold/* | .g(::g) @|{.g} kappa(::g; ::p)"),
-        ["0", ""]
+        ["0.0", ""]
     );
 }

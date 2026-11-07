@@ -114,7 +114,7 @@ fn reducers_over_a_record_and_a_table() {
     );
     assert_eq!(
         one("= #(%(a = 1; b = 2); %(a = 3; b = 4)) | mean"),
-        "%(a = 2; b = 3)"
+        "%(a = 2.0; b = 3.0)"
     );
     assert_eq!(
         one(r#"= #(%(a = 1; b = "x"); %(a = 3; b = "y")) | sum"#),

@@ -124,11 +124,11 @@ fn the_named_view_is_an_operand() {
     // the fold's keys, then its answer: the row of any number of keys
     assert_eq!(
         ok(&d, &format!("{fold}%. ++ %(m = $_)")),
-        "%(s = \"male\"; m = 24)\n%(s = \"female\"; m = 38)"
+        "%(s = \"male\"; m = 24.0)\n%(s = \"female\"; m = 38.0)"
     );
     assert_eq!(
         ok(&d, &format!("{fold}%.* ++ %(m = $_)")),
-        "%(s = \"male\"; m = 24)\n%(s = \"female\"; m = 38)"
+        "%(s = \"male\"; m = 24.0)\n%(s = \"female\"; m = 38.0)"
     );
 }
 
@@ -140,11 +140,11 @@ fn a_row_names_its_accessors() {
     let fold = "/row/* | ::Sex | .s | ::Age @|{.s} mean | %(m = $_) | ";
     assert_eq!(
         ok(&d, &format!("{fold}++ %($.s)")),
-        "%(m = 24; s = \"male\")\n%(m = 38; s = \"female\")"
+        "%(m = 24.0; s = \"male\")\n%(m = 38.0; s = \"female\")"
     );
     assert_eq!(
         ok(&d, &format!("{fold}%($.s) ++ $_")),
-        "%(s = \"male\"; m = 24)\n%(s = \"female\"; m = 38)"
+        "%(s = \"male\"; m = 24.0)\n%(s = \"female\"; m = 38.0)"
     );
     let e = err(&d, "= %(a = 1) ++ %(2)");
     assert!(e.contains("a positional row appends to a table"), "{e}");

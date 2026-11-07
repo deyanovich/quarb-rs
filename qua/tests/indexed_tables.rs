@@ -74,7 +74,7 @@ fn a_declared_field_is_kept_and_the_options_declare_all() {
     );
     assert_eq!(
         one(r#"= %(price<float> = "2.5"; n = 1) ++! %(price = "3")"#),
-        "%(price = 3; n = 1)"
+        "%(price = 3.0; n = 1)"
     );
     let e = refuse(r#"= %(price<float> = "2.5"; n = 1) ++! %(price = "x")"#);
     assert!(
@@ -530,18 +530,18 @@ fn describe_summarizes_the_numeric_columns() {
     let t = r#"= #(@(date; A; B; n); %(2013-01-01; 1; 10.5; "x"); %(2013-01-02; 2; 20.25; "y"); %(2013-01-03; 3; 30; "z")) | #(-i=:date)"#;
     assert_eq!(
         one(&format!("{t} | describe")),
-        "#(@(statistic; A; B);\n  %(\"count\"; 3; 3);\n  %(\"mean\"; 2; 20.25);\n  %(\"std\"; 1; 9.75);\n  %(\"min\"; 1; 10.5);\n  %(\"25%\"; 1.5; 15.375);\n  %(\"50%\"; 2; 20.25);\n  %(\"75%\"; 2.5; 25.125);\n  %(\"max\"; 3; 30))"
+        "#(@(statistic; A; B);\n  %(\"count\"; 3.0; 3.0);\n  %(\"mean\"; 2.0; 20.25);\n  %(\"std\"; 1.0; 9.75);\n  %(\"min\"; 1.0; 10.5);\n  %(\"25%\"; 1.5; 15.375);\n  %(\"50%\"; 2.0; 20.25);\n  %(\"75%\"; 2.5; 25.125);\n  %(\"max\"; 3.0; 30.0))"
     );
     assert_eq!(one(&format!("{t} | describe | :::index | [2]")), "mean");
-    assert_eq!(one(&format!("{t} | describe | :A:std")), "1");
+    assert_eq!(one(&format!("{t} | describe | :A:std")), "1.0");
     // no numeric column: the empty table; a list and a record of
     // numbers: the record of the statistics; over the context too
     assert_eq!(one(r#"= #(@(n); %("x")) | describe"#), "#(@(statistic))");
     assert_eq!(
         one("= @(1; 2; 3; null) | describe"),
-        r#"%(count = 3; mean = 2; std = 1; min = 1; "25%" = 1.5; "50%" = 2; "75%" = 2.5; max = 3)"#
+        r#"%(count = 3; mean = 2.0; std = 1.0; min = 1; "25%" = 1.5; "50%" = 2; "75%" = 2.5; max = 3)"#
     );
-    assert_eq!(one("= %(a = 1; b = 3) | describe | :mean"), "2");
+    assert_eq!(one("= %(a = 1; b = 3) | describe | :mean"), "2.0");
     assert_eq!(one("= 1..4 @| describe | :count"), "4");
 }
 
@@ -551,7 +551,7 @@ fn pretty_draws_floats_to_six_digits_and_aligns_numbers() {
     // keep them all
     assert_eq!(
         one("= @(1; 2.123456789; -25.19880001; 506.0) | pretty"),
-        "@(1; 2.123457; -25.1988; 506)"
+        "@(1; 2.123457; -25.1988; 506.0)"
     );
     assert_eq!(one("= @(1; 2.123456789) | pretty(-p=2)"), "@(1; 2.12)");
     assert_eq!(one("= @(2.5) | pretty(-p=0)"), "@(2)");
@@ -562,7 +562,7 @@ fn pretty_draws_floats_to_six_digits_and_aligns_numbers() {
     // a text column left-aligned
     assert_eq!(
         one(r#"= #(@(name; x); %("a"; 1.5); %("bb"; 123.25); %("c"; 7)) | pretty"#),
-        "name       x\n----  ------\na       1.5\nbb    123.25\nc       7"
+        "name       x\n----  ------\na       1.5\nbb    123.25\nc       7.0"
     );
     assert_eq!(
         one(r#"= #(@(name; x); %("a"; 1.5); %("bb"; 123.25)) @| pretty"#),
@@ -583,7 +583,7 @@ fn a_literal_of_any_kind_and_a_conditional_stand_after_a_pipe() {
     // leaves the index out; a quarq over a table projector too
     assert_eq!(
         one("= @(%(d = 1; a = 1; b = 2); %(d = 2; a = 3; b = 4)) | # | #(-i=:d) | mean"),
-        "%(a = 2; b = 3)"
+        "%(a = 2.0; b = 3.0)"
     );
     assert_eq!(
         one(

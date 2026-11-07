@@ -138,8 +138,17 @@ fn record_sigil_builds_and_enriches() {
 
 #[test]
 fn record_sigil_refusals() {
-    let e = quarb::run("/items/* | %()", &doc()).unwrap_err();
-    assert!(e.to_string().contains("at least one field"), "{e}");
+    // `%()` is the empty record (the review's row 3160, 2026-11-06)
+    match quarb::run("/items/* | %()", &doc()).unwrap() {
+        quarb::QueryResult::Values(vs) => {
+            assert!(
+                vs.iter()
+                    .all(|v| matches!(v, quarb::Value::Record(r) if r.len() == 0)),
+                "{vs:?}"
+            )
+        }
+        other => panic!("{other:?}"),
+    }
     let e = quarb::run("/items/* | %%()", &doc()).unwrap_err();
     assert!(e.to_string().contains("the register view is %."), "{e}");
     // the duplicate-name check covers the sigil spellings too

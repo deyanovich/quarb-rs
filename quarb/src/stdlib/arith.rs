@@ -166,7 +166,38 @@ pub(crate) fn temporal_arith(
         (l, r, ArithOp::Add | ArithOp::Sub) if l.is_duration() && r.is_duration() => {
             quantital_arith(op, l, r, scale)
         }
-        (Instant { .. }, _, _) | (_, Instant { .. }, _) => Some(Value::Null),
+        // the refusal principle (ruling 2026-11-06): an instant added to
+        // an instant, or an instant under `*`, `/`, `div`, `mod`, is an
+        // operation the arithmetic is not defined for — a refusal when
+        // both operands have a reading; an operand without one keeps
+        // the null that propagates
+        (Instant { .. }, other, _) | (other, Instant { .. }, _) => {
+            let reads = matches!(other, Instant { .. })
+                || other.is_duration()
+                || other.numeric_reading().is_some();
+            if reads {
+                crate::record_refusal(format!(
+                    "{} is not defined for an instant and {}: an instant takes a span by '+'/'-' \
+                     and gives a span by '-' from an instant",
+                    match op {
+                        ArithOp::Add => "the sum",
+                        ArithOp::Sub => "the difference",
+                        ArithOp::Mul => "the product",
+                        ArithOp::Div | ArithOp::IDiv => "the quotient",
+                        ArithOp::Mod => "the remainder",
+                        ArithOp::MatMul => "the matrix product",
+                    },
+                    if matches!(other, Instant { .. }) {
+                        "an instant"
+                    } else if other.is_duration() {
+                        "a span"
+                    } else {
+                        "a number"
+                    }
+                ));
+            }
+            Some(Value::Null)
+        }
         _ => None,
     }
 }
@@ -198,6 +229,56 @@ pub(crate) fn quantital_arith(
         }
     };
     // Scaling factors stay numbers, as with durations.
+    // Two quantities multiply or divide into one (ruling 2026-11-06,
+    // computed by quanto): the dimension is the product or quotient
+    // of theirs, the written unit the compound of the written ones
+    // (`10_km div 2_h` is `5_km/h`, `2_m * 3_m` is `6_m^2`), and a
+    // quotient of one dimension is a bare number (`10_km div 2_km`
+    // is 5).
+    let compound = |mul: bool| -> Option<Value> {
+        let (
+            Quantity {
+                value: a,
+                base: ba,
+                written: wa,
+            },
+            Quantity {
+                value: b,
+                base: bb,
+                written: wb,
+            },
+        ) = (left, right)
+        else {
+            return None;
+        };
+        if !mul && *b == 0.0 {
+            return Some(Value::Null);
+        }
+        let value = if mul { a * b } else { a / b };
+        let base = crate::value::quantity::compose_base(ba, bb, mul)?;
+        if base == "1" || base.is_empty() {
+            return Some(Value::Float(value));
+        }
+        let written = match (wa, wb) {
+            // the written magnitude is the written magnitudes' product
+            // or quotient, exact: the compound unit is theirs
+            (Some((ma, ua)), Some((mb, ub))) => {
+                crate::value::quantity::compose_written(ua, ub, mul).and_then(|u| {
+                    if u.is_empty() {
+                        None
+                    } else {
+                        Some((if mul { ma * mb } else { ma / mb }, u))
+                    }
+                })
+            }
+            _ => None,
+        };
+        Some(Quantity {
+            value,
+            base,
+            written,
+        })
+    };
     match op {
         ArithOp::Mul => {
             return match (typed(left), typed(right)) {
@@ -209,7 +290,7 @@ pub(crate) fn quantital_arith(
                     .numeric()
                     .map(|k| rescale(right, k))
                     .or(Some(Value::Null)),
-                _ => Some(Value::Null), // Q × Q: undefined (v1)
+                _ => compound(true).or(Some(Value::Null)),
             };
         }
         ArithOp::Div if typed(left) && !typed(right) => {
@@ -217,6 +298,9 @@ pub(crate) fn quantital_arith(
                 Some(k) if k != 0.0 => Some(rescale(left, 1.0 / k)),
                 _ => Some(Value::Null),
             };
+        }
+        ArithOp::Div if typed(left) && typed(right) => {
+            return compound(false).or(Some(Value::Null));
         }
         _ => {}
     }
@@ -241,7 +325,19 @@ pub(crate) fn quantital_arith(
             let (Some((a, ba, ua)), Some((b, bb, ub))) = (lift(left), lift(right)) else {
                 return Some(Value::Null);
             };
+            // the refusal principle (ruling 2026-11-06): two quantities of
+            // unlike dimensions is an operation the arithmetic is not
+            // defined for — a refusal, not a silence
             if ba != bb {
+                crate::record_refusal(format!(
+                    "{} of quantities of unlike dimensions ({ba} and {bb}): arithmetic is not defined \
+                     for them; convert first",
+                    if matches!(op, ArithOp::Add) {
+                        "the sum"
+                    } else {
+                        "the difference"
+                    }
+                ));
                 return Some(Value::Null);
             }
             let v = if matches!(op, ArithOp::Add) {

@@ -88,7 +88,7 @@ fn rendering_follows_the_locale_the_values_do_not() {
             &[],
             &["--locale", "ru-RU", "/rows/0 | ::n * 2", "sales.json"]
         ),
-        "2469135"
+        "2469135,0"
     );
     assert_eq!(
         ok(

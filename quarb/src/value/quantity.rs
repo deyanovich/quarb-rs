@@ -663,6 +663,69 @@ fn currency_code(name: &str) -> Option<&'static str> {
         .map(|(_, code)| *code)
 }
 
+/// The refusal a quantity literal (`1_KB`) earns when its unit is a
+/// spelling the table refuses by name: the message, or `None`.
+pub(crate) fn refused_literal(text: &str) -> Option<String> {
+    let (_, unit) = text.split_once('_')?;
+    if refused(unit) {
+        return Some(refused_spelling(unit, &[]));
+    }
+    misprefixed(unit)
+}
+
+/// The refusal a unit name earns when it is a prefix on a built-in
+/// unit that does not take it (ruling 2026-11-06): a binary prefix on
+/// anything but the bit and the byte (`Kim`), a fraction of a bit or a
+/// byte (`mB`), any prefix on a unit that takes none (`kh`). A name the
+/// table knows as written is never one; a name that splits into no
+/// known unit stays an opaque unit of its own.
+pub(crate) fn misprefixed(unit: &str) -> Option<String> {
+    if lookup_strict(unit).is_some() {
+        return None;
+    }
+    let entry = |stem: &str| tables().0.entries().find(|e| e.names.contains(&stem));
+    for (p, _) in BINARY_PREFIXES {
+        if let Some(stem) = unit.strip_prefix(p)
+            && let Some(e) = entry(stem)
+            && e.prefixes != Prefixes::Information
+        {
+            return Some(format!(
+                "no unit '{unit}': '{p}' is a binary prefix, for the bit and the byte alone \
+                 ({p}B is 2^{} B); '{stem}' takes {}",
+                BINARY_PREFIXES
+                    .iter()
+                    .find(|(q, _)| q == p)
+                    .map_or(0, |(_, n)| *n),
+                match e.prefixes {
+                    Prefixes::Decimal => format!("the decimal prefixes (k{stem} is 1000 {stem})"),
+                    _ => "no prefix".to_string(),
+                }
+            ));
+        }
+    }
+    let mut decimal: Vec<&(&str, i32)> = PREFIX_POWERS.iter().collect();
+    decimal.sort_by_key(|(p, _)| std::cmp::Reverse(p.len()));
+    for (p, power) in decimal {
+        if let Some(stem) = unit.strip_prefix(p)
+            && !stem.is_empty()
+            && let Some(e) = entry(stem)
+        {
+            return match e.prefixes {
+                Prefixes::None => Some(format!(
+                    "no unit '{unit}': '{stem}' takes no prefix (write the quantity in '{stem}', \
+                     or convert)"
+                )),
+                Prefixes::Information if *power < 0 => Some(format!(
+                    "no unit '{unit}': no fraction of a '{stem}' — it takes the positive decimal \
+                     prefixes (k{stem} is 1000 {stem}) and the binary ones (Ki{stem} is 1024 {stem})"
+                )),
+                _ => None,
+            };
+        }
+    }
+    None
+}
+
 /// Spellings read as a refusal, never as a unit: the ambiguous
 /// kilobyte and kilobit, in Latin and in Cyrillic.
 fn refused(name: &str) -> bool {
@@ -760,6 +823,35 @@ pub fn scale_expr_with(
 }
 
 /// Whether a base expansion holds an opaque factor.
+/// The written unit of a product (`mul` true) or quotient of two
+/// quantities written in `a` and `b`: the compound spelling quanto
+/// composes (`km/h`, `m^2`), the empty text when every term cancels.
+pub(crate) fn compose_written(a: &str, b: &str, mul: bool) -> Option<String> {
+    let op = if mul {
+        quanto::Op::Mul
+    } else {
+        quanto::Op::Div
+    };
+    tables().1.compose(a, op, b).ok()
+}
+
+/// The base expansion of a product (`mul` true) or quotient of two
+/// base expansions, spelled canonically; `None` when a base does not
+/// parse as unit text.
+pub(crate) fn compose_base(a: &str, b: &str, mul: bool) -> Option<String> {
+    // the open table: a base's opaque factor (a currency, a declared
+    // unit) is a base of its own
+    let table = &tables().1;
+    let da = table.dimension(a).ok()?;
+    let db = table.dimension(b).ok()?;
+    let d = if mul {
+        da.checked_mul(&db)?
+    } else {
+        da.checked_div(&db)?
+    };
+    Some(table.spell(&d))
+}
+
 pub fn has_opaque_factor(base: &str) -> bool {
     base_factors(base)
         .iter()
@@ -1234,7 +1326,7 @@ pub fn duration_text_with(
     number: &dyn Fn(&str) -> String,
 ) -> String {
     if !seconds.is_finite() {
-        return crate::value::format_float(seconds) + "s";
+        return crate::value::format_magnitude(seconds) + "s";
     }
     let neg = seconds < 0.0;
     let total = (seconds.abs() * 1e9).round();
@@ -1244,7 +1336,7 @@ pub fn duration_text_with(
     let sign = if neg { "-" } else { "" };
     if total >= 9.0e18 {
         // beyond the nanosecond count's exact range: days alone
-        let days = crate::value::format_float(seconds.abs() / 86_400.0);
+        let days = crate::value::format_magnitude(seconds.abs() / 86_400.0);
         return format!("{sign}{}", names.days(&number(&days)));
     }
     let mut rest = total as i128;

@@ -1772,6 +1772,16 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
         }
     }
 
+    fn intrinsic(&self, node: NodeId) -> NodeId {
+        match self.split(node) {
+            Some((g, inner)) => {
+                let i = self.grafts.borrow()[g].inner.adapter().intrinsic(inner);
+                self.intern(g, i)
+            }
+            None => self.outer.intrinsic(node),
+        }
+    }
+
     fn row_text(&self, node: NodeId, f: &mut dyn FnMut(&[&str])) -> bool {
         match self.split(node) {
             Some(_) => false,

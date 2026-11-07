@@ -141,7 +141,7 @@ fn the_matrix_product() {
         "#(@(1; 2);\n  @(3; 4))"
     );
     assert_eq!(one("= @(1; 2; 3) x @(4; 5; 6)"), "32");
-    assert_eq!(one("= #(%(1.5; 2)) x @(2; 1)"), "@(5)");
+    assert_eq!(one("= #(%(1.5; 2)) x @(2; 1)"), "@(5.0)");
     let e = refuse("= #(%(1; 2)) x @(1; 2; 3)");
     assert!(e.contains("inner dimensions differ (2 and 3)"), "{e}");
     let e = refuse("= @(1; 2) x #(%(1; 2))");

@@ -121,7 +121,10 @@ fn the_text_path_parses_the_cells_as_the_record_path_read_them() {
         ok(&d, &["/row @| # | :t", "widen.csv"]),
         "@(\"1.50\"; \"x\"; \"2.5\")"
     );
-    assert_eq!(ok(&d, &["/row @| # | :f", "widen.csv"]), "@(1.5; 2; null)");
+    assert_eq!(
+        ok(&d, &["/row @| # | :f", "widen.csv"]),
+        "@(1.5; 2.0; null)"
+    );
     // ragged rows: a short row's missing cells null, a long row's
     // extra cell dropped, as the record path read them
     assert_eq!(

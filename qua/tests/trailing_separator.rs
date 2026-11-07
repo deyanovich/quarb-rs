@@ -81,7 +81,7 @@ fn the_trailing_separator_keeps_the_operand_reading() {
     assert_eq!(one("= %(k = 1;)"), "%(k = 1)");
     assert_eq!(canonical("= %(k = 1;)"), canonical("= %(k = 1)"));
     assert_eq!(one("= #(%(1; 2);) | dim"), "@(1; 2)");
-    assert_eq!(one("= 3 | round(1;)"), "3");
+    assert_eq!(one("= 3 | round(1;)"), "3.0");
     // a command's operand: the hop handed headless, the three spellings
     let group = canonical("/a | join((--author))");
     assert_eq!(canonical("/a | join(--author;)"), group);

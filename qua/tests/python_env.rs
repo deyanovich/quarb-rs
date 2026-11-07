@@ -183,12 +183,15 @@ fn headless_the_first_operand_fills_the_slot_when_the_operands_reach() {
             QueryResult::Nodes(ns) => ns.iter().map(|n| format!("{n:?}")).collect(),
         })
     };
-    assert_eq!(run_math("= m:pow(2; 3)").unwrap(), vec!["8"]);
-    assert_eq!(run_math("= 2 | m:pow(3)").unwrap(), vec!["8"]);
-    assert_eq!(run_math("= 2 | %(p = m:pow(3))").unwrap(), vec!["%(p = 8)"]);
+    assert_eq!(run_math("= m:pow(2; 3)").unwrap(), vec!["8.0"]);
+    assert_eq!(run_math("= 2 | m:pow(3)").unwrap(), vec!["8.0"]);
+    assert_eq!(
+        run_math("= 2 | %(p = m:pow(3))").unwrap(),
+        vec!["%(p = 8.0)"]
+    );
     assert_eq!(
         run_math("= 2 | %(p = m:pow(2; 3))").unwrap(),
-        vec!["%(p = 8)"]
+        vec!["%(p = 8.0)"]
     );
     let e = run_math("= 2 | m:pow(2; 3)").unwrap_err().to_string();
     assert!(e.contains("takes 1 operand, 2 given"), "{e}");

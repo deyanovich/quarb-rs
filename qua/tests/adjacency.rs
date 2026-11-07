@@ -113,7 +113,7 @@ fn a_reduction_reads_its_field_through_of_and_a_keyed_aggregate_takes_the_topic_
     );
     assert_eq!(
         run("/rows/* | %(k = ::k; x = ::x) | .k($_:k) @|{.k} variance(--sample -o=:x)").unwrap(),
-        vec!["8", "null"]
+        vec!["8.0", "null"]
     );
     let e = run("/rows/* | %(k = ::k; x = ::x) | .k($_:k) @|{.k} sum(:x)").unwrap_err();
     assert!(

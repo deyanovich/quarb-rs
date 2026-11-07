@@ -831,8 +831,14 @@ fn apply_scalar_inner(
                 crate::value::number::locale_convention(locale)
             };
             if decimal.is_none() {
+                // an uncarried locale is refused, naming the ones carried
+                // (spec: the locale-taking functions, 2026-11-06)
                 crate::value::ambient::record_refusal(format!(
-                    "number: no number conventions for locale {locale:?}"
+                    "number: no number conventions for locale {locale:?} (carried: {}; the \
+                     point: {}; the comma: {})",
+                    crate::value::locale::SHIPPED.join(", "),
+                    crate::value::number::POINT_LANGUAGES.join(", "),
+                    crate::value::number::COMMA_LANGUAGES.join(", ")
                 ));
                 return vec![Value::Null];
             }
@@ -1378,26 +1384,43 @@ fn apply_scalar_inner(
         // defined via the temporal reading, so they serve typed
         // instants, epoch integers, and ISO text alike; no reading
         // means null.
-        "datetime" => vec![match &topic {
-            Value::Instant { .. } => topic.clone(),
-            Value::Str(s) => crate::temporal::parse_iso(s)
-                .map(|(secs, nanos, offset_min)| Value::Instant {
-                    secs,
-                    nanos,
-                    offset_min,
-                    calendar: Default::default(),
-                })
-                .unwrap_or(Value::Null),
-            other => other
-                .temporal_reading()
-                .map(|(secs, nanos)| Value::Instant {
-                    secs,
-                    nanos,
-                    offset_min: None,
-                    calendar: Default::default(),
-                })
-                .unwrap_or(Value::Null),
-        }],
+        "datetime" => {
+            // `datetime(LOCALE)`: a locale the tables do not carry is
+            // refused, naming the carried ones (spec: the locale-taking
+            // functions, 2026-11-06); a carried one reads as the
+            // canonical forms do today
+            let locale = arg_str(call, 0, "");
+            if !locale.is_empty()
+                && !crate::value::locale::is_canonical(locale)
+                && crate::value::locale::for_tag(locale).is_none()
+            {
+                crate::value::ambient::record_refusal(format!(
+                    "datetime: no tables for locale {locale:?} (carried: {})",
+                    crate::value::locale::SHIPPED.join(", ")
+                ));
+                return vec![Value::Null];
+            }
+            vec![match &topic {
+                Value::Instant { .. } => topic.clone(),
+                Value::Str(s) => crate::temporal::parse_iso(s)
+                    .map(|(secs, nanos, offset_min)| Value::Instant {
+                        secs,
+                        nanos,
+                        offset_min,
+                        calendar: Default::default(),
+                    })
+                    .unwrap_or(Value::Null),
+                other => other
+                    .temporal_reading()
+                    .map(|(secs, nanos)| Value::Instant {
+                        secs,
+                        nanos,
+                        offset_min: None,
+                        calendar: Default::default(),
+                    })
+                    .unwrap_or(Value::Null),
+            }]
+        }
         "epoch" => vec![
             topic
                 .temporal_reading()
@@ -3454,13 +3477,16 @@ fn sum(input: &[Value], scale: Scale) -> Value {
         }
         return Value::seconds(secs, nanos.rem_euclid(1_000_000_000) as u32);
     }
-    if !input.iter().any(|v| v.numeric().is_some()) {
+    // the inputs read as `+` reads them: an integer-looking text is
+    // an integer, so a column of such cells sums to an integer
+    let readings: Vec<Value> = input.iter().filter_map(Value::numeric_reading).collect();
+    if readings.is_empty() {
         return Value::Null;
     }
-    if input.iter().all(|v| matches!(v, Value::Int(_))) {
+    if readings.iter().all(|v| matches!(v, Value::Int(_))) {
         let mut acc: i64 = 0;
         let mut overflowed = false;
-        for v in input {
+        for v in &readings {
             if let Value::Int(n) = v {
                 match acc.checked_add(*n) {
                     Some(s) => acc = s,
@@ -3475,7 +3501,7 @@ fn sum(input: &[Value], scale: Scale) -> Value {
             return Value::Int(acc);
         }
     }
-    Value::Float(input.iter().filter_map(Value::numeric).sum())
+    Value::Float(readings.iter().filter_map(Value::numeric).sum())
 }
 
 /// The product of the numeric readings: exact while every operand
@@ -3525,10 +3551,14 @@ fn product(input: &[Value]) -> Value {
             return Value::Null;
         }
     }
-    if input.iter().all(|v| matches!(v, Value::Int(_))) {
+    // the inputs read as `x` reads them: an integer-looking text is
+    // an integer
+    let readings: Vec<Value> = input.iter().filter_map(Value::numeric_reading).collect();
+    // the empty product is the fold's identity, 1
+    if readings.iter().all(|v| matches!(v, Value::Int(_))) {
         let mut acc: i64 = 1;
         let mut overflowed = false;
-        for v in input {
+        for v in &readings {
             if let Value::Int(n) = v {
                 match acc.checked_mul(*n) {
                     Some(p) => acc = p,

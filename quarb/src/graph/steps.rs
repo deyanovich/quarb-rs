@@ -315,7 +315,7 @@ pub(crate) fn navigate_from_level(
         None,
     )
     .into_iter()
-    .filter(|(e, r)| seen.insert((e.node, arrival_key(e), reg_key(r))))
+    .filter(|(e, r)| seen.insert((adapter.intrinsic(e.node), arrival_key(e), reg_key(r))))
     .map(|(e, _)| e.node)
     .collect()
 }
@@ -815,11 +815,14 @@ pub(crate) fn expand_group(
     // first round, a wildcard after it) and lapses at the first
     // unpromised edge, the histories kept apart from there on.
     let links_only = !set_walk && group_walks_links(group);
-    let promise: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(if links_only {
-        group_promise(adapter, group)
-    } else {
-        None
-    });
+    // The acyclic promise the group walks under, when every link of
+    // every alternative carries one: a walk that returns to a node it
+    // has visited is then a refusal naming the declaration, in the
+    // set walk as in the exact one — no bound ends such a walk
+    // silently (ruling 2026-11-06). The links-only merge by position
+    // stays the exact walk's.
+    let promise: std::cell::RefCell<Option<String>> =
+        std::cell::RefCell::new(group_promise(adapter, group));
     let alive = std::cell::Cell::new(links_only);
     // The promise changes no answer (spec: Acyclic links): it merges
     // the histories only where nothing read could tell them apart —
@@ -848,7 +851,10 @@ pub(crate) fn expand_group(
     // exact walk keeps one path per history (`GPath::blocks`).
     let mut seen: HashSet<(NodeId, Vec<(Option<String>, String)>)> = HashSet::new();
     if set_walk {
-        seen.insert((anchor.ext.node, reg_key(&anchor.register)));
+        seen.insert((
+            adapter.intrinsic(anchor.ext.node),
+            reg_key(&anchor.register),
+        ));
     }
     let mut advance = |frontier: &[GPath], round: usize| -> Vec<GPath> {
         let mut next = Vec::new();
@@ -914,7 +920,7 @@ pub(crate) fn expand_group(
         // position stays, and the position is spent from then on.
         let mut fresh: Vec<GPath> = Vec::new();
         for p in next {
-            let key = (p.ext.node, reg_key(&p.register));
+            let key = (adapter.intrinsic(p.ext.node), reg_key(&p.register));
             if seen.contains(&key) {
                 continue;
             }
@@ -942,7 +948,7 @@ pub(crate) fn expand_group(
     // satisfying settlement the answer for that node. Weights are
     // non-negative (a negative one refuses on the hop).
     if let (Some(b), Reach::Proximal) = (&budget, group.reach) {
-        let mut settled: HashSet<NodeId> = HashSet::from([anchor.ext.node]);
+        let mut settled: HashSet<NodeId> = HashSet::from([adapter.intrinsic(anchor.ext.node)]);
         let mut pending: Vec<GPath> = Vec::new();
         for alt in &group.alts {
             pending.extend(expand_elems(
@@ -973,7 +979,7 @@ pub(crate) fn expand_group(
                 })
                 .expect("non-empty");
             let path = pending.swap_remove(i);
-            if !settled.insert(path.ext.node) {
+            if !settled.insert(adapter.intrinsic(path.ext.node)) {
                 continue;
             }
             if admits(&path) {
@@ -993,7 +999,7 @@ pub(crate) fn expand_group(
                     Some(b),
                     promise.borrow().as_deref(),
                 ) {
-                    if !settled.contains(&p.ext.node) {
+                    if !settled.contains(&adapter.intrinsic(p.ext.node)) {
                         pending.push(p);
                     }
                 }
@@ -1108,15 +1114,20 @@ pub(crate) fn expand_group(
             .map(|(p, _)| p)
             .collect()
     };
-    // The markers are the one per-node selection (spec: Expansion
-    // paths): the proximal and the distal reach answer each node
-    // once, its first walk at the tier; every other form every walk.
+    // The markers keep the equidistant set (ruling 2026-11-07): the
+    // proximal reach every survivor of the first round that has one,
+    // the distal every survivor of the last, per starting thread;
+    // under a budget the nodes at the least total and at the greatest
+    // within the bound. Each node once, its first walk at the tier
+    // (spec: Expansion paths); no document-order tie-break beyond
+    // that — one node is `@| [1]` after the reach. Every other form
+    // answers every walk.
     let out: Vec<GPath> = if group.reach == Reach::All {
         out
     } else {
         let mut once: HashSet<(NodeId, Vec<(Option<String>, String)>)> = HashSet::new();
         out.into_iter()
-            .filter(|p| once.insert((p.ext.node, reg_key(&p.register))))
+            .filter(|p| once.insert((adapter.intrinsic(p.ext.node), reg_key(&p.register))))
             .collect()
     };
     let mut out = exit_walk(out, budget.as_ref());
@@ -1275,6 +1286,22 @@ fn group_promise(adapter: &impl AstAdapter, group: &Group) -> Option<String> {
                     decl.get_or_insert(d);
                 }
                 PathElem::Step(step) => {
+                    // a resolution hop (`::manager_id-->`) walks the
+                    // reference under its label: the written one, else
+                    // the property's default label, else the property
+                    if let Axis::Resolve { property, label } = &step.axis {
+                        let d = label
+                            .as_deref()
+                            .and_then(|l| adapter.acyclic_link(l))
+                            .or_else(|| {
+                                let p = property.as_deref()?;
+                                adapter
+                                    .acyclic_link(crate::adapter::reference_label(p))
+                                    .or_else(|| adapter.acyclic_link(p))
+                            })?;
+                        decl.get_or_insert(d);
+                        continue;
+                    }
                     if !matches!(step.axis, Axis::OutLink | Axis::InLink | Axis::BothLink) {
                         return None;
                     }
@@ -2182,7 +2209,7 @@ pub(crate) fn any_deep_step(
     out: &mut Vec<NodeId>,
 ) {
     let wild = wild_edge_step();
-    let mut seen: HashSet<NodeId> = HashSet::from([node]);
+    let mut seen: HashSet<NodeId> = HashSet::from([adapter.intrinsic(node)]);
     let mut reached: Vec<(NodeId, usize)> = vec![(node, 0)];
     let mut frontier = vec![node];
     let mut depth = 0;
@@ -2191,7 +2218,7 @@ pub(crate) fn any_deep_step(
         let mut next = Vec::new();
         for n in &frontier {
             for (far, _) in incident_edges(adapter, *n, &wild) {
-                if seen.insert(far) {
+                if seen.insert(adapter.intrinsic(far)) {
                     next.push(far);
                 }
             }
@@ -2411,8 +2438,8 @@ pub(crate) fn resolve_step(
         // within it. The adapter has read both out of its
         // own reference syntax; the engine looks at neither:
         // a mounted target answers with the node its own
-        // adapter finds at the location (else its root); an
-        // unmounted one is
+        // adapter finds at the location (nothing when the
+        // location is not found); an unmounted one is
         // recorded among the run's unresolved external
         // references, for the host's acquisition loop. No
         // IO here, ever.
@@ -2427,11 +2454,15 @@ pub(crate) fn resolve_step(
                 witness,
                 register,
             ) {
+                // the document mounted but the location not found
+                // yields nothing, as a fragment miss does — no
+                // landing on the document's root (ruling 2026-11-06)
                 Ok(root) => {
-                    let landed = frag
-                        .and_then(|f| adapter.resolve_fragment(root, &f))
-                        .unwrap_or(root);
-                    resolved.push(landed);
+                    let landed = match frag {
+                        Some(f) => adapter.resolve_fragment(root, &f),
+                        None => Some(root),
+                    };
+                    resolved.extend(landed);
                 }
                 Err(Some(identity)) => record_ref(identity),
                 Err(None) => {}
@@ -3351,10 +3382,78 @@ pub(crate) fn apply_predicates<T>(
                             eval_pred_expr_at(adapter, node_of(item), e, trace, witness, scope)
                         });
                     }
+                    // The step's conjunction binds its captures (spec:
+                    // the pattern comparison, 2026-11-06): a group a
+                    // pattern comparison makes in one predicate reads
+                    // as `$1`… in the step's later predicates. Without
+                    // a join to witness, the predicates run in order,
+                    // each under the captures so far.
+                    if trace.contexts.is_empty() {
+                        let node = node_of(item);
+                        // the captures an earlier run of this step's
+                        // predicates made (across a positional one)
+                        let mut captured: Option<crate::pipeline::Captured> =
+                            crate::pipeline::with_run(|s| s.walk_captures.get(&node).cloned());
+                        for e in &run {
+                            let scope = match &captured {
+                                Some((numbered, named)) => Scope {
+                                    captures: numbered,
+                                    named,
+                                    ..scope
+                                },
+                                None => scope,
+                            };
+                            if !eval_pred_expr_at(adapter, node, e, trace, &[], scope) {
+                                return false;
+                            }
+                            if let Some(c) = crate::pipeline::extract_captures(
+                                e,
+                                adapter,
+                                &GraphExt::at(node),
+                                trace,
+                                scope,
+                            ) {
+                                captured = Some(c);
+                            }
+                        }
+                        return true;
+                    }
                     // No witness yet (a driver path, a body's own
                     // navigation): the existential over the trace.
                     exists_binding(adapter, node_of(item), &run, trace, &mut Vec::new(), scope)
                 });
+                // A pattern comparison among the predicates binds its
+                // groups for the capsa made of the node (the review's
+                // row 9293, 2026-11-06): the walk records them here,
+                // the capsa takes them where it is made.
+                if witness.is_empty() {
+                    for item in &items {
+                        let node = node_of(item);
+                        let edge = edge_of(item);
+                        let scope = Scope {
+                            prov: None,
+                            outer,
+                            register,
+                            crossing: edge.as_ref(),
+                            walk: None,
+                            witness: None,
+                            ..Scope::at(&state)
+                        };
+                        if let Some(c) = run.iter().find_map(|e| {
+                            crate::pipeline::extract_captures(
+                                e,
+                                adapter,
+                                &GraphExt::at(node),
+                                trace,
+                                scope,
+                            )
+                        }) {
+                            crate::pipeline::with_run(|s| {
+                                s.walk_captures.insert(node, c);
+                            });
+                        }
+                    }
+                }
             }
         }
     }

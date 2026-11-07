@@ -63,7 +63,10 @@ fn the_topics_and_the_positions() {
     assert_eq!(ok(&d, "/a/* | @@_::k @| first"), "@(1; 2; 3)");
     assert_eq!(ok(&d, "/a/* | ((*_))::x @| first"), "@(10; 20; 30)");
     // Inside a map, the element context.
-    assert_eq!(ok(&d, "= @(1; 3) $| ($_ * 100 div sum(@_))"), "@(25; 75)");
+    assert_eq!(
+        ok(&d, "= @(1; 3) $| ($_ * 100 div sum(@_))"),
+        "@(25.0; 75.0)"
+    );
 }
 
 /// `#.*` is the context as a table of the value regulae, one row

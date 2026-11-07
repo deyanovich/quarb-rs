@@ -85,10 +85,10 @@ fn parenthesized_paths_stay_expressions() {
 #[test]
 fn scalar_mode_refuses_hops() {
     let e = refuse("/a::name | /kids/*");
-    assert!(e.contains("scalar mode"), "unexpected message: {e}");
+    assert!(e.contains("value mode"), "unexpected message: {e}");
     assert!(e.contains("| ."), "the fix should be named: {e}");
     let e = refuse("/a | ::name | /kids/*");
-    assert!(e.contains("scalar mode"), "unexpected message: {e}");
+    assert!(e.contains("value mode"), "unexpected message: {e}");
 }
 
 #[test]
