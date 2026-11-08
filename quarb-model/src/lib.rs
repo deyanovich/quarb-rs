@@ -17,8 +17,9 @@
 mod parse;
 
 pub use parse::{
-    AliasDecl, AliasKind, AliasRule, EdgeDecl, Label, Model, Mount, NodeDecl, RefDecl, RelDecl,
-    UnitDecl, WeightSpec, parse_model, parse_model_file, resolve_mount_target,
+    AliasDecl, AliasKind, AliasRule, EdgeDecl, Label, Model, Mount, NodeDecl, PropertyDecl,
+    PropertyTyping, RefDecl, RelDecl, UnitDecl, WeightSpec, parse_model, parse_model_file,
+    resolve_mount_target,
 };
 
 use quarb::{AstAdapter, NodeId, QueryResult, Value};
@@ -213,6 +214,29 @@ pub struct ModelAdapter<A: AstAdapter> {
     /// store of its own, so this is how it maintains a measure:
     /// once computed, answered from here for the mount's life.
     graph_measures: RefCell<HashMap<(String, String, String), HashMap<NodeId, Value>>>,
+    /// The declared properties (`property SCOPE::name<TRAIT> = EXPR;`,
+    /// ruling 2026-11-08), prepared once: the scope's steps and the
+    /// expression parsed, in the file's order.
+    props: Vec<Prepared>,
+    /// Per (declaration, node), whether the node stands in the scope —
+    /// kept for a scope with predicates, where the test costs an
+    /// evaluation; a plain scope is a name test per ancestor.
+    in_scope: RefCell<HashMap<(usize, NodeId), bool>>,
+    /// The declarations under evaluation, innermost last: the one
+    /// evaluating reads its own name off the source (typing in
+    /// place); a declaration met again deeper is a cycle.
+    computing: RefCell<Vec<(usize, NodeId)>>,
+}
+
+/// A `property` statement prepared for reading.
+struct Prepared {
+    scope: quarb::ScopeSteps,
+    name: String,
+    typing: Option<PropertyTyping>,
+    expr: quarb::ValueExpr,
+    /// `property /legs::speed<_mph>` — the statement's head, for
+    /// messages.
+    head: String,
 }
 
 /// One `index SCOPE::prop;` declaration, materialized.
@@ -397,6 +421,26 @@ impl<A: AstAdapter> ModelAdapter<A> {
     pub fn new(base: A, model: Model) -> Self {
         let n = model.traits.len();
         let model_units = model.units.clone();
+        let props = model
+            .properties
+            .iter()
+            .map(|d| {
+                let trait_text = match &d.typing {
+                    Some(PropertyTyping::Unit(u)) => format!("<_{u}>"),
+                    Some(PropertyTyping::Type(t)) => format!("<{}>", t.word()),
+                    None => String::new(),
+                };
+                Prepared {
+                    scope: quarb::ScopeSteps::parse(&d.scope)
+                        .expect("validated when the model was parsed"),
+                    name: d.name.clone(),
+                    typing: d.typing.clone(),
+                    expr: quarb::ValueExpr::parse(&d.expr)
+                        .expect("validated when the model was parsed"),
+                    head: format!("property {}::{}{trait_text}", d.scope, d.name),
+                }
+            })
+            .collect();
         ModelAdapter {
             base,
             model,
@@ -411,7 +455,279 @@ impl<A: AstAdapter> ModelAdapter<A> {
             referrers: RefCell::new(HashMap::new()),
             units: Self::load_units(&model_units),
             graph_measures: RefCell::new(HashMap::new()),
+            props,
+            in_scope: RefCell::new(HashMap::new()),
+            computing: RefCell::new(Vec::new()),
         }
+    }
+
+    // ── declared properties (spec: Model Files, the property
+    // statement; ruling 2026-11-08) ──────────────────────────────
+
+    /// The declarations whose scope holds the base node `node`.
+    fn declared_on(&self, node: NodeId) -> Vec<usize> {
+        if self.props.is_empty() || node.0 & MODEL_TAG != 0 {
+            return Vec::new();
+        }
+        (0..self.props.len())
+            .filter(|&i| self.node_declared(i, node))
+            .collect()
+    }
+
+    fn node_declared(&self, i: usize, node: NodeId) -> bool {
+        let scope = &self.props[i].scope;
+        if scope.plain() {
+            return quarb::node_in_scope(&self.base, node, scope);
+        }
+        if let Some(&b) = self.in_scope.borrow().get(&(i, node)) {
+            return b;
+        }
+        let b = quarb::node_in_scope(&self.base, node, scope);
+        self.in_scope.borrow_mut().insert((i, node), b);
+        b
+    }
+
+    /// The node named for a message: the names from the root, an
+    /// ordinal where siblings share the name (`/row[2]`, `/legs/1`).
+    fn where_is(&self, node: NodeId) -> String {
+        let root = self.base.root();
+        let mut parts = Vec::new();
+        let mut cur = Some(node);
+        while let Some(n) = cur {
+            if n == root {
+                break;
+            }
+            let name = self.base.name(n).unwrap_or_else(|| "*".to_string());
+            let parent = self.base.parent(n);
+            let ordinal = parent
+                .map(|p| self.base.children_named(p, &name))
+                .filter(|sib| sib.len() > 1)
+                .and_then(|sib| sib.iter().position(|&s| s == n))
+                .map(|k| format!("[{}]", k + 1))
+                .unwrap_or_default();
+            parts.push(format!("{name}{ordinal}"));
+            cur = parent;
+            if parts.len() > 64 {
+                break;
+            }
+        }
+        parts.reverse();
+        format!("/{}", parts.join("/"))
+    }
+
+    /// The value of declaration `i` at `node`, typed by its trait;
+    /// `None` for a null, and for a value the trait refuses (the
+    /// refusal recorded, as a failed fetch is).
+    fn declared_value(&self, i: usize, node: NodeId) -> Option<Value> {
+        let d = &self.props[i];
+        {
+            let stack = self.computing.borrow();
+            if let Some(pos) = stack.iter().position(|&(j, n)| j == i && n == node) {
+                let via: Vec<String> = stack[pos..]
+                    .iter()
+                    .chain(std::iter::once(&(i, node)))
+                    .map(|(j, _)| format!("::{}", self.props[*j].name))
+                    .collect();
+                quarb::record_refusal(format!(
+                    "{}: the declared properties read each other in a cycle at {} ({})",
+                    d.head,
+                    self.where_is(node),
+                    via.join(" → ")
+                ));
+                return None;
+            }
+        }
+        self.computing.borrow_mut().push((i, node));
+        let values = quarb::node_value(self, node, &d.expr);
+        self.computing.borrow_mut().pop();
+        let v = match values.len() {
+            0 => return None,
+            1 => values.into_iter().next().expect("one"),
+            n => {
+                quarb::record_refusal(format!(
+                    "{}: the expression yields {n} values at {}; a property holds one",
+                    d.head,
+                    self.where_is(node)
+                ));
+                return None;
+            }
+        };
+        if matches!(v, Value::Null) {
+            return None;
+        }
+        match &d.typing {
+            None => Some(v),
+            Some(PropertyTyping::Unit(u)) => match self.weight_quantity(v.clone(), Some(u)) {
+                Some(q) => Some(q),
+                None => {
+                    quarb::record_refusal(if self.dimension_clash(&v, u) {
+                        format!(
+                            "{}: the expression yields {} at {} — a quantity of another \
+                             dimension",
+                            d.head,
+                            v.display_form(),
+                            self.where_is(node)
+                        )
+                    } else {
+                        format!(
+                            "{}: the expression yields {} at {}, which is no number",
+                            d.head,
+                            held(&v),
+                            self.where_is(node)
+                        )
+                    });
+                    None
+                }
+            },
+            Some(PropertyTyping::Type(t)) => match quarb::cast_value(&v, t) {
+                Some(c) => Some(c),
+                None => {
+                    quarb::record_refusal(format!(
+                        "{}: the expression yields {} at {}, which does not cast to {}",
+                        d.head,
+                        held(&v),
+                        self.where_is(node),
+                        t.word()
+                    ));
+                    None
+                }
+            },
+        }
+    }
+
+    /// A base node's property under the declarations: a declared
+    /// name answers its value (the declaration evaluating at this
+    /// very node reads the source instead — typing in place), any
+    /// other name the source's.
+    fn base_property(&self, node: NodeId, name: &str) -> Option<Value> {
+        for i in self.declared_on(node) {
+            if self.props[i].name == name {
+                if self.computing.borrow().last() == Some(&(i, node)) {
+                    return self.base.property(node, name);
+                }
+                return self.declared_value(i, node);
+            }
+        }
+        self.base.property(node, name)
+    }
+
+    /// A base node's properties with the declared ones: a name the
+    /// node carries retyped in its place, a new name appended.
+    fn base_properties(&self, node: NodeId) -> Vec<(String, Value)> {
+        let mut props = self.base.properties(node);
+        for i in self.declared_on(node) {
+            if self.computing.borrow().last() == Some(&(i, node)) {
+                continue;
+            }
+            let name = &self.props[i].name;
+            let v = self.declared_value(i, node).unwrap_or(Value::Null);
+            match props.iter_mut().find(|(k, _)| k == name) {
+                Some(slot) => slot.1 = v,
+                None => props.push((name.clone(), v)),
+            }
+        }
+        props
+    }
+
+    /// A base node's value under the declarations: a record's member
+    /// node whose name a declaration on the record types in place
+    /// answers the typed value, so the child view (a serialization
+    /// by members, `@| #` over records) agrees with the property view.
+    fn base_default_value(&self, node: NodeId) -> Option<Value> {
+        if self.props.is_empty() {
+            return self.base.default_value(node);
+        }
+        if let (Some(name), Some(parent)) = (self.base.name(node), self.base.parent(node)) {
+            for i in self.declared_on(parent) {
+                if self.props[i].name == name
+                    && self.computing.borrow().last() != Some(&(i, parent))
+                {
+                    return self.declared_value(i, parent);
+                }
+            }
+        }
+        self.base.default_value(node)
+    }
+
+    fn base_property_names(&self, node: NodeId) -> Vec<String> {
+        let mut names = self.base.property_names(node);
+        for i in self.declared_on(node) {
+            if !names.contains(&self.props[i].name) {
+                names.push(self.props[i].name.clone());
+            }
+        }
+        names
+    }
+
+    /// Whether a step plan names a declared property: then the
+    /// engine computes, the source knowing nothing of it.
+    fn plan_names_declared(&self, plan: &quarb::StepPlan<'_>) -> bool {
+        if self.props.is_empty() {
+            return false;
+        }
+        let mut names: Vec<&str> = plan
+            .conjuncts
+            .iter()
+            .map(|c| match c {
+                quarb::Conjunct::Equals(n, _) | quarb::Conjunct::Compare(n, _, _) => *n,
+            })
+            .collect();
+        if let Some((n, _)) = plan.order {
+            names.push(n);
+        }
+        names
+            .iter()
+            .any(|n| self.props.iter().any(|d| d.name == *n))
+    }
+
+    /// A declared typed value spelled as a cell's text, for the
+    /// one-pass typed build: what reads back as the value.
+    fn cell_text(v: Option<Value>) -> String {
+        match v {
+            None | Some(Value::Null) => String::new(),
+            Some(Value::Str(s)) => s,
+            Some(other) => other.to_string(),
+        }
+    }
+
+    /// The declared properties checked at load (spec: Model Files,
+    /// the property statement): each unit known; on the first node
+    /// of the scope whose expression is not null, the trait applied —
+    /// a quantity of another dimension, a non-number, a value that
+    /// does not cast, several values and a cycle refuse by name.
+    pub fn check_properties(&self) -> Result<(), String> {
+        if self.props.is_empty() {
+            return Ok(());
+        }
+        let defs = self.seeded_defs();
+        for (i, d) in self.props.iter().enumerate() {
+            if let Some(PropertyTyping::Unit(u)) = &d.typing
+                && quarb::quantity::parse_unit_text_with(&format!("1 {u}"), &|e| self.unit_scale(e))
+                    .is_none()
+            {
+                return Err(format!(
+                    "{}: '{u}' is no unit; a unit statement declares one ('unit {u} = …;')",
+                    d.head
+                ));
+            }
+            let _ = quarb::take_refusal_diagnostic();
+            let query = format!(
+                "{}[({}) != null][1]",
+                d.scope.text(),
+                self.model.properties[i].expr
+            );
+            let first = match quarb::run_with_defs(&query, &defs, self) {
+                Ok(QueryResult::Nodes(ns)) => ns.into_iter().next(),
+                Ok(_) => None,
+                Err(e) => return Err(e.to_string()),
+            };
+            let Some(node) = first else { continue };
+            let _ = self.base_property(node, &d.name);
+            if let Some(diag) = quarb::take_refusal_diagnostic() {
+                return Err(diag.message);
+            }
+        }
+        Ok(())
     }
 
     /// Resolve every unit declaration into one table, in order:
@@ -490,6 +806,7 @@ impl<A: AstAdapter> ModelAdapter<A> {
         self.check_declared_traits()?;
         self.check_declaration_order()?;
         self.check_weights()?;
+        self.check_properties()?;
         self.check_ref_targets()?;
         self.check_label_properties()?;
         self.check_trees()
@@ -1734,7 +2051,7 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
     }
     fn property_names(&self, node: NodeId) -> Vec<String> {
         if self.decode(node).is_none() {
-            return self.base.property_names(node);
+            return self.base_property_names(node);
         }
         let mut ps: Vec<String> = self.properties(node).into_iter().map(|(k, _)| k).collect();
         for c in self.children(node) {
@@ -1811,6 +2128,9 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
         );
     }
     fn index_lookup(&self, scope: &str, property: &str, value: &Value) -> Option<Vec<NodeId>> {
+        if self.props.iter().any(|d| d.name == property) {
+            return None;
+        }
         let (_, ix) = self.value_index(scope, property)?;
         let key = index_key(value)?;
         Some(ix.by_value.get(&key).cloned().unwrap_or_default())
@@ -1873,7 +2193,7 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
         if node.0 & MODEL_TAG != 0 {
             Vec::new()
         } else {
-            self.base.properties(node)
+            self.base_properties(node)
         }
     }
 
@@ -1978,11 +2298,11 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
             // named properties: answering any name with the value
             // would let `::cookie` on an ip node return the ip.
             Some((_, v)) if v > 0 => match self.aliased(node) {
-                Some(base) => self.base.property(base, name),
+                Some(base) => self.base_property(base, name),
                 None => None,
             },
             Some(_) => None,
-            None => self.base.property(node, name),
+            None => self.base_property(node, name),
         }
     }
 
@@ -2004,32 +2324,75 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
     }
 
     fn row_columns(&self, node: NodeId) -> Option<Vec<String>> {
-        match self.decode(node) {
-            Some((_, v)) if v > 0 => self.aliased(node).and_then(|b| self.base.row_columns(b)),
-            Some(_) => None,
-            None => self.base.row_columns(node),
+        let base = match self.decode(node) {
+            Some((_, v)) if v > 0 => self.aliased(node)?,
+            Some(_) => return None,
+            None => node,
+        };
+        let mut cols = self.base.row_columns(base)?;
+        // a declared property is a column of the rows' table: a new
+        // name appended, a name the rows carry kept in its place
+        for i in self.declared_on(base) {
+            if !cols.contains(&self.props[i].name) {
+                cols.push(self.props[i].name.clone());
+            }
         }
+        Some(cols)
     }
 
     fn row_text(&self, node: NodeId, f: &mut dyn FnMut(&[&str])) -> bool {
-        match self.decode(node) {
+        let base = match self.decode(node) {
             Some((_, v)) if v > 0 => match self.aliased(node) {
-                Some(b) => self.base.row_text(b, f),
-                None => false,
+                Some(b) => b,
+                None => return false,
             },
-            Some(_) => false,
-            None => self.base.row_text(node, f),
+            Some(_) => return false,
+            None => node,
+        };
+        let declared = self.declared_on(base);
+        if declared.is_empty() {
+            return self.base.row_text(base, f);
         }
+        // the one-pass typed build keeps running when every declared
+        // property here is typed (its cell spelled in its type reads
+        // back exactly); an untyped one steps the row down to the
+        // record path
+        if declared.iter().any(|&i| self.props[i].typing.is_none()) {
+            return false;
+        }
+        let Some(cols) = self.base.row_columns(base) else {
+            return false;
+        };
+        let cells: Vec<(Option<usize>, String)> = declared
+            .iter()
+            .map(|&i| {
+                let name = &self.props[i].name;
+                (
+                    cols.iter().position(|c| c == name),
+                    Self::cell_text(self.declared_value(i, base)),
+                )
+            })
+            .collect();
+        self.base.row_text(base, &mut |row| {
+            let mut out: Vec<&str> = row.to_vec();
+            for (at, text) in &cells {
+                match at {
+                    Some(j) if *j < out.len() => out[*j] = text.as_str(),
+                    _ => out.push(text.as_str()),
+                }
+            }
+            f(&out)
+        })
     }
 
     fn default_value(&self, node: NodeId) -> Option<Value> {
         match self.decode(node) {
             Some((_, v)) if v > 0 => match self.aliased(node) {
-                Some(base) => self.base.default_value(base),
+                Some(base) => self.base_default_value(base),
                 None => self.elevated(node),
             },
             Some(_) => None,
-            None => self.base.default_value(node),
+            None => self.base_default_value(node),
         }
     }
 
@@ -2380,7 +2743,10 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
     /// (its `count(*)`, its listing's length); a model's node counts
     /// by the walk.
     fn count(&self, from: NodeId, plan: &quarb::StepPlan<'_>) -> Option<usize> {
-        if self.decode(from).is_some() || from == self.base.root() || !self.model.aliases.is_empty()
+        if self.decode(from).is_some()
+            || from == self.base.root()
+            || !self.model.aliases.is_empty()
+            || self.plan_names_declared(plan)
         {
             return None;
         }
@@ -2388,8 +2754,10 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
     }
 
     fn select_plan(&self, scope: &[&str], plan: &quarb::StepPlan<'_>) -> Option<Vec<bool>> {
-        // A derived container or an alias is the model's to walk.
+        // A derived container or an alias is the model's to walk; so
+        // is a predicate on a declared property.
         if !self.model.aliases.is_empty()
+            || self.plan_names_declared(plan)
             || scope
                 .first()
                 .is_some_and(|c| self.container_by_name(c).is_some())
@@ -2401,6 +2769,7 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
 
     fn estimate(&self, scope: &[&str], plan: &quarb::StepPlan<'_>) -> Option<quarb::Estimate> {
         if !self.model.aliases.is_empty()
+            || self.plan_names_declared(plan)
             || scope
                 .first()
                 .is_some_and(|c| self.container_by_name(c).is_some())
@@ -2411,6 +2780,9 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
     }
 
     fn select(&self, from: NodeId, plan: &quarb::StepPlan<'_>) -> Option<quarb::Selection> {
+        if self.plan_names_declared(plan) {
+            return None;
+        }
         // A child hop sees the derived containers (`children_named`
         // does); a descendant search is the base's, except from the
         // root, from a derived node, or under aliases, where the
@@ -3062,6 +3434,14 @@ fn scope_container(scope: &str) -> &str {
 /// A base node's own name cannot serve — a relational row is named
 /// by its primary key, which is an identity, not a role — so the
 /// path that selected it supplies the word instead.
+/// A value as a refusal shows it: text quoted, the rest displayed.
+fn held(v: &Value) -> String {
+    match v {
+        Value::Str(s) => format!("\"{s}\""),
+        other => other.display_form(),
+    }
+}
+
 fn scope_role(scope: &str) -> String {
     scope
         .split('/')

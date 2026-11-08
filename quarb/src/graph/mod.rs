@@ -1,6 +1,7 @@
 //! The graph layer: arbors, anchors, steps, adapters, correlation,
 //! reflection and the trace. Everything that knows a node.
 pub mod adapter;
+pub mod autounits;
 pub mod complete;
 pub mod conformance;
 pub(crate) mod correlate;

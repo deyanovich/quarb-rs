@@ -2785,5 +2785,17 @@ mod forwarding {
             s.metadata(n(1), "encoding"),
             Some(Value::Str("utf-8".into()))
         );
+
+        // the unit suffix convention: the probe's names carry no
+        // suffix, so every reading forwards unchanged, except the
+        // descendant searches by name, which are the engine's walk
+        // under a renaming layer
+        let u = crate::graph::autounits::AutoUnits::new(
+            Probe,
+            crate::graph::autounits::Suffixes::Known,
+            "probe",
+        );
+        assert_forwards(&u, &["descendants_named", "descendants_where"]);
+        assert_eq!(u.descendants_named(n(2), "x"), None);
     }
 }

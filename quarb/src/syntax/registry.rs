@@ -637,6 +637,10 @@ pub const SPECS: &[FnSpec] = &[
         "autocast",
         "the columns typed again from the cells present, by the rule of the build: every undeclared column, or the columns named (autocast(:a; :b)); a declared column stays as declared",
     ),
+    scalar(
+        "clean",
+        "a scraped table's text columns cleaned into values: cells trimmed, footnote marks dropped, the null words null (--null=list; the dashes, n/a, N/A, NA by default), a percent a ratio (12 % → 0.12), a scale suffix applied (330.5 k → 330500; M, G, bn), numbers read under --locale=\"tag\"; every text column, or the columns named (clean(:a; :b)); a text or a list of texts likewise",
+    ),
     reducing("avg", "mean, alias"),
     reducing("median", "the median"),
     reducing("percentile", "the Nth percentile"),

@@ -93,7 +93,7 @@ pub struct SourceCtx {
     /// The `?format=NOTATION` of a plain mount: every leaf beneath
     /// reads as it (spec: Grafting).
     format: std::cell::RefCell<Option<String>>,
-    csv: std::cell::Cell<quarb_csv::CsvOptions>,
+    csv: std::cell::RefCell<quarb_csv::CsvOptions>,
     references: std::cell::RefCell<Option<String>>,
     record: std::cell::RefCell<Option<(String, usize)>>,
 }
@@ -119,11 +119,11 @@ impl SourceCtx {
 
     /// The delimited-file options in force.
     pub fn csv(&self) -> quarb_csv::CsvOptions {
-        self.csv.get()
+        self.csv.borrow().clone()
     }
 
     fn set_csv(&self, next: quarb_csv::CsvOptions) {
-        self.csv.set(next);
+        *self.csv.borrow_mut() = next;
     }
 
     fn references(&self) -> Option<String> {
@@ -1390,9 +1390,12 @@ pub fn take_encoding_option(p: &Path, ctx: &SourceCtx) -> anyhow::Result<PathBuf
             }
             Some(("delimiter", label)) => set_csv_option(|c| c.with_delimiter_label(label), ctx)?,
             Some(("decimal", label)) => set_csv_option(|c| c.with_decimal_label(label), ctx)?,
+            // `?null=NA,n/a`: the cell texts a CSV reads as null
+            // (ruling 2026-11-08)
+            Some(("null", label)) => set_csv_option(|c| c.with_null_label(label), ctx)?,
             _ => anyhow::bail!(
                 "unknown option {pair:?} on {path} — a file or folder takes encoding=, \
-                 delimiter=, decimal="
+                 delimiter=, decimal=, null="
             ),
         }
     }
@@ -2073,10 +2076,33 @@ pub fn open_mount(p: &Path, cli: &OpenOpts) -> anyhow::Result<Mounted> {
     // root option): the source opens whole, then the subtree at
     // PATH is the tree
     let (p, root) = take_root_option(p);
+    // `?autounits` / `?autounit=_km,_g` come off next (spec: Mounts,
+    // the autounits option; ruling 2026-11-08): the source opens as
+    // it is, and the convention wraps whatever opened
+    let (p, suffixes) = take_units_option(&p)?;
     let ctx = &SourceCtx::default();
     let p = take_encoding_option(&p, ctx)?;
     let _ = ctx.take_record();
     let m = open_mount_inner(&p, cli, ctx)?;
+    let m = match suffixes {
+        Some(suffixes) => {
+            let family = m.family;
+            let inner_render = m.render;
+            let wrapped = Rc::new(quarb::autounits::AutoUnits::new(
+                m.adapter,
+                suffixes,
+                &target_text(&p),
+            ));
+            let w = wrapped.clone();
+            // the locator spells a renamed member by its new name
+            let render: Box<dyn Fn(NodeId) -> String> =
+                Box::new(move |n| w.locate(n, &*inner_render));
+            let mut m = Mounted::of(wrapped, render);
+            m.family = family;
+            m
+        }
+        None => m,
+    };
     ctx.clear_encoding();
     let m = match take_source_record(ctx) {
         Some((encoding, replaced)) => Mounted {
@@ -2109,6 +2135,42 @@ pub fn open_mount(p: &Path, cli: &OpenOpts) -> anyhow::Result<Mounted> {
         render,
         family: m.family,
     })
+}
+
+/// The unit-suffix options off a target's query — `autounits`, the
+/// flag, and `autounit=_km,_g`, the list, merged — and the target
+/// without them; a path that exists on disk, or one with no query,
+/// is taken as is. A malformed option refuses here, naming the target.
+fn take_units_option(p: &Path) -> anyhow::Result<(PathBuf, Option<quarb::autounits::Suffixes>)> {
+    let Some(s) = p.to_str() else {
+        return Ok((p.to_path_buf(), None));
+    };
+    if p.exists() || !s.contains('?') {
+        return Ok((p.to_path_buf(), None));
+    }
+    let (path, query) = s.rsplit_once('?').unwrap();
+    let (suffixes, rest) =
+        quarb::autounits::take_options(query.split('&').filter(|x| !x.is_empty()))
+            .map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
+    if suffixes.is_none() {
+        return Ok((p.to_path_buf(), None));
+    }
+    let target = if rest.is_empty() {
+        path.to_string()
+    } else {
+        format!("{path}?{}", rest.join("&"))
+    };
+    Ok((PathBuf::from(target), suffixes))
+}
+
+/// The target as written, without its options: what a message
+/// names a mount by.
+fn target_text(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    match (p.exists(), s.rsplit_once('?')) {
+        (false, Some((path, _))) => path.to_string(),
+        _ => s.into_owned(),
+    }
 }
 
 /// The `root=` option off a target's query, and the target without

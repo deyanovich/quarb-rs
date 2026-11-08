@@ -771,12 +771,35 @@ pub(crate) fn apply_command_in<H: Host>(
                         );
                         Value::Null
                     }
-                    None => match host.node_table(&c.ext) {
-                        Ok(t) => Value::table(t),
+                    // `| #` on a tabula node: read under the call's
+                    // --null / --locale, then the table options (-i,
+                    // -c, --header, -a) applied as on a table (the
+                    // document-tables round, 2026-11-08); --width has
+                    // no meaning on a node
+                    None => match table_read_options(call) {
                         Err(why) => {
                             record_refusal(format!("#: {why}"));
                             Value::Null
                         }
+                        Ok(opts) => match host.node_table(&c.ext, &opts) {
+                            Ok(t) if !call.args.iter().any(|a| {
+                                matches!(a, Arg::Opt { name, .. }
+                                    if !matches!(name.as_str(), "--null" | "--locale"))
+                            }) =>
+                            {
+                                Value::table(t)
+                            }
+                            Ok(t) => stdlib::apply_scalar(call, Value::table(t), &|e| {
+                                host.scale_of(e)
+                            })
+                            .into_iter()
+                            .next()
+                            .unwrap_or(Value::Null),
+                            Err(why) => {
+                                record_refusal(format!("#: {why}"));
+                                Value::Null
+                            }
+                        },
                     },
                 };
                 c.prov = effective_prov(host, &c);
@@ -1574,6 +1597,41 @@ pub(crate) fn agg_as_func_command<H: Host>(
     let stripped = call.without_of();
     let of = call.of_expr();
     let call = if of.is_some() { &stripped } else { call };
+    // `| #` on one document table (a tabula node, or its thead /
+    // tbody / tfoot): the node read as a table under the call's
+    // --null / --locale, the table options then applied as on a
+    // table (the document-tables round, 2026-11-08). Several tables
+    // in the stream, or nodes that are no table, take the record
+    // path below.
+    if call.name == "#"
+        && caps.len() == 1
+        && caps[0].topic.is_none()
+        && host.is_table_node(&caps[0].ext)
+    {
+        let mut c = caps.into_iter().next().expect("one");
+        let read = table_read_options(call).and_then(|opts| host.node_table(&c.ext, &opts));
+        // the table options (-i, -c, --header, -a) apply as on a
+        // table; a bare `| #` keeps the table as read, its row-header
+        // index with it
+        let has_table_options = call
+            .args
+            .iter()
+            .any(|a| matches!(a, Arg::Opt { name, .. } if !matches!(name.as_str(), "--null" | "--locale")));
+        c.topic = Some(match read {
+            Ok(t) if !has_table_options => Value::table(t),
+            Ok(t) => stdlib::apply_scalar(call, Value::table(t), &|e| host.scale_of(e))
+                .into_iter()
+                .next()
+                .unwrap_or(Value::Null),
+            Err(why) => {
+                record_refusal(format!("#: {why}"));
+                Value::Null
+            }
+        });
+        c.prov = c.prov.flat();
+        c.members = Vec::new();
+        return vec![c];
+    }
     caps.into_iter()
         .map(|mut c| {
             // `| mean(--by=:Sex)` — the grouped reduction (ruling
@@ -3322,8 +3380,9 @@ pub(crate) fn func_command<H: Host>(
                     || matches!(a, Arg::Opt { value: Some(v), .. } if !matches!(v, Operand::Lit(_)))
             };
             let resolved;
-            // (`autocast` names its columns: the names stay names)
-            let call = if !matches!(call.name.as_str(), "autocast" | "melt")
+            // (`autocast` and `clean` name their columns: the names
+            // stay names)
+            let call = if !matches!(call.name.as_str(), "autocast" | "melt" | "clean")
                 && call.args.iter().any(unresolved)
             {
                 resolved = FnCall {
@@ -4628,4 +4687,70 @@ pub(crate) fn session_settings(call: &FnCall) -> Vec<(String, Value)> {
             _ => None,
         })
         .collect()
+}
+
+/// The reading options of `| #` on a node: `--null=@("—"; "n/a")`
+/// (a list or one text) replaces the document table's default
+/// vocabulary, `--locale=de` names the number convention, `-i`
+/// given (even empty) turns the row-header index rule off so the
+/// option decides; `--width` is refused, a node having its rows.
+fn table_read_options(
+    call: &crate::syntax::ast::FnCall,
+) -> Result<crate::graph::tabula::ReadOptions, String> {
+    use crate::syntax::ast::{Arg, Operand};
+    let mut opts = crate::graph::tabula::ReadOptions::default();
+    for arg in &call.args {
+        // the width rides as the call's one literal
+        if let Arg::Lit(Value::Int(_)) = arg {
+            return Err(
+                "#(--width=n) lays a stream of values in rows; a table node has its rows"
+                    .to_string(),
+            );
+        }
+        let Arg::Opt { name, value } = arg else {
+            continue;
+        };
+        match name.as_str() {
+            "--width" | "-w" => {
+                return Err(
+                    "#(--width=n) lays a stream of values in rows; a table node has its rows"
+                        .to_string(),
+                );
+            }
+            "--null" => {
+                opts.nulls = match value {
+                    Some(Operand::Lit(Value::List(items))) => {
+                        items.iter().map(|v| v.to_string()).collect()
+                    }
+                    Some(Operand::Lit(Value::Str(s))) => vec![s.clone()],
+                    Some(Operand::Lit(Value::Null)) | None => Vec::new(),
+                    Some(other) => {
+                        return Err(format!(
+                            "#(--null=…) takes the cell texts read as null, a list: \
+                             '#(--null=@(\"—\"; \"n/a\"))', not {}",
+                            crate::syntax::unparse::operand(other)
+                        ));
+                    }
+                };
+            }
+            "--locale" => {
+                let tag = match value {
+                    Some(Operand::Lit(Value::Str(s))) => s.clone(),
+                    Some(other) => crate::syntax::unparse::operand(other),
+                    None => String::new(),
+                };
+                opts.locale = Some(
+                    crate::value::number::locale_convention(&tag).ok_or_else(|| {
+                        format!(
+                            "#(--locale={tag}): no number conventions for that locale (carried: {})",
+                            crate::value::locale::SHIPPED.join(", ")
+                        )
+                    })?,
+                );
+            }
+            "--index" | "-i" => opts.th_index = false,
+            _ => {}
+        }
+    }
+    Ok(opts)
 }

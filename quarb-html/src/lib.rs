@@ -253,6 +253,13 @@ impl HtmlAdapter {
                     Piece::Text(t) => out.push_str(t),
                     Piece::Child(k) => {
                         let c = n.children[*k].0 as usize;
+                        // a line break is white space in the text: `a<br>b`
+                        // reads "a b", never "ab" (the document-tables round,
+                        // 2026-11-08)
+                        if self.nodes[c].tag.is_some_and(|t| self.names.get(t) == "br") {
+                            out.push(' ');
+                            continue;
+                        }
                         match self.nodes[c].text.get() {
                             Some(t) => out.push_str(t),
                             None => stack.push((c, 0, out.len())),

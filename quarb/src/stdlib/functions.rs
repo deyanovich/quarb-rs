@@ -677,7 +677,7 @@ fn apply_scalar_inner(
         "types" => return vec![refusing(call, Err(TYPES_RETIRED.into()))],
         "@" | "rows" | "%" | "columns" | "#" | "transpose" | "header" | "dim" | "[]" | "cell"
         | "row-to-header" | "header-to-row" | "flatten" | "keys" | "values" | "stack"
-        | "unstack" | "autoindex" | "autocast" => {
+        | "unstack" | "autoindex" | "autocast" | "clean" => {
             return vec![refusing(
                 call,
                 match call.name.as_str() {
@@ -686,6 +686,9 @@ fn apply_scalar_inner(
                     // rebuild did implicitly before a selection kept
                     // the columns' types
                     "autocast" => autocast(call, topic),
+                    // a scraped table's text columns cleaned into values
+                    // (the document-tables round, 2026-11-08)
+                    "clean" => clean(call, topic),
                     // the implicit index made explicit (ruling
                     // 2026-11-05)
                     "autoindex" => match topic {
@@ -2613,12 +2616,13 @@ fn round_to(n: f64, d: i64) -> f64 {
 /// The table reshapers `stack` and `unstack` and `map` itself take
 /// `|` alone (the inventory's kind `scalar` since its 0.43.0 rows) and
 /// read the structure whole.
-const BROADCAST_EXEMPT: [&str; 18] = [
+const BROADCAST_EXEMPT: [&str; 19] = [
     "map",
     "stack",
     "unstack",
     "autoindex",
     "autocast",
+    "clean",
     "record",
     "rec",
     "xml",
@@ -3330,7 +3334,22 @@ fn durational_fold(input: &[Value]) -> DurFold {
     if !input.iter().any(Value::is_duration) {
         return DurFold::Absent;
     }
-    match input.iter().map(Value::durational_reading).collect() {
+    // a null, a bool or text with no reading is missing, as it is to
+    // the numeric fold (ruling 2026-11-08); a number, or numeric
+    // text, is seconds — the durational coercion
+    let present = input.iter().filter_map(|v| match v {
+        Value::Null | Value::Bool(_) => None,
+        Value::Str(s) => match crate::temporal::parse_span(s) {
+            Some((secs, nanos)) => Some(Some((secs, nanos))),
+            None => s
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .map(|n| Value::Float(n).durational_reading()),
+        },
+        other => Some(other.durational_reading()),
+    });
+    match present.collect() {
         Some(spans) => DurFold::Spans(spans),
         None => DurFold::Unsound,
     }
@@ -3356,7 +3375,10 @@ enum QuantFold {
         unit: Option<(f64, String)>,
         mags: Vec<f64>,
     },
-    /// Mixed dimensions, a bare number, or unreadable text: refuse.
+    /// Mixed dimensions, or a bare number off the time dimension:
+    /// refuse. A null, a bool or unreadable text is missing, as it
+    /// is to the numeric fold (ruling 2026-11-08: a column of
+    /// quantities with "NA" cells still has a mean).
     Unsound,
 }
 
@@ -3386,14 +3408,23 @@ fn quantital_fold(input: &[Value], scale: Scale) -> QuantFold {
                 base,
                 written,
             } => (*value, base.clone(), written.clone()),
-            // unit text, else ISO-8601 or span text (a span in seconds)
+            // unit text, else span text (a span in seconds), else
+            // numeric text as a bare number; any other text is
+            // missing, as a null and a bool are
             Value::Str(s) => match crate::value::quantity::parse_unit_text_with(s, scale) {
                 Some((bv, b, wmag, wunit)) => (bv, b, Some((wmag, wunit))),
                 None => match crate::temporal::parse_span(s) {
                     Some((secs, nanos)) => (secs as f64 + nanos as f64 / 1e9, "s".into(), None),
-                    None => return QuantFold::Unsound,
+                    None => match s.trim().parse::<f64>() {
+                        Ok(n) => {
+                            numbers.push(n);
+                            continue;
+                        }
+                        Err(_) => continue,
+                    },
                 },
             },
+            Value::Null | Value::Bool(_) => continue,
             // a number is seconds in a fold of time (the durational
             // coercion), refused on any other dimension
             Value::Int(_) | Value::Float(_) => match v.numeric() {
@@ -3699,6 +3730,213 @@ fn autocast(call: &FnCall, topic: Value) -> Result<Value, String> {
             kind_of(&other)
         )),
     }
+}
+
+/// `clean` (the document-tables round, rulings 2026-11-08): a
+/// scraped table's text columns cleaned into values, in the order a
+/// hand would — the cell trimmed, a footnote mark dropped, a null
+/// word null, a percent a ratio, a scale suffix applied, the number
+/// read under the locale — every text column or the columns named
+/// bare (`clean(:a; :b)`), the columns retyped; a text or a list of
+/// texts cleaned the same way.
+fn clean(call: &FnCall, topic: Value) -> Result<Value, String> {
+    use crate::syntax::ast::Operand;
+    let nulls: Vec<String> = call
+        .args
+        .iter()
+        .find_map(|a| match a {
+            Arg::Opt {
+                name,
+                value: Some(Operand::Lit(Value::List(l))),
+            } if name == "--null" => Some(l.iter().map(|v| v.to_string()).collect()),
+            Arg::Opt {
+                name,
+                value: Some(Operand::Lit(Value::Str(w))),
+            } if name == "--null" => Some(vec![w.clone()]),
+            // `--null=@()` (none) and a list the parser kept as items
+            Arg::Opt {
+                name,
+                value: Some(Operand::List(items)),
+            } if name == "--null" => Some(
+                items
+                    .iter()
+                    .filter_map(|i| match i {
+                        Operand::Lit(v) => Some(v.to_string()),
+                        _ => None,
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            crate::graph::tabula::DEFAULT_NULLS
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        });
+    let locale: crate::value::number::Decimal = match call.args.iter().find_map(|a| match a {
+        Arg::Opt {
+            name,
+            value: Some(Operand::Lit(Value::Str(s))),
+        } if name == "--locale" => Some(s.clone()),
+        _ => None,
+    }) {
+        Some(tag) => crate::value::number::locale_convention(&tag).ok_or_else(|| {
+            format!(
+                "clean(--locale={tag}): no number conventions for that locale (carried: {})",
+                crate::value::locale::SHIPPED.join(", ")
+            )
+        })?,
+        None => crate::value::number::Decimal::Point,
+    };
+    let cell = |v: &Value| -> Value {
+        match v {
+            Value::Str(s) => clean_text(s, &nulls, locale),
+            other => other.clone(),
+        }
+    };
+    match topic {
+        Value::Table(t) => {
+            let names: Vec<String> = (0..t.width()).map(|j| t.column_name(j)).collect();
+            let mut only: Vec<usize> = Vec::new();
+            for a in &call.args {
+                let name: &str = match a {
+                    Arg::Opt { .. } => continue,
+                    Arg::Lit(Value::Projection {
+                        key, typing: None, ..
+                    }) => key.as_str(),
+                    // `:col` or `:"2023"`: the field of the topic, quoted
+                    // or not
+                    Arg::Expr(Operand::Field { base, name, .. })
+                        if matches!(**base, Operand::Topic) =>
+                    {
+                        name.as_str()
+                    }
+                    _ => {
+                        return Err(
+                            "clean names its columns bare: clean(:a; :b), or alone for every text column"
+                                .into(),
+                        );
+                    }
+                };
+                let Some(j) = names.iter().position(|n| n == name) else {
+                    return Err(format!(
+                        "clean names column '{name}', and the table has no such column (its columns: {})",
+                        names.join(", ")
+                    ));
+                };
+                only.push(j);
+            }
+            let types = t.types();
+            let chosen: Vec<bool> = (0..t.width())
+                .map(|j| {
+                    if only.is_empty() {
+                        types[j] == crate::value::ColumnType::Text
+                    } else {
+                        only.contains(&j)
+                    }
+                })
+                .collect();
+            let rows: Vec<Vec<Value>> = t
+                .rows()
+                .map(|r| {
+                    r.cells()
+                        .into_iter()
+                        .enumerate()
+                        .map(|(j, c)| if chosen[j] { cell(&c) } else { c })
+                        .collect()
+                })
+                .collect();
+            // the cleaned columns retype from their cells; a declared
+            // column keeps its declaration
+            let declared: Vec<Option<crate::value::ColumnType>> = (0..t.width())
+                .map(|j| if chosen[j] { None } else { t.declaration(j) })
+                .collect();
+            let header: Option<Vec<String>> = t.header.clone();
+            let cleaned = crate::Table::typed(header, rows, declared)?
+                .with_index(t.index)
+                .with_name(t.name.clone());
+            Ok(Value::table(cleaned))
+        }
+        Value::List(items) => Ok(Value::list(items.iter().map(cell).collect())),
+        Value::Str(s) => Ok(clean_text(&s, &nulls, locale)),
+        other => Ok(other),
+    }
+}
+
+/// One text cell cleaned: trimmed; a footnote mark at its end
+/// (`[1]`, `*`, `†`) dropped; a null word null; `12 %` the ratio
+/// 0.12; `330.5 k` scaled (k, M, G/bn, mn); a number under the
+/// locale; else the text as trimmed.
+pub(crate) fn clean_text(
+    text: &str,
+    nulls: &[String],
+    locale: crate::value::number::Decimal,
+) -> Value {
+    use crate::value::number::read;
+    let mut t = text.trim().to_string();
+    // footnote marks: `[n]`, `[a]`, trailing daggers and stars
+    loop {
+        let before = t.len();
+        let s = t.trim_end();
+        if let Some(open) = s.rfind('[')
+            && s.ends_with(']')
+            && {
+                let inner = &s[open + 1..s.len() - 1];
+                !inner.is_empty()
+                    && (inner.chars().all(|c| c.is_ascii_digit())
+                        || (inner.chars().count() == 1
+                            && inner.chars().all(|c| c.is_ascii_lowercase())))
+            }
+        {
+            t = s[..open].trim_end().to_string();
+        } else {
+            t = s
+                .trim_end_matches(['*', '†', '‡', '§', '¶'])
+                .trim_end()
+                .to_string();
+        }
+        if t.len() == before {
+            break;
+        }
+    }
+    if t.is_empty() || nulls.iter().any(|n| *n == t) {
+        return Value::Null;
+    }
+    if let Some(v) = read(&t, locale) {
+        return v;
+    }
+    // a percent: the ratio
+    if let Some(p) = t.strip_suffix('%')
+        && let Some(n) = read(p.trim(), locale).and_then(|v| v.numeric())
+    {
+        return Value::Float(n / 100.0);
+    }
+    // a scale suffix
+    let scaled = [
+        ("bn", 1e9),
+        ("mn", 1e6),
+        ("G", 1e9),
+        ("M", 1e6),
+        ("k", 1e3),
+        ("K", 1e3),
+    ]
+    .iter()
+    .find_map(|(suffix, factor)| {
+        t.strip_suffix(suffix)
+            .map(str::trim_end)
+            .and_then(|num| read(num, locale))
+            .and_then(|v| v.numeric())
+            .map(|n| n * factor)
+    });
+    if let Some(n) = scaled {
+        return if n.fract() == 0.0 && n.abs() < 9.0e15 {
+            Value::Int(n as i64)
+        } else {
+            Value::Float(n)
+        };
+    }
+    Value::Str(t)
 }
 
 /// `-a|--autoindex` on the table constructor (ruling 2026-11-06):
@@ -5871,6 +6109,8 @@ pub(crate) fn table_command_shaped(
     let index: Option<Vec<(String, Option<crate::value::ColumnType>)>> =
         call.args.iter().find_map(|a| match a {
             Arg::Opt { name, value } if name == "--index" => Some(match value {
+                // `-i=null`: no index, the role dropped
+                Some(crate::syntax::ast::Operand::Lit(Value::Null)) => Vec::new(),
                 Some(crate::syntax::ast::Operand::Lit(v)) => index_levels(v),
                 Some(other) => vec![(crate::syntax::unparse::operand(other), None)],
                 None => Vec::new(),
@@ -5916,9 +6156,65 @@ pub(crate) fn table_command_shaped(
                 .into(),
         );
     }
+    // `--null=@(…)` and `--locale="de"` on a table: a text cell that
+    // is a null word is null, one that reads as a number under the
+    // locale is that number; the columns retype (the document-tables
+    // round, 2026-11-08; a document table applies both as it is read,
+    // so a second pass here changes nothing)
+    let nulls: Vec<String> = call
+        .args
+        .iter()
+        .find_map(|a| match a {
+            Arg::Opt {
+                name,
+                value: Some(crate::syntax::ast::Operand::Lit(Value::List(l))),
+            } if name == "--null" => Some(l.iter().map(|v| v.to_string()).collect()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let locale: Option<crate::value::number::Decimal> = match call.args.iter().find_map(|a| match a
+    {
+        Arg::Opt {
+            name,
+            value: Some(crate::syntax::ast::Operand::Lit(Value::Str(s))),
+        } if name == "--locale" => Some(s.clone()),
+        _ => None,
+    }) {
+        Some(tag) => Some(
+            crate::value::number::locale_convention(&tag).ok_or_else(|| {
+                format!(
+                    "#(--locale={tag}): no number conventions for that locale (carried: {})",
+                    crate::value::locale::SHIPPED.join(", ")
+                )
+            })?,
+        ),
+        None => None,
+    };
     let finish = |v: Value| -> Result<Value, String> {
         let Value::Table(t) = v else { return Ok(v) };
+        let t = if nulls.is_empty() && locale.is_none() {
+            t
+        } else {
+            let rows: Vec<Vec<Value>> = t
+                .rows()
+                .map(|r| {
+                    r.cells()
+                        .into_iter()
+                        .map(|c| match &c {
+                            Value::Str(s) if nulls.iter().any(|n| n == s) => Value::Null,
+                            Value::Str(s) => match locale {
+                                Some(d) => crate::value::number::read(s, d).unwrap_or(c),
+                                None => c,
+                            },
+                            _ => c,
+                        })
+                        .collect()
+                })
+                .collect();
+            std::sync::Arc::new(t.rebuild(rows)?)
+        };
         let t = match &index {
+            Some(levels) if levels.is_empty() => t.as_ref().clone().drop_index(),
             Some(levels) => t.indexed_by_levels(levels)?,
             None if t.index > 0 => t.as_ref().clone().drop_index(),
             None => t.as_ref().clone(),
@@ -8324,28 +8620,28 @@ mod tests {
             ),
             vec![d(240)]
         );
-        // Any unreadable element refuses the whole fold — a silent
-        // partial total would lie.
+        // An unreadable element is missing to the fold, as it is to
+        // the numeric one (ruling 2026-11-08): the durations total.
         assert_eq!(
             agg("sum", vec![d(60), Value::Str("soon".into())]),
-            vec![Value::Null]
-        );
-        // Including a *numeric* span-less element: the refusal must
-        // not fall through to a numeric total that skips the
-        // durations (sum over [PT1M, "5"] is not 5).
-        assert_eq!(
-            agg("sum", vec![d(60), Value::Str("5".into())]),
-            vec![Value::Null]
+            vec![d(60)]
         );
         assert_eq!(
-            agg("mean", vec![d(60), Value::Str("5".into())]),
-            vec![Value::Null]
+            agg("sum", vec![d(60), Value::Null, Value::Str("NA".into())]),
+            vec![d(60)]
+        );
+        // Numeric text reads as a bare number does in a fold of time:
+        // seconds (sum over [PT1M, "5"] is PT1M5S, never 5).
+        assert_eq!(agg("sum", vec![d(60), Value::Str("5".into())]), vec![d(65)]);
+        assert_eq!(
+            agg("mean", vec![d(60), Value::Str("10".into())]),
+            vec![d(35)]
         );
         assert_eq!(
             agg("median", vec![d(60), Value::Str("5".into())]),
-            vec![Value::Null]
+            vec![Value::seconds(32, 500_000_000)]
         );
-        assert_eq!(
+        assert_ne!(
             agg("stddev", vec![d(60), Value::Str("5".into())]),
             vec![Value::Null]
         );
@@ -8434,7 +8730,9 @@ mod tests {
             agg("sum", vec![q(80_000_000.0, None), Value::Int(5)]),
             vec![Value::Null]
         );
-        // …and so do cross-dimension text and readingless text.
+        // …and so does cross-dimension text; readingless text, a null
+        // and a bool are missing to the fold, as to the numeric one
+        // (ruling 2026-11-08).
         assert_eq!(
             agg("sum", vec![q(80_000_000.0, None), Value::Str("5km".into())]),
             vec![Value::Null]
@@ -8442,9 +8740,14 @@ mod tests {
         assert_eq!(
             agg(
                 "sum",
-                vec![q(80_000_000.0, None), Value::Str("soon".into())]
+                vec![
+                    q(80_000_000.0, None),
+                    Value::Str("soon".into()),
+                    Value::Null,
+                    Value::Str("NA".into()),
+                ]
             ),
-            vec![Value::Null]
+            vec![q(80_000_000.0, None)]
         );
     }
 

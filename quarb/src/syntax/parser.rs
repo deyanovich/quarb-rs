@@ -36,6 +36,29 @@ use std::collections::HashMap;
 /// Parse a scope path on its own (`/orders/*`, `//a[::x]`) into the
 /// shape the arrow's argument carries, so a declaration naming a
 /// scope compares with a query's by canonical text.
+/// Parse `text` as one value expression — what stands right of `=`
+/// in a record field or a model's `property` statement: operands,
+/// arithmetic, `div`, a conditional, a quarq; the whole text, no
+/// pipeline (ruling 2026-11-08, the property statement).
+pub fn parse_value_expr(text: &str) -> Result<Operand> {
+    let toks = crate::syntax::lexer::lex(text)?;
+    if toks.is_empty() {
+        return Err(QuarbError::parse(format!(
+            "a value expression is empty: '{text}'"
+        )));
+    }
+    let expander = crate::graph::reflect::Reflector::new(None);
+    let mut p = Parser::new(&toks, Defs::default(), &expander);
+    let op = p.cond_expr()?;
+    if p.pos < toks.len() {
+        return Err(QuarbError::parse(format!(
+            "a value expression ends with its last operand, not a pipe or a second \
+             expression: '{text}'"
+        )));
+    }
+    Ok(op)
+}
+
 pub fn parse_scope_path(text: &str) -> Result<ScopePath> {
     let toks = crate::syntax::lexer::lex(text)?;
     let expander = crate::graph::reflect::Reflector::new(None);
@@ -5313,6 +5336,10 @@ impl Parser<'_> {
         let mut header_name: Option<String> = None;
         let mut autoindex = false;
         let mut casts: Vec<Operand> = Vec::new();
+        // `--null=@("—"; "n/a")` and `--locale="de"`: the reading options of a
+        // document table (the document-tables round, 2026-11-08)
+        let mut nulls: Option<Operand> = None;
+        let mut locale: Option<Operand> = None;
         for (name, value) in opts {
             match name.as_str() {
                 // `-c|--cast=:col<type>` (ruling 2026-11-06): the column
@@ -5420,6 +5447,10 @@ impl Parser<'_> {
                         continue;
                     }
                     match &op {
+                        // `-i=null`: no index — a document table's row
+                        // headers stay a column (the document-tables
+                        // round, 2026-11-08)
+                        Operand::Lit(Value::Null) => index = Some(op),
                         Operand::Lit(Value::Projection { .. }) | Operand::Lit(Value::List(_)) => {
                             index = Some(op)
                         }
@@ -5431,6 +5462,53 @@ impl Parser<'_> {
                         }
                         _ => index = Some(op),
                     }
+                }
+                // `--null=@("—"; "n/a")`: the cell texts read as null, a
+                // list of strings (or one string); `@()` names none
+                "--null" => {
+                    let items: Vec<Operand> = match value {
+                        Some(Operand::List(items)) => items,
+                        Some(Operand::Lit(Value::List(l))) => {
+                            l.iter().cloned().map(Operand::Lit).collect()
+                        }
+                        Some(one @ Operand::Lit(Value::Str(_))) => vec![one],
+                        _ => {
+                            return Err(QuarbError::parse(format!(
+                                "'#({name}=…)' takes the cell texts read as null, a list of \
+                                 strings: '#({name}=@(\"—\"; \"n/a\"))'"
+                            )));
+                        }
+                    };
+                    let mut words = Vec::with_capacity(items.len());
+                    for item in items {
+                        match item {
+                            Operand::Lit(Value::Str(w)) => words.push(Value::Str(w)),
+                            Operand::Lit(v @ (Value::Int(_) | Value::Float(_))) => {
+                                words.push(Value::Str(v.to_string()))
+                            }
+                            _ => {
+                                return Err(QuarbError::parse(format!(
+                                    "'#({name}=…)' takes strings: the cell texts read as null, \
+                                     as written in the cells ('#({name}=@(\"—\"; \"n/a\"))')"
+                                )));
+                            }
+                        }
+                    }
+                    nulls = Some(Operand::Lit(Value::list(words)));
+                }
+                // `--locale="de"`: the convention the numbers are written in
+                "--locale" => {
+                    locale = Some(match value {
+                        Some(Operand::Lit(Value::Str(s))) if !s.is_empty() => {
+                            Operand::Lit(Value::Str(s))
+                        }
+                        _ => {
+                            return Err(QuarbError::parse(format!(
+                                "'#({name}=\"de\")' names the locale the numbers are written \
+                                 in, a tag quoted"
+                            )));
+                        }
+                    });
                 }
                 "--width" | "-w" => {
                     width = Some(match value {
@@ -5518,7 +5596,7 @@ impl Parser<'_> {
                 other => {
                     return Err(QuarbError::parse(format!(
                         "'#(…)' takes '--width=n' ('-w=n'), '--header=list' ('-h=list'), \
-                         '--index=:col' ('-i=:col'), '--name=word' ('-n=word'), '--autoindex' ('-a') or '--cast=:col<type>' ('-c=…'); '{other}' given"
+                         '--index=:col' ('-i=:col'), '--name=word' ('-n=word'), '--autoindex' ('-a'), '--cast=:col<type>' ('-c=…'), '--null=list' or '--locale=\"tag\"'; '{other}' given"
                     )));
                 }
             }
@@ -5534,7 +5612,12 @@ impl Parser<'_> {
             (None, Some(Header::Names(h))) => Some(Arg::Lit(Value::list(h))),
             (None, Some(Header::Computed(op))) => Some(Arg::Expr(op)),
             (None, None)
-                if index.is_some() || header_name.is_some() || autoindex || !casts.is_empty() =>
+                if index.is_some()
+                    || header_name.is_some()
+                    || autoindex
+                    || !casts.is_empty()
+                    || nulls.is_some()
+                    || locale.is_some() =>
             {
                 None
             }
@@ -5568,6 +5651,18 @@ impl Parser<'_> {
         for op in casts {
             args.push(Arg::Opt {
                 name: "--cast".into(),
+                value: Some(op),
+            });
+        }
+        if let Some(op) = nulls {
+            args.push(Arg::Opt {
+                name: "--null".into(),
+                value: Some(op),
+            });
+        }
+        if let Some(op) = locale {
+            args.push(Arg::Opt {
+                name: "--locale".into(),
                 value: Some(op),
             });
         }

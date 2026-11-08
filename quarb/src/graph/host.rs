@@ -458,8 +458,15 @@ impl<A: AstAdapter> Host for A {
     fn node_to_xml(&self, ext: &GraphExt) -> String {
         node_to_xml(self, ext.node)
     }
-    fn node_table(&self, ext: &GraphExt) -> Result<Table, String> {
-        crate::graph::tabula::node_table(self, ext.node)
+    fn is_table_node(&self, ext: &GraphExt) -> bool {
+        crate::graph::tabula::is_table_or_section(self, ext.node)
+    }
+    fn node_table(
+        &self,
+        ext: &GraphExt,
+        opts: &crate::graph::tabula::ReadOptions,
+    ) -> Result<Table, String> {
+        crate::graph::tabula::node_table_with(self, ext.node, opts)
     }
     fn render_node(&self, ext: &GraphExt, kind: &str) -> String {
         let kind = crate::graph::koine::Render::from_name(kind)
@@ -1152,7 +1159,10 @@ impl Host for Calc {
     fn node_to_xml(&self, _: &()) -> String {
         String::new()
     }
-    fn node_table(&self, _: &()) -> Result<Table, String> {
+    fn is_table_node(&self, _: &()) -> bool {
+        false
+    }
+    fn node_table(&self, _: &(), _: &crate::graph::tabula::ReadOptions) -> Result<Table, String> {
         Err(no_arbor("a table of a node"))
     }
     fn render_node(&self, _: &(), _: &str) -> String {

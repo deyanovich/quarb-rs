@@ -2064,9 +2064,10 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
     }
     // `--root PATH`, or `?root=PATH` on the one source: the subtree
     // mounted as the tree, through the mount path whatever the
-    // source's kind (spec: Mounts, the root option).
+    // source's kind (spec: Mounts, the root option). `?autounits` and
+    // `?autounit=` take the same door (the convention wraps a mount).
     if let Some(p) = cli.paths.first()
-        && let Some(target) = rooted_target(p, cli.root.as_deref())
+        && let Some(target) = rooted_target(p, cli.root.as_deref()).or_else(|| units_target(p))
     {
         let src = target.display().to_string();
         let m = open_mount(&target, &OpenOpts::from(cli))?;
@@ -3341,6 +3342,26 @@ fn run_web_store<S: quarb_web::db::SqlStore + 'static>(
             )
         }
     }
+}
+
+/// The target as written when it carries the unit-suffix options
+/// (`?autounits`, `?autounit=_km`), which open through the mount
+/// path; None otherwise.
+fn units_target(p: &Path) -> Option<PathBuf> {
+    let s = p.to_str()?;
+    if p.exists() {
+        return None;
+    }
+    let (_, query) = s.rsplit_once('?')?;
+    query
+        .split('&')
+        .any(|pair| {
+            pair == "autounits"
+                || pair == "autounit"
+                || pair.starts_with("autounit=")
+                || pair.starts_with("autounits=")
+        })
+        .then(|| p.to_path_buf())
 }
 
 /// The target with its root: `--root PATH` appended as `?root=PATH`,

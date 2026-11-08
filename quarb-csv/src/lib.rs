@@ -37,6 +37,9 @@ use quarb::{AstAdapter, NodeId, Value};
 pub enum CsvError {
     #[error(transparent)]
     Csv(#[from] csv::Error),
+    /// A target option the reader cannot take as written.
+    #[error("{0}")]
+    Option(String),
     #[error(
         "the header has no {decided:?} but {found:?} throughout; say the delimiter with \
          ?delimiter={name}"
@@ -56,12 +59,16 @@ pub enum CsvError {
 
 /// How a delimited file is read: the options a mount carries
 /// (`?delimiter=`, `?decimal=`) and the extension's default.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct CsvOptions {
     /// `?delimiter=`, decided before anything is read.
     pub delimiter: Option<u8>,
     /// `?decimal=`; `point` when the source says nothing.
     pub decimal: Decimal,
+    /// `?null=NA,n/a`: the cell texts read as missing values, beside
+    /// the empty cell (ruling 2026-11-08); none by default, so a `-`
+    /// in a CSV stays text.
+    pub nulls: Vec<String>,
 }
 
 impl CsvOptions {
@@ -70,6 +77,28 @@ impl CsvOptions {
     /// decimal convention is `point` or `comma`.
     pub fn with_delimiter_label(mut self, label: &str) -> Result<Self, CsvError> {
         self.delimiter = Some(delimiter_label(label)?);
+        Ok(self)
+    }
+
+    /// `?null=NA,n/a`: a comma list of cell texts read as null; the
+    /// option may repeat, the lists union. An empty list refuses.
+    pub fn with_null_label(mut self, label: &str) -> Result<Self, CsvError> {
+        let words: Vec<String> = label
+            .split(',')
+            .map(str::trim)
+            .filter(|w| !w.is_empty())
+            .map(str::to_string)
+            .collect();
+        if words.is_empty() {
+            return Err(CsvError::Option(
+                "null= names the cell texts read as null, a comma list ('null=NA,n/a')".into(),
+            ));
+        }
+        for w in words {
+            if !self.nulls.contains(&w) {
+                self.nulls.push(w);
+            }
+        }
         Ok(self)
     }
 
@@ -120,6 +149,8 @@ pub struct CsvAdapter {
     delimiter: u8,
     /// The decimal convention the source declared.
     decimal: Decimal,
+    /// The cell texts read as null (`?null=`), beside the empty cell.
+    nulls: Vec<String>,
 }
 
 impl CsvAdapter {
@@ -137,7 +168,7 @@ impl CsvAdapter {
             // Without the option the refusal has nowhere to go:
             // read as the caller asked, and let the ragged rows say
             // so (the message before this crate decided anything).
-            Err(_) => Self::read(text, delimiter, Decimal::Point),
+            Err(_) => Self::read(text, delimiter, Decimal::Point, Vec::new()),
         }
     }
 
@@ -174,10 +205,20 @@ impl CsvAdapter {
                 }
             }
         }
-        Ok(Self::read(text, delimiter, options.decimal)?)
+        Ok(Self::read(
+            text,
+            delimiter,
+            options.decimal,
+            options.nulls.clone(),
+        )?)
     }
 
-    fn read(text: &str, delimiter: u8, decimal: Decimal) -> Result<Self, csv::Error> {
+    fn read(
+        text: &str,
+        delimiter: u8,
+        decimal: Decimal,
+        nulls: Vec<String>,
+    ) -> Result<Self, csv::Error> {
         // a ragged row reads as the stream reads it (ruling
         // 2026-11-06): a short one fills its tail with null, a long
         // one drops the fields past the header
@@ -206,6 +247,7 @@ impl CsvAdapter {
             fields,
             delimiter,
             decimal,
+            nulls,
         })
     }
 
@@ -235,8 +277,11 @@ impl CsvAdapter {
         // it cannot underflow when property() reaches here at root.
         let row = self.rows.get((node.0 as usize).checked_sub(1)?)?;
         let idx = self.columns.iter().position(|c| c == column)?;
-        // An empty cell is a missing value, not an empty string.
-        row.get(idx).map(|c| c.as_str()).filter(|c| !c.is_empty())
+        // An empty cell is a missing value, not an empty string; so
+        // is a cell the `null=` option names.
+        row.get(idx)
+            .map(|c| c.as_str())
+            .filter(|c| !c.is_empty() && !self.nulls.iter().any(|n| n == c))
     }
 }
 
@@ -323,8 +368,17 @@ impl AstAdapter for CsvAdapter {
         else {
             return false;
         };
-        if self.decimal == Decimal::Comma {
-            let owned: Vec<String> = row.iter().map(|c| self.canonical(c)).collect();
+        if self.decimal == Decimal::Comma || !self.nulls.is_empty() {
+            let owned: Vec<String> = row
+                .iter()
+                .map(|c| {
+                    if self.nulls.iter().any(|n| n == c) {
+                        String::new()
+                    } else {
+                        self.canonical(c)
+                    }
+                })
+                .collect();
             let cells: Vec<&str> = owned.iter().map(String::as_str).collect();
             f(&cells);
         } else {
@@ -407,6 +461,8 @@ pub struct CsvStream {
     size: u64,
     delimiter: u8,
     decimal: Decimal,
+    /// The cell texts read as null (`?null=`), beside the empty cell.
+    nulls: Vec<String>,
     reader: std::cell::RefCell<csv::Reader<std::io::BufReader<std::fs::File>>>,
     /// The row last parsed, by id, as the record the reader filled —
     /// one buffer, reused: a cell is read off it, nothing allocated
@@ -503,6 +559,7 @@ impl CsvStream {
             size,
             delimiter,
             decimal: options.decimal,
+            nulls: options.nulls.clone(),
             reader: std::cell::RefCell::new(reader),
             last: std::cell::RefCell::new((0, csv::StringRecord::new())),
             next: std::cell::Cell::new(0),
@@ -562,7 +619,7 @@ impl CsvStream {
         let idx = self.columns.iter().position(|c| c == column)?;
         self.with_row(node.0, |r| {
             r.get(idx)
-                .filter(|c| !c.is_empty())
+                .filter(|c| !c.is_empty() && !self.nulls.iter().any(|n| n == c))
                 .map(|c| self.canonical(c))
         })?
     }
@@ -692,8 +749,17 @@ impl AstAdapter for CsvStream {
             return false;
         }
         self.with_row(node.0, |r| {
-            if self.decimal == Decimal::Comma {
-                let owned: Vec<String> = r.iter().map(|c| self.canonical(c)).collect();
+            if self.decimal == Decimal::Comma || !self.nulls.is_empty() {
+                let owned: Vec<String> = r
+                    .iter()
+                    .map(|c| {
+                        if self.nulls.iter().any(|n| n == c) {
+                            String::new()
+                        } else {
+                            self.canonical(c)
+                        }
+                    })
+                    .collect();
                 let cells: Vec<&str> = owned.iter().map(String::as_str).collect();
                 f(&cells);
             } else {
@@ -804,8 +870,9 @@ mod stream_tests {
         let opts = CsvOptions {
             delimiter: None,
             decimal: Decimal::Comma,
+            ..Default::default()
         };
-        let s = CsvStream::open(&p, b',', opts).unwrap();
+        let s = CsvStream::open(&p, b',', opts.clone()).unwrap();
         let w =
             CsvAdapter::parse_declared(text.trim_start_matches('\u{feff}'), b',', opts).unwrap();
         assert_eq!(

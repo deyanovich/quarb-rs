@@ -721,7 +721,7 @@ impl<A: AstAdapter> ComposeAdapter<A> {
                     text,
                     self.source_graft,
                     DocumentGraft::Dom,
-                    self.csv,
+                    self.csv.clone(),
                 )
                 .ok_or_else(|| format!("graft({shown}): the text does not parse as {notation}"))?
             }
@@ -905,7 +905,7 @@ impl<A: AstAdapter> ComposeAdapter<A> {
                         .with_source_graft(self.source_graft)
                         .with_document_graft(self.document_graft)
                         .with_decoding(self.decoding.clone())
-                        .with_csv_options(self.csv)
+                        .with_csv_options(self.csv.clone())
                         .with_default_notation(self.default_notation.clone()),
                 ));
                 let mut grafts = self.grafts.borrow_mut();
@@ -975,7 +975,7 @@ impl<A: AstAdapter> ComposeAdapter<A> {
                 &content,
                 self.source_graft,
                 self.document_graft,
-                self.csv,
+                self.csv.clone(),
             )?;
             if let (Inner::Text(model), Some(f)) = (&mut inner, self.document_url)
                 && let Some(u) = f(&self.outer, node)

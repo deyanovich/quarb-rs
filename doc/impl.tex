@@ -1622,6 +1622,127 @@ root-anchored sequence of hops, each an axis followed by a name:
     page-level trait (\texttt{tag:X}, \texttt{category:X},
     \texttt{orphan}), so \texttt{//<page>} scans the page tree, not
     every page's document; mounts and models forward it \\
+\texttt{?autounits}, \texttt{?autounit=\_km,\_g}; \texttt{quarb::autounits::AutoUnits}
+  & \live the unit suffix convention on demand (ruling 2026-11-08, the
+    0.57 round; spec: Mounts, the autounits option): on any target,
+    every property whose last \texttt{\_} segment names a unit the run
+    knows (the built-ins, the GOST designations, a model's
+    \texttt{unit} declarations, as spaced unit text — no opaque unit, a
+    spelling the grammar refuses such as \texttt{mb} skipped) is read
+    as the property without the suffix, holding quantities in that
+    unit: a numeric cell or numeric text minted, a quantity of the
+    dimension kept with its base and written in the unit, null null,
+    any other cell as before; the named form converts the named
+    suffixes only, stop list or not. \texttt{\_at} and \texttt{\_on}
+    are temporal: the column typed in place (the name kept) as
+    instants and as dates, a text cell by the ISO reading, a number by
+    the one epoch rule (seconds; milliseconds from $10^{11}$ up —
+    \texttt{Value::from\_epoch}, shared with \texttt{datetime} and the
+    \texttt{<instant>} cast). Under the flag a stop list of English
+    words (\texttt{at}, \texttt{in}, \texttt{a}, \texttt{to}, \texttt{on}, \ldots)
+    is never read as a unit, and a column converts only when the
+    deciding row's cell admits the reading. \texttt{AutoUnits<A>}
+    keeps the inner's node ids and forwards every reading through
+    the macro; it decides a plan per header (remembered under the
+    rows' parent) or per node's names, refusing a collision (a
+    stripped name the rows carry, two columns stripping to one) and
+    telling the conversions under \texttt{--info} (code
+    \texttt{AUTOUNITS}, once per header). The property view and the
+    child view agree: \texttt{property}, \texttt{properties},
+    \texttt{property\_names}, \texttt{row\_columns} and
+    \texttt{row\_text} (a numeric cell respelled \texttt{12\_g} so the
+    one-pass typed build types the column), and for a record's member
+    nodes \texttt{name}, \texttt{children\_named}, \texttt{answers\_to},
+    \texttt{default\_value}; a step plan naming a converted column — a
+    renamed member as the step's name, a predicate or an order on one —
+    returns \texttt{None} from \texttt{select}, \texttt{select\_plan},
+    \texttt{estimate}, \texttt{count} and \texttt{index\_lookup}, so the
+    engine evaluates it; descendant searches by name are the engine's
+    walk. quarb-open takes the options off the target before the
+    source opens and spells a renamed member's locator by its new
+    name; \texttt{qua} routes a target carrying them through the mount
+    door as it does \texttt{?root=}. Tests:
+    \texttt{qua/tests/autounits.rs}. \\
+\texttt{property SCOPE::name<TRAIT> = EXPR;} (a model file)
+  & \live a declared property (ruling 2026-11-08, the 0.57 round;
+    spec: Model Files, the property statement): on every node of the
+    scope — a path of child steps, with predicates — a property NAME
+    whose value is the value expression at the node, the \texttt{::prop}
+    reads the node's own, typed by the trait on the name: a unit
+    \texttt{<\_km>} as the typed weight clause types (a bare number or
+    numeric text minted, a quantity of the dimension kept and written
+    in the unit, another dimension or a non-number refused), a type
+    word as the declared column casts; a name the node carries is
+    retyped in its place (the bare form \texttt{property
+    /legs::distance\_km<\_km>;} is \texttt{= ::distance\_km}), a new
+    name is added. Engine entry points: \texttt{parse\_value\_expr} /
+    \texttt{ValueExpr}, \texttt{node\_value} (the sibling of
+    \texttt{node\_matches\_step\_body}: \texttt{eval\_operand} with the
+    thread at the node, a default trace, no scope),
+    \texttt{ScopeSteps} and \texttt{node\_in\_scope} (the steps matched
+    against the ancestor chain), \texttt{cast\_value}. quarb-model
+    prepares the declarations once, answers them in \texttt{property},
+    \texttt{properties}, \texttt{property\_names}, \texttt{row\_columns},
+    \texttt{row\_text} (a typed cell spelled in its type keeps the
+    one-pass build; an untyped one steps to the record path) and
+    \texttt{default\_value} (a member node typed in place), hides the
+    declaration evaluating at the node so its expression reads the
+    source, refuses a cycle by name, declines the pushdown hooks on a
+    declared name, and checks at load (\texttt{check\_properties}: the
+    unit known; the first node whose expression is not null typed).
+    Tests: \texttt{qua/tests/model\_property.rs}. \\
+\texttt{//table[1] | #}, \texttt{#(--null=…)}, \texttt{#(--locale=…)}, \texttt{-i=null}; \texttt{quarb::graph::tabula}
+  & \live a document's table read by the constructor (the
+    document-tables round, rulings 2026-11-08; spec: The Table, the
+    constructor on a node): a tabula node — or its \texttt{thead},
+    \texttt{tbody}, \texttt{tfoot}, read as the rows of that section
+    under the table's header — gives its body rows under the header
+    the format declares (a first row of head cells, a \texttt{thead},
+    spans repeated), footer rows kept out of the body, a nested table
+    refused by its place (\emph{a nested table at row 2, column 2 …}).
+    Every cell is handed to the one-pass typed build as text
+    (\texttt{TableBuilder::push\_text\_row}), so a column of numbers
+    types and a column that stays text keeps each cell as written —
+    no more \texttt{5000000} beside \texttt{5,200,000[1]}; a footnote
+    mark in a \texttt{sup} child is dropped from the cell's text, a
+    trailing \texttt{[n]} too, and a \texttt{br} reads as a space in
+    the HTML adapter's text (Markdown lowers through it). The reading
+    options: \texttt{--null=@("—"; "n/a")} names the cell texts read
+    as null (a document table's default vocabulary: the dashes,
+    n/a, N/A, NA; \texttt{@()} none; a stream table has none unless
+    given, so a \texttt{-} in a CSV stays text), \texttt{--locale="de"}
+    the number convention (numeric cells respelled canonical, as
+    \texttt{?decimal=} does); on a table value both pass over the
+    cells and the columns retype. When every body row opens with a
+    head cell, that column is the index, named by its label
+    (\texttt{indexed\_by}); \texttt{-i} overrides, \texttt{-i=null}
+    keeps it a column. The table options (\texttt{-i}, \texttt{-c},
+    \texttt{--header}, \texttt{-a}) apply on the node as after
+    \texttt{| #}; \texttt{--width} is refused there. A column that
+    falls to text while a cell of it nearly reads as a number — a
+    null word, a footnote mark, a percent, a scale suffix, another
+    locale's spelling, a quantity — is told as a warning
+    (\texttt{TABLE\_TEXT}, site the table's path; up to three cells
+    with their rows and reasons, then the cleanup). The aggregate
+    path of \texttt{\#} routes one table node through
+    \texttt{Host::node\_table(ext, \&ReadOptions)} and
+    \texttt{Host::is\_table\_node}; several nodes keep the record path.
+    Tests: \texttt{qua/tests/document\_tables.rs}. \\
+\texttt{| clean}, \texttt{clean(:a; :b; --null=…; --locale=…)}
+  & \live a scraped table's text columns cleaned into values (the
+    document-tables round, hash 2, 2026-11-08): per cell, in the
+    order a hand would — trimmed, a footnote mark dropped
+    (\texttt{[1]}, \texttt{*}, \texttt{†}), a null word null (the
+    document table's default vocabulary, or \texttt{--null=list};
+    \texttt{@()} none), the number read under \texttt{--locale}, a
+    percent the ratio (\texttt{12 \%} → 0.12), a scale suffix applied
+    (\texttt{330.5 k} → 330500; M, G, bn, mn), else the text as
+    trimmed — every text column or the columns named bare, the
+    cleaned columns retyped (\texttt{Table::typed}, a declared column
+    keeping its declaration), the index and the name kept; a text or
+    a list of texts the same way (\texttt{clean\_text}). The column
+    names ride unevaluated, as \texttt{autocast}'s do. Tests:
+    \texttt{qua/tests/document\_tables.rs}. \\
 \texttt{?root=PATH}, \texttt{qua --root PATH}; \texttt{quarb::rooted::Rooted}
   & \live a root on a mount (ruling 2026-11-01; spec: Mounts, the
     root option): the subtree at PATH mounted as the tree, on any

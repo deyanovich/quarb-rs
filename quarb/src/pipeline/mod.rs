@@ -26,7 +26,7 @@ mod environ;
 pub mod kaiv_out;
 pub mod library;
 mod machine;
-mod operand;
+pub(crate) mod operand;
 mod register;
 mod run;
 mod template;
@@ -350,7 +350,16 @@ pub(crate) trait Host {
     fn node_to_json(&self, ext: &Self::Ext) -> Value;
     fn node_to_json_text(&self, ext: &Self::Ext) -> String;
     fn node_to_xml(&self, ext: &Self::Ext) -> String;
-    fn node_table(&self, ext: &Self::Ext) -> Result<Table, String>;
+    /// Whether the thread stands on a node `| #` reads as a document's
+    /// table: a tabula node, or a `thead`/`tbody`/`tfoot` under one.
+    fn is_table_node(&self, ext: &Self::Ext) -> bool;
+    /// A tabula node (or a `thead`/`tbody`/`tfoot`) read as a table
+    /// under the constructor's reading options.
+    fn node_table(
+        &self,
+        ext: &Self::Ext,
+        opts: &crate::graph::tabula::ReadOptions,
+    ) -> Result<Table, String>;
     /// The columns of the rows beside `ext`'s node where its source
     /// hands rows of one shape (a CSV mount's): a table built from
     /// them keeps that order.

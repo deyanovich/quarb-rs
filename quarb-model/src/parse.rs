@@ -45,6 +45,10 @@ pub struct Model {
     /// potentials: an edge within the scope weighs their difference
     /// (spec: Weight Potentials).
     pub potentials: Vec<PotentialDecl>,
+    /// `property SCOPE::name<TRAIT> = EXPR;` — a property declared on
+    /// every node of the scope, its value the expression at the node,
+    /// typed by the trait (ruling 2026-11-08).
+    pub properties: Vec<PropertyDecl>,
     /// `tree IDENTITY: PATH;` — the string other trees refer to this
     /// one by, and the path (a mount root or a node inside one) the
     /// tree stands at. An identity ending in a separator is a base.
@@ -492,6 +496,41 @@ pub struct PotentialDecl {
     pub stmt: String,
 }
 
+/// `property SCOPE::name<TRAIT> = EXPR;` (ruling 2026-11-08, the 0.57
+/// round): on every node of the scope, a property NAME whose value is
+/// the value expression EXPR at that node (`::prop` reads the node's
+/// own properties), typed by the trait on the declared name — a unit
+/// trait as the typed weight clause types (a bare number or numeric
+/// text minted in the unit, a quantity of the dimension kept and
+/// written in the unit, another dimension or a non-number refused), a
+/// type word as the declared column's cast. A name the node already
+/// carries is retyped in place; the bare form `property
+/// /legs::distance_km<_km>;` is `= ::distance_km`.
+#[derive(Debug, Clone)]
+pub struct PropertyDecl {
+    pub scope: String,
+    pub name: String,
+    /// The trait between `<` and `>`: `_km` (a unit, the underscore
+    /// stripped) or a type word (`int`), as written; none for a
+    /// property declared untyped.
+    pub typing: Option<PropertyTyping>,
+    /// The expression right of `=`, as written.
+    pub expr: String,
+    /// Whether the statement wrote no `=`: the property typed in place.
+    pub bare: bool,
+    /// The statement as written, for messages.
+    pub stmt: String,
+}
+
+/// The trait of a declared property.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PropertyTyping {
+    /// `<_km>`: quantities in the unit.
+    Unit(String),
+    /// `<int>`, `<instant>`, …: the declared column's cast.
+    Type(quarb::ColumnType),
+}
+
 /// The trailing `acyclic` of a ref or edge declaration, split off.
 fn split_acyclic(rest: &str) -> (&str, bool) {
     let t = rest.trim_end();
@@ -793,6 +832,112 @@ fn strip_comments(text: &str) -> Result<String, String> {
 
 /// Parse the left side of a `ref`/`edge` field into `(scope_path,
 /// field)` — splitting at the last `::` (the property projection).
+/// `property SCOPE::name<TRAIT> = EXPR;` after its keyword: the
+/// scope and the typed name left of the first `=` outside brackets
+/// and quotes (a scope's predicate may carry one), the expression
+/// right of it; without `=` the bare form.
+fn parse_property(rest: &str, stmt: &str) -> Result<PropertyDecl, String> {
+    let rest = rest.trim();
+    // the first `=` at depth zero splits the head from the expression
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    let mut split = None;
+    for (i, c) in rest.char_indices() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(c),
+            (None, '[' | '(' | '<') => depth += 1,
+            (None, ']' | ')' | '>') => depth -= 1,
+            (None, '=') if depth == 0 => {
+                split = Some(i);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let (head, expr, bare) = match split {
+        Some(i) => (rest[..i].trim(), rest[i + 1..].trim(), false),
+        None => (rest, "", true),
+    };
+    let (scope, field) = split_field(head).map_err(|_| {
+        format!(
+            "property needs 'SCOPE-PATH::name<TRAIT>' before '=' (the declared property of the \
+             scoped nodes): 'property /legs::speed<_mph> = ::distance_mi div ::time_hours;': \
+             '{stmt}'"
+        )
+    })?;
+    let (name, typing) = match field.split_once('<') {
+        Some((n, t)) => {
+            let Some(t) = t.trim().strip_suffix('>') else {
+                return Err(format!(
+                    "property: '::{field}' opens a trait with '<' and never closes it: \
+                     '::speed<_mph>', '::count<int>': '{stmt}'"
+                ));
+            };
+            let t = t.trim();
+            let typing = if t.starts_with('_') {
+                PropertyTyping::Unit(split_unit_type(t).map_err(|e| {
+                    format!(
+                        "property: '::{field}' {}: '{stmt}'",
+                        e.replace(
+                            "a typed weight is '::km<_km>'",
+                            "a typed property is '::km<_km>'"
+                        )
+                    )
+                })?)
+            } else {
+                match quarb::ColumnType::from_word(t) {
+                    Some(ct) if !matches!(ct, quarb::ColumnType::Unit(_)) => {
+                        PropertyTyping::Type(ct)
+                    }
+                    _ => {
+                        return Err(format!(
+                            "property: '::{field}' names no type between '<' and '>': a unit \
+                             with its underscore ('<_km>') or a type word ({}): '{stmt}'",
+                            quarb::ColumnType::words().join(", ")
+                        ));
+                    }
+                }
+            };
+            (n.trim().to_string(), Some(typing))
+        }
+        None => (field, None),
+    };
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(format!(
+            "property: '::{name}' is no property name: '{stmt}'"
+        ));
+    }
+    let expr = if bare {
+        format!("::{name}")
+    } else if expr.is_empty() {
+        return Err(format!(
+            "property: nothing stands right of '=': the value expression at each node \
+             ('= ::distance_mi div ::time_hours'), or no '=' at all to type ::{name} in place: \
+             '{stmt}'"
+        ));
+    } else {
+        expr.to_string()
+    };
+    // the scope and the expression parse now, so a load never meets
+    // a malformed statement
+    quarb::ScopeSteps::parse(&scope).map_err(|e| format!("property: {e}: '{stmt}'"))?;
+    quarb::ValueExpr::parse(&expr).map_err(|e| format!("property ::{name}: {e}: '{stmt}'"))?;
+    Ok(PropertyDecl {
+        scope,
+        name,
+        typing,
+        expr,
+        bare,
+        stmt: stmt.to_string(),
+    })
+}
+
 fn split_field(s: &str) -> Result<(String, String), String> {
     let s = s.trim();
     match s.rfind("::") {
@@ -1091,6 +1236,7 @@ fn parse_model_in(
                 }));
                 model.refs.extend(sub.refs);
                 model.potentials.extend(sub.potentials);
+                model.properties.extend(sub.properties);
                 model.rels.extend(sub.rels);
                 model.edges.extend(sub.edges);
                 model.aliases.extend(sub.aliases);
@@ -1353,6 +1499,20 @@ fn parse_model_in(
                 }
                 model.traits.push(decl);
             }
+            "property" => {
+                let decl = parse_property(rest, stmt)?;
+                if model
+                    .properties
+                    .iter()
+                    .any(|p| p.scope == decl.scope && p.name == decl.name)
+                {
+                    return Err(format!(
+                        "property ::{} is declared twice on {}: '{stmt}'",
+                        decl.name, decl.scope
+                    ));
+                }
+                model.properties.push(decl);
+            }
             "weight-potential" => {
                 let (scope, prop) = split_field(rest).map_err(|_| {
                     format!(
@@ -1400,7 +1560,7 @@ fn parse_model_in(
                 return Err(format!(
                     "unknown model statement '{other}' \
                      (expected node/ref/rel/edge/mount/alias/trait/index/graph/tree/unit/use/\
-                     weight-potential/def/macro)"
+                     weight-potential/property/def/macro)"
                 ));
             }
         }

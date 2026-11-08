@@ -1613,6 +1613,26 @@ pub(crate) fn unit_reading(v: Value, unit: &str) -> Value {
 /// not cast: the coercion of [`coerce_cell`], a whole-valued float
 /// under a declared integer (the cast is lossless), and under a
 /// tuple a list of the arity whose items cast each.
+/// Milliseconds from here up: 10^11 seconds is the year 5138, and
+/// 10^11 milliseconds is March 1973 — no stamp in seconds reaches
+/// the bound, and none in milliseconds falls under it for any date a
+/// log records.
+pub const EPOCH_MILLIS_FROM: f64 = 1e11;
+
+/// A number since the epoch split into whole seconds and
+/// nanoseconds under the one epoch rule (seconds; milliseconds from
+/// [`EPOCH_MILLIS_FROM`] up).
+pub fn epoch_split(x: f64) -> (i64, u32) {
+    let secs_f = if x.abs() >= EPOCH_MILLIS_FROM {
+        x / 1000.0
+    } else {
+        x
+    };
+    let secs = secs_f.floor();
+    let nanos = ((secs_f - secs) * 1e9).round().clamp(0.0, 999_999_999.0) as u32;
+    (secs as i64, nanos)
+}
+
 pub(crate) fn cast_cell(v: &Value, t: &ColumnType) -> Option<Value> {
     if let ColumnType::Unit(u) = t {
         return cast_unit(v, u);
@@ -1636,6 +1656,17 @@ pub(crate) fn cast_cell(v: &Value, t: &ColumnType) -> Option<Value> {
         (Value::Float(f), ColumnType::Integer) if f.fract() == 0.0 && f.abs() < 9.0e15 => {
             Some(Value::Int(*f as i64))
         }
+        // the <instant> cast reads a number since the epoch as
+        // `datetime` does (ruling 2026-11-08); inference never does,
+        // so a column of numbers stays numeric
+        (Value::Int(n), ColumnType::Instant) => Some(Value::from_epoch(*n as f64)),
+        (Value::Float(f), ColumnType::Instant) if f.is_finite() => Some(Value::from_epoch(*f)),
+        (Value::Str(s), ColumnType::Instant) => s
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|f| f.is_finite())
+            .map(Value::from_epoch),
         _ => None,
     })
 }
@@ -3177,14 +3208,24 @@ impl Value {
             Value::Instant { secs, nanos, .. } => Some((*secs, *nanos)),
             // A period reads as its first instant.
             Value::Period { start, .. } => Some((*start, 0)),
-            Value::Int(n) => Some((*n, 0)),
-            Value::Float(f) if f.is_finite() => {
-                let secs = f.floor() as i64;
-                let nanos = ((f - f.floor()) * 1e9) as u32;
-                Some((secs, nanos))
-            }
+            Value::Int(n) => Some(epoch_split(*n as f64)),
+            Value::Float(f) if f.is_finite() => Some(epoch_split(*f)),
             Value::Str(s) => crate::temporal::parse_iso(s).map(|(s, n, _)| (s, n)),
             _ => None,
+        }
+    }
+
+    /// An instant from a number since the epoch under the one epoch
+    /// rule (ruling 2026-11-08): seconds, or milliseconds from 10^11
+    /// up — what `datetime`, the `<instant>` cast and the `_at`/`_on`
+    /// suffixes all read. UTC, no written offset.
+    pub fn from_epoch(x: f64) -> Value {
+        let (secs, nanos) = epoch_split(x);
+        Value::Instant {
+            secs,
+            nanos,
+            offset_min: None,
+            calendar: Default::default(),
         }
     }
 

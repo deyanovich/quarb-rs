@@ -57,7 +57,9 @@ pub use graph::host::{QueryResult, Traced, resolved_provenance};
 pub use graph::identity::{canonical_identity, canonical_identity_at_open, is_url, name_path};
 pub use graph::run::{Run, inherited};
 pub use graph::tabula::{table_node_records, table_rows_of};
-pub use graph::{adapter, conformance, koine, names, plan, reflect, rooted, source, target, trace};
+pub use graph::{
+    adapter, autounits, conformance, koine, names, plan, reflect, rooted, source, target, trace,
+};
 #[cfg(feature = "kaiv")]
 pub use pipeline::kaiv_out;
 pub use pipeline::{PrettyMode, SessionMemory, SessionStore, session_memory};
@@ -86,7 +88,7 @@ pub use graph::adapter::{
 
 pub use pipeline::env::{EnvKind, Environment};
 pub use pipeline::library::CommandLibrary;
-pub use syntax::parser::{Defs, parse_scope_path};
+pub use syntax::parser::{Defs, parse_scope_path, parse_value_expr};
 /// The invocation instant, pinned once by the tool layer (`qua
 /// --now`, or the clock read once at startup) and read by
 /// adapters that would otherwise consult the wall clock when
@@ -96,7 +98,7 @@ pub use syntax::parser::{Defs, parse_scope_path};
 /// that never pins gets the old wall-clock behavior.
 pub use value::ambient::{
     SentenceBonds, fetched, fetched_opt, invocation_instant, now_secs, record_refusal,
-    sentence_bonds, set_invocation_instant, set_sentence_bonds,
+    sentence_bonds, set_invocation_instant, set_sentence_bonds, take_refusal_diagnostic,
 };
 pub use value::{ColumnType, Foreign, ForeignValue, NodeRef, Table, TableBuilder, Typing, Value};
 
@@ -185,6 +187,119 @@ pub fn node_matches_step_body(adapter: &impl AstAdapter, node: NodeId, body: &St
 /// that would return a silently incomplete answer (e.g. a
 /// quantifier cut off at the bound) records a refusal instead, and
 /// the entry points surface it here.
+/// A value expression parsed once, evaluated at nodes
+/// ([`node_value`]): what a model's `property` statement holds.
+#[derive(Debug, Clone)]
+pub struct ValueExpr(ast::Operand);
+
+impl ValueExpr {
+    /// Parse the text right of `=` (see [`parse_value_expr`]).
+    pub fn parse(text: &str) -> Result<ValueExpr> {
+        parse_value_expr(text).map(ValueExpr)
+    }
+}
+
+/// The values of `expr` at `node` — the thread standing on the node,
+/// `::prop` its properties, no register, no topic — as a predicate's
+/// operands are evaluated at a candidate (ruling 2026-11-08, the
+/// property statement; the sibling of [`node_matches_step_body`]).
+/// Several values for an operand that yields several; none for a
+/// null one.
+pub fn node_value(adapter: &impl AstAdapter, node: NodeId, expr: &ValueExpr) -> Vec<Value> {
+    let ext = graph::navigate::GraphExt::at(node);
+    let trace = graph::correlate::Correlation::default();
+    let scope = pipeline::Scope::at(&ext);
+    pipeline::operand::eval_operand(adapter, &ext, &expr.0, &trace, scope)
+}
+
+/// A scope of child steps, as a model's `property` statement names
+/// the nodes a declaration covers: `/legs/*`, `/flights/*[::carrier
+/// = "JP"]`. Each step is matched against the node's ancestor chain
+/// ([`node_in_scope`]); a descendant axis, a group or any other
+/// element is refused, since membership is read per node, never by
+/// a walk.
+#[derive(Debug, Clone)]
+pub struct ScopeSteps(Vec<ast::PathElem>);
+
+impl ScopeSteps {
+    pub fn parse(text: &str) -> Result<ScopeSteps> {
+        let path = parse_scope_path(text)?;
+        for elem in &path.0 {
+            match elem {
+                ast::PathElem::Step(s) if matches!(s.axis, ast::Axis::Child) => {}
+                ast::PathElem::Step(_) => {
+                    return Err(QuarbError::parse(format!(
+                        "a property's scope is a path of child steps ('/legs/*', \
+                         '/flights/*[::carrier = \"JP\"]'); a descendant axis walks, and \
+                         membership is read at the node: '{text}'"
+                    )));
+                }
+                _ => {
+                    return Err(QuarbError::parse(format!(
+                        "a property's scope is a path of child steps, not a group or a \
+                         pattern: '{text}'"
+                    )));
+                }
+            }
+        }
+        Ok(ScopeSteps(path.0))
+    }
+
+    /// How deep the scope's nodes stand under the root.
+    pub fn depth(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether every step is a bare name or a star — membership then
+    /// costs a name test per ancestor and needs no memo.
+    pub fn plain(&self) -> bool {
+        self.0.iter().all(|e| match e {
+            ast::PathElem::Step(s) => {
+                s.predicates.is_empty() && s.traits.is_empty() && s.labels.is_empty()
+            }
+            _ => false,
+        })
+    }
+
+    /// The scope as query text.
+    pub fn text(&self) -> String {
+        self.0.iter().map(unparse::elem).collect()
+    }
+}
+
+/// Whether `node` stands in the scope: its ancestors from the root
+/// down match the scope's steps one for one, the node the last.
+pub fn node_in_scope(adapter: &impl AstAdapter, node: NodeId, scope: &ScopeSteps) -> bool {
+    let root = adapter.root();
+    let mut chain = Vec::with_capacity(scope.0.len() + 1);
+    let mut cur = Some(node);
+    while let Some(n) = cur {
+        if n == root {
+            break;
+        }
+        chain.push(n);
+        if chain.len() > scope.0.len() {
+            return false;
+        }
+        cur = adapter.parent(n);
+    }
+    if cur.is_none() || chain.len() != scope.0.len() {
+        return false;
+    }
+    chain.reverse();
+    chain
+        .iter()
+        .zip(scope.0.iter())
+        .all(|(n, elem)| graph::steps::node_matches_elem(adapter, *n, elem))
+}
+
+/// A value cast to a column type as a declared column casts its
+/// cells (`<int>`, `<_km>`, `<instant>`): `None` where it does not
+/// cast.
+pub fn cast_value(v: &Value, t: &ColumnType) -> Option<Value> {
+    value::cast_cell(v, t)
+}
+
 fn checked<T>(result: T) -> Result<T> {
     match value::ambient::take_refusal_diagnostic() {
         Some(d) => Err(QuarbError::refused(d.message)
