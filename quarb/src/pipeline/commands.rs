@@ -3746,7 +3746,7 @@ fn by_option(call: &FnCall, eval: &dyn Fn(&Operand) -> Value) -> Option<Vec<Stri
             Operand::Field { base, name, .. } if matches!(**base, Operand::Topic) => {
                 vec![name.clone()]
             }
-            Operand::Typed { inner, .. } => key_of(inner, eval),
+            Operand::Typed { inner, .. } | Operand::InUnit { inner, .. } => key_of(inner, eval),
             // `(:Sex; :Pclass)` — the tuple of keys
             Operand::List(items) => items.iter().flat_map(|i| key_of(i, eval)).collect(),
             // any expression answering a list, or a name (ruling 2026-11-06)

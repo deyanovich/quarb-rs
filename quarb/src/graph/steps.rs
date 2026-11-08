@@ -381,7 +381,7 @@ pub(crate) struct BudgetBounds {
 
 impl BudgetBounds {
     /// Resolve a budget's bounds (the floor, the ceiling, as
-    /// written) or its bare unit under the run's units; a bound that
+    /// written) or its star unit under the run's units; a bound that
     /// is no quantity, a unit the run does not know, or two bounds of
     /// two dimensions, refuse by name.
     pub(crate) fn resolve(
@@ -409,16 +409,16 @@ impl BudgetBounds {
         let (anchor, written) = match (&ceiling, &floor, &b.unit) {
             (Some(c), _, _) => (c.clone(), b.ceiling.clone().unwrap_or_default()),
             (None, Some(f), _) => (f.clone(), b.floor.clone().unwrap_or_default()),
-            // the bare unit: the dimension and the printing unit, no
+            // the star unit: the dimension and the printing unit, no
             // bound; spaced text, so the unit is built in or declared
             (None, None, Some(u)) => (
                 crate::value::quantity::parse_unit_text(&format!("1 {u}")).ok_or_else(|| {
                     format!(
-                        "'{{_{u}}}' names no unit the run knows: a unit statement declares one \
+                        "'{{*_{u}}}' names no unit the run knows: a unit statement declares one \
                          ('unit {u};')"
                     )
                 })?,
-                format!("_{u}"),
+                format!("*_{u}"),
             ),
             (None, None, None) => return Err("a budget needs a floor or a ceiling".into()),
         };
@@ -431,6 +431,34 @@ impl BudgetBounds {
                 f.1,
                 b.ceiling.as_deref().unwrap_or(""),
                 c.1
+            ));
+        }
+        // a floor above the ceiling admits nothing: refused, the two
+        // compared in one dimension and the ceiling shown in the
+        // floor's unit (ruling 2026-11-08); equal bounds stand
+        if let (Some(c), Some(f)) = (&ceiling, &floor)
+            && f.0 > c.0
+        {
+            let (shown, unit) = if f.2 != 0.0 {
+                (c.0 * f.2 / f.0, f.3.as_str())
+            } else {
+                (c.0, f.1.as_str())
+            };
+            // the ceiling in the floor's unit, where the units differ
+            let in_floor_unit = if c.3 == f.3 {
+                String::new()
+            } else {
+                format!(
+                    " ({} is {shown}_{unit})",
+                    b.ceiling.as_deref().unwrap_or("")
+                )
+            };
+            return Err(format!(
+                "the budget's floor '{}' lies above its ceiling '{}'{in_floor_unit}: a budget \
+                 admits the costs from its floor to its ceiling, so the floor is at most the \
+                 ceiling",
+                b.floor.as_deref().unwrap_or(""),
+                b.ceiling.as_deref().unwrap_or(""),
             ));
         }
         let (bv, base, wmag, wunit) = anchor;

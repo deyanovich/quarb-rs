@@ -384,13 +384,13 @@ fn the_braces_stack_and_a_rule_folds_the_legs() {
     assert!(e.contains("two braces measure the hop count"), "{e}");
     let e = no("/stations/*[::id = 1](->stage){abs:3} | ::name");
     assert!(
-        e.contains("is a cost rule, and this brace counts hops"),
+        e.contains("is a cost function, and this brace counts hops"),
         "{e}"
     );
     let e = no("/stations/*[::id = 1](->stage)+{3} | ::name");
     assert!(e.contains("a brace never follows '+' or '*'"), "{e}");
     let e = no("/stations/*[::id = 1](->stage){quux:;3_d} | ::name");
-    assert!(e.contains("names no cost rule"), "{e}");
+    assert!(e.contains("names no cost function"), "{e}");
 }
 
 #[test]
@@ -443,6 +443,47 @@ fn a_signed_weight_takes_a_rule() {
         q("/stations/*[::id = 1](->stage){;50_h} | ::name"),
         "Sardis\nSusa"
     );
+}
+
+#[test]
+fn a_budget_floor_above_its_ceiling_is_refused_and_equal_bounds_stand() {
+    // ruling 2026-11-08: the bounds compared after conversion to one
+    // dimension, the inversion refused naming both; equal bounds
+    // stand; the count form's pointer spells the brace with ';'
+    let d = fixture("inverted");
+    let m = ["--model", "roads.model"];
+    let q = |query: &str| ok(&d, &[&m[..], &[query, "roads.db"]].concat());
+    let no = |query: &str| refused(&d, &[&m[..], &[query, "roads.db"]].concat());
+    let e = no("/stations/*[::id = 1](->stage){600_km;100_parasang} | ::name");
+    assert!(
+        e.contains(
+            "the budget's floor '600_km' lies above its ceiling '100_parasang' (100_parasang is \
+             555_km)"
+        ),
+        "{e}"
+    );
+    let e = no("/stations/*[::id = 1](->stage){4_d;72_h} | ::name");
+    assert!(
+        e.contains("'4_d' lies above its ceiling '72_h' (72_h is 3_d)"),
+        "{e}"
+    );
+    // one unit on both sides: nothing to re-express
+    let e = no("/stations/*[::id = 1](->stage){4_d;3_d} | ::name");
+    assert!(
+        e.contains("'4_d' lies above its ceiling '3_d': a budget"),
+        "{e}"
+    );
+    // equal bounds, in one unit or two: the walk costing exactly that
+    assert_eq!(
+        q("/stations/*[::id = 1](->stage){18_parasang;18_parasang} | ::name"),
+        "Susa"
+    );
+    assert_eq!(
+        q("/stations/*[::id = 1](->stage){3_d;72_h} | ::name"),
+        "Susa"
+    );
+    let e = no("/stations/*[::id = 1](->stage){5;2} | ::name");
+    assert!(e.contains("quantifier {5;2} has max below min"), "{e}");
 }
 
 #[test]
@@ -615,12 +656,13 @@ fn a_typed_potential_reads_a_bare_number_in_its_unit() {
 }
 
 #[test]
-fn a_bare_unit_brace_names_the_dimension_and_an_absent_floor_is_no_bound() {
-    // ruling 2026-11-07: `{_km}` / `{min:_m}` name the dimension and
-    // the printing unit with no bound; an absent floor admits every
-    // cost, the negative ones under max and min included; a bound is
-    // a signed quantity
-    let d = fixture("bare-unit");
+fn a_star_unit_brace_names_the_dimension_and_an_absent_floor_is_no_bound() {
+    // rulings 2026-11-07/08: `{*_km}` / `{min:*_m}` name the dimension
+    // and the printing unit with no bound (the star, Quarb's "any
+    // number of"; the bare `{_km}` of draft.219 is refused with the
+    // pointer); an absent floor admits every cost, the negative ones
+    // under max and min included; a bound is a signed quantity
+    let d = fixture("star-unit");
     let db = rusqlite::Connection::open(d.join("roads.db")).unwrap();
     db.execute_batch(
         "ALTER TABLE stations ADD COLUMN elevation INTEGER;
@@ -646,25 +688,25 @@ fn a_bare_unit_brace_names_the_dimension_and_an_absent_floor_is_no_bound() {
     let q = |query: &str| ok(&d, &[&m[..], &[query, "roads.db"]].concat());
     // every walk, its cost in the unit the brace writes
     assert_eq!(
-        r("/stations/*[::id = 1](->stage){_parasang} | $-:total"),
+        r("/stations/*[::id = 1](->stage){*_parasang} | $-:total"),
         "null\n18_parasang\n112.5_parasang"
     );
     assert_eq!(
-        r("/stations/*[::id = 1](->stage){_km} | $-:total"),
+        r("/stations/*[::id = 1](->stage){*_km} | $-:total"),
         "null\n99.9_km\n624.375_km"
     );
     assert_eq!(
-        r("/stations/*[::id = 1](->stage){_d} | ::name"),
+        r("/stations/*[::id = 1](->stage){*_d} | ::name"),
         "Sardis\nSusa\nEcbatana"
     );
-    // a rule takes the bare unit: the extreme leg, signed
+    // a rule takes the star unit: the extreme leg, signed
     assert_eq!(
-        q("/stations/*[::id = 1](->stage){min:_m} | $-:total"),
+        q("/stations/*[::id = 1](->stage){min:*_m} | $-:total"),
         "null\n450_m\n-200_m"
     );
-    // the braces stack with a bare unit among them
+    // the braces stack with a star unit among them
     assert_eq!(
-        q("/stations/*[::id = 1](->stage){1;}{_d}{min:_m} | $-:costs"),
+        q("/stations/*[::id = 1](->stage){1;}{*_d}{min:*_m} | $-:costs"),
         "@(1; 3_d; 450_m)\n@(2; 21.9_d; -200_m)"
     );
     // an absent floor is no bound: the descent passes it
@@ -685,15 +727,20 @@ fn a_bare_unit_brace_names_the_dimension_and_an_absent_floor_is_no_bound() {
         q("/stations/*[::id = 1](->stage){max:;-100_m} | ::name"),
         "Sardis"
     );
-    // a bare unit takes no bounds; the rule without either is refused
-    // pointing at the bare unit; the unit is built in or declared
+    // a star takes no bound; the rule without either is refused
+    // pointing at the star unit; the bare unit of draft.219 and the
+    // star alone point at their spellings; the unit is built in or
+    // declared
     for (brace, expect) in [
-        ("{_m;20_km}", "a bare unit takes no bounds"),
-        ("{_m;}", "a bare unit takes no bounds"),
-        ("{;_m}", "a bare unit takes no bounds"),
-        ("{min:;}", "'{min:_m}'"),
-        ("{_}", "names none"),
-        ("{_quux}", "names no unit the run knows"),
+        ("{*_m;20_km}", "a star takes no bound"),
+        ("{*_m;}", "a star takes no bound"),
+        ("{;*_m}", "a star takes no bound"),
+        ("{min:;}", "'{min:*_m}'"),
+        ("{*_}", "names none"),
+        ("{*_quux}", "names no unit the run knows"),
+        ("{_km}", "written with the star, '{*_km}'"),
+        ("{min:_m}", "'{min:*_m}'"),
+        ("{*}", "'(->x)*'"),
         ("{1_m}", "has no exact form"),
     ] {
         let e = refused(
@@ -738,4 +785,138 @@ fn a_bare_unit_brace_names_the_dimension_and_an_absent_floor_is_no_bound() {
         ],
     );
     assert!(e.contains("'::elevation<_m>'"), "{e}");
+}
+
+#[test]
+fn a_typed_clause_on_a_quantity_column_checks_the_dimension_and_shows_its_unit() {
+    // ruling 2026-11-08: the type on a column of quantities is a
+    // dimension check and the unit the edge carries — the cells
+    // convert on the fly, display only, the magnitude untouched
+    let d = fixture("typed-quantity");
+    let db = rusqlite::Connection::open(d.join("roads.db")).unwrap();
+    db.execute_batch(
+        "ALTER TABLE stations ADD COLUMN elevation TEXT;
+         UPDATE stations SET elevation = '0 m' WHERE id = 1;
+         UPDATE stations SET elevation = '2000 m' WHERE id = 2;
+         UPDATE stations SET elevation = '3.5 km' WHERE id = 3;",
+    )
+    .unwrap();
+    let decl = "unit parasang, parasangs = 5550 m;\n\
+                ref /stages/*::from_id --> /stations/*[::id = $];\n\
+                ref /stages/*::to_id --> /stations/*[::id = $];\n";
+    let model = |name: &str, tail: &str| {
+        std::fs::write(d.join(format!("{name}.model")), format!("{decl}{tail}")).unwrap();
+    };
+    let q = |model: &str, query: &str| {
+        ok(
+            &d,
+            &["--model", &format!("{model}.model"), query, "roads.db"],
+        )
+    };
+    model(
+        "shown",
+        "edge /stages/*: ::from_id -- ::to_id as stage weights(::distance<_km>; ::days<_h>);\n",
+    );
+    // '18 parasang' shown in km, '3 d' in hours
+    assert_eq!(
+        q("shown", "/stations/*[::id = 1] | ->stage | $-:weights"),
+        "@(99.9_km; 72_h)"
+    );
+    // the budget selects the same walks: the magnitudes are unchanged
+    assert_eq!(
+        q(
+            "shown",
+            "/stations/*[::id = 1](->stage){;120_parasang} | ::name"
+        ),
+        "Sardis\nSusa\nEcbatana"
+    );
+    assert_eq!(
+        q(
+            "shown",
+            "/stations/*[::id = 1](->stage){;100_parasang} | ::name"
+        ),
+        "Sardis\nSusa"
+    );
+    // a total prints in the brace's unit, as before
+    assert_eq!(
+        q("shown", "/stations/*[::id = 1](->stage){;30_d} | $-:total"),
+        "null\n3_d\n21.9_d"
+    );
+    // the cells' own unit as the type changes nothing
+    model(
+        "same",
+        "edge /stages/*: ::from_id -- ::to_id as stage weights(::distance<_parasang>; \
+         ::days<_d>);\n",
+    );
+    assert_eq!(
+        q("same", "/stations/*[::id = 1] | ->stage | $-:weights"),
+        "@(18_parasang; 3_d)"
+    );
+    // a typed potential on quantity cells: the difference in the
+    // type's unit, the cells written in m and in km alike
+    model(
+        "climb",
+        "edge /stages/*: ::from_id -- ::to_id as stage weights(::days<_d>);\n\
+         weight-potential /stations/*::elevation<_km>;\n",
+    );
+    assert_eq!(
+        q("climb", "/stations/*[::id = 1] | ->stage | $-:weights"),
+        "@(2_km; 3_d)"
+    );
+    assert_eq!(
+        q("climb", "/stations/*[::id = 2] | ->stage | $-:weights"),
+        "@(1.5_km; 18.9_d)"
+    );
+    assert_eq!(
+        q("climb", "/stations/*[::id = 3] | <-stage | $-:weights"),
+        "@(-1.5_km; 18.9_d)"
+    );
+    // a cell of another dimension refuses the model at load, naming
+    // the property; a currency is a dimension of its own
+    for (name, tail, expect) in [
+        (
+            "clash-time",
+            "edge /stages/*: ::from_id -- ::to_id as stage weights(::days<_m>);\n",
+            "weights(::days<_m>) types the rows' cells in m, and the rows hold 3 d — a quantity \
+             of another dimension",
+        ),
+        (
+            "clash-money",
+            "edge /stages/*: ::from_id -- ::to_id as stage weights(::distance<_EUR>);\n",
+            "weights(::distance<_EUR>) types the rows' cells in EUR, and the rows hold 18 \
+             parasang — a quantity of another dimension",
+        ),
+        (
+            "clash-potential",
+            "edge /stages/*: ::from_id -- ::to_id as stage weights(::days);\n\
+             weight-potential /stations/*::elevation<_h>;\n",
+            "'::elevation<_h>' types the nodes' cells in h, and the nodes hold 0 m — a quantity \
+             of another dimension",
+        ),
+    ] {
+        model(name, tail);
+        let e = refused(
+            &d,
+            &[
+                "--model",
+                &format!("{name}.model"),
+                "/stations/* @| count",
+                "roads.db",
+            ],
+        );
+        assert!(e.contains(expect), "{name}: {e}");
+    }
+    // past the load check, a cell of another dimension among the
+    // rows is no weight on its edge: the edge carries none of that
+    // dimension, and a budget of it does not cross
+    db.execute_batch("UPDATE stages SET days = '5 km' WHERE id = 2;")
+        .unwrap();
+    assert_eq!(
+        q("shown", "/stations/*[::id = 2] | ->stage | $-:weights"),
+        "@(524.475_km)"
+    );
+    assert_eq!(
+        q("shown", "/stations/*[::id = 1](->stage){;1000_h} | ::name"),
+        "Sardis\nSusa"
+    );
 }

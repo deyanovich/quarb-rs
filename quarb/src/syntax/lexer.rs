@@ -236,13 +236,15 @@ pub enum Token {
     FoldSel { text: String, glued: bool },
     /// `{;100_km}` / `{10_km;100_km}` / `{2_h;}` — a budget
     /// quantifier: the floor and the ceiling as written (spec: The
-    /// budget quantifier), each a signed quantity; or the bare unit
-    /// `{_km}`, the dimension named and no bound. A brace pair
-    /// alone, never after `+`/`*`.
+    /// budget quantifier), each a signed quantity; or the star unit
+    /// `{*_km}`, the dimension named and no bound (ruling
+    /// 2026-11-08: the star is Quarb's "any number of"). A brace
+    /// pair alone, never after `+`/`*`.
     Budget {
         floor: Option<String>,
         ceiling: Option<String>,
-        /// `{_km}` — the unit after the underscore, no bounds.
+        /// `{*_km}` — the unit after the star's underscore, no
+        /// bounds.
         unit: Option<String>,
         /// `{abs:2_km;3_km}` — a cost rule named before the bounds.
         rule: Option<String>,
@@ -1364,14 +1366,15 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             // `_p` — a definition's parameter `$p`, rounded (draft 166:
             // the cursor's underscore before the name, a parameter
             // being the fragment's cursor): at a token's start, never
-            // glued to a name, a path or a colon (`/_x`, `::_id`,
-            // `x_y` stay names)
+            // glued to a name, a path, a colon or the trait brackets
+            // (`/_x`, `::_id`, `x_y` stay names; `<_h>` is the unit
+            // trait, ruling 2026-11-08, its word lexed whole)
             '_' if at(i + 1).is_some_and(|c| c.is_alphabetic())
                 && (i == 0
                     || !(is_name_char(chars[i - 1])
                         || matches!(
                             chars[i - 1],
-                            '/' | ':' | '\\' | '>' | '-' | '\'' | '"' | '@' | '$'
+                            '/' | ':' | '\\' | '>' | '<' | '-' | '\'' | '"' | '@' | '$'
                         ))) =>
             {
                 let mut j = i + 1;
@@ -2183,9 +2186,9 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 // a cost rule named before the bounds: `{abs:2_km;3_km}`
                 // (spec: Def. Cost Rule)
                 let (rule, body) = read_cost_rule(&chars, i + 1)?;
-                if let Some((unit, next)) = read_bare_unit(&chars, body, '}')? {
-                    // the bare-unit brace `{_km}` / `{min:_m}` (ruling
-                    // 2026-11-07): the dimension named, no bounds
+                if let Some((unit, next)) = read_star_unit(&chars, body, '}', rule.as_deref())? {
+                    // the star-unit brace `{*_km}` / `{min:*_m}` (ruling
+                    // 2026-11-08): the dimension named, no bounds
                     tokens.push(Token::Budget {
                         floor: None,
                         ceiling: None,
@@ -2566,13 +2569,22 @@ fn read_interpolated(chars: &[char], start: usize) -> Result<(Vec<InterpPart>, u
     read_interpolated_until(chars, start, '"')
 }
 
-/// The bare-unit brace's body (ruling 2026-11-07): an underscore and
-/// a unit's name up to `close`, `{_km}`, `{min:_t}` — the dimension
-/// the brace measures and the unit its costs print in, no bounds.
-/// Returns the unit and the index past the closer; `None` for any
-/// other body. A unit beside a `;` is refused: a bare unit takes no
-/// bounds, since a bound's own unit names the dimension.
-fn read_bare_unit(chars: &[char], start: usize, close: char) -> Result<Option<(String, usize)>> {
+/// The star-unit brace's body (ruling 2026-11-08): a star, an
+/// underscore and a unit's name up to `close`, `{*_km}`, `{min:*_t}`
+/// — the dimension the brace measures and the unit its costs print
+/// in, no bounds, every walk admitted (the star is Quarb's "any
+/// number of", as in `(->road)*`). Returns the unit and the index
+/// past the closer; `None` for any other body. Refused, with the
+/// pointer: the bare unit of draft.219 (`{_km}` → `{*_km}`; with
+/// `rule`, `{min:_m}` → `{min:*_m}`), the star alone (`{*}` is the
+/// hop's star), a star beside a `;` (a star takes no bound, since a
+/// bound's own unit names the dimension), and a star naming no unit.
+fn read_star_unit(
+    chars: &[char],
+    start: usize,
+    close: char,
+    rule: Option<&str>,
+) -> Result<Option<(String, usize)>> {
     let mut k = start;
     let mut body = String::new();
     while let Some(&c) = chars.get(k) {
@@ -2586,20 +2598,43 @@ fn read_bare_unit(chars: &[char], start: usize, close: char) -> Result<Option<(S
         return Ok(None);
     }
     let sides: Vec<&str> = body.split(';').map(str::trim).collect();
-    if !sides.iter().any(|s| s.starts_with('_')) {
+    let opens = |s: &&str| s.starts_with('*') || s.starts_with('_');
+    if !sides.iter().any(opens) {
         return Ok(None);
     }
+    let prefix = rule.map(|r| format!("{r}:")).unwrap_or_default();
+    let starred = sides.iter().find(|s| s.starts_with('*'));
+    let Some(star) = starred else {
+        // `{_km}` — the bare unit of draft.219, respelled
+        let bare = sides
+            .iter()
+            .find(|s| s.starts_with('_'))
+            .expect("one side opens with '_'");
+        return Err(QuarbError::lex(format!(
+            "a budget without bounds is written with the star, '{{{prefix}*{bare}}}': the star \
+             admits every walk and names the unit of the total; '{{{prefix}{bare}}}' is no \
+             longer a brace"
+        )));
+    };
     if sides.len() > 1 {
         return Err(QuarbError::lex(format!(
-            "a bare unit takes no bounds: the bound names the dimension — write the unit \
-             alone, '{{{u}}}', or bounds, '{{;20{u}}}'",
-            u = sides
-                .iter()
-                .find(|s| s.starts_with('_'))
-                .expect("one side opens with '_'")
+            "a star takes no bound: '{{{prefix}{star}}}' admits every walk and names the unit of \
+             the total; bounds are a budget, '{{{prefix};20{}}}'",
+            star.trim_start_matches('*')
         )));
     }
-    let unit = &sides[0][1..];
+    if *star == "*" {
+        return Err(QuarbError::lex(
+            "'{*}' is no quantifier: the star is the hop's, '(->x)*'; a budget without bounds \
+             names its dimension, '{*_km}'",
+        ));
+    }
+    let Some(unit) = star.strip_prefix("*_") else {
+        return Err(QuarbError::lex(format!(
+            "the star names a unit after its underscore, '{{{prefix}*_km}}': '{{{prefix}{star}}}' \
+             writes none"
+        )));
+    };
     if unit.is_empty()
         || !unit
             .chars()
@@ -2612,8 +2647,8 @@ fn read_bare_unit(chars: &[char], start: usize, close: char) -> Result<Option<(S
         })
     {
         return Err(QuarbError::lex(format!(
-            "a bare unit names a unit after its underscore, '{{_km}}': '{{{}}}' names none",
-            sides[0]
+            "the star names a unit after its underscore, '{{{prefix}*_km}}': '{{{prefix}{star}}}' \
+             names none"
         )));
     }
     Ok(Some((unit.to_string(), k + 1)))
@@ -2644,7 +2679,7 @@ fn read_cost_rule(chars: &[char], start: usize) -> Result<(Option<String>, usize
     }
     if crate::syntax::ast::CostRule::parse(&name).is_none() {
         return Err(QuarbError::lex(format!(
-            "'{name}:' names no cost rule: a brace takes abs (the total variation), rise (the \
+            "'{name}:' names no cost function: a brace takes abs (the total variation), rise (the \
              total ascent), fall (the total descent), max or min before its bounds, \
              '{{abs:2_km;3_km}}'; the signed sum needs no name"
         )));
@@ -3048,26 +3083,33 @@ mod quant_tests {
             lex("{max:;-100_m}").unwrap().as_slice(),
             [Token::Budget { floor: None, ceiling: Some(c), unit: None, .. }] if c == "-100_m"
         ));
-        // the bare-unit brace: the dimension and the printing unit,
-        // no bounds; a unit beside a bound is refused
+        // the star-unit brace: the dimension and the printing unit,
+        // no bounds; a star beside a bound, the bare unit of
+        // draft.219 and the star alone are refused with pointers
         assert!(matches!(
-            lex("{_km}").unwrap().as_slice(),
+            lex("{*_km}").unwrap().as_slice(),
             [Token::Budget { floor: None, ceiling: None, unit: Some(u), rule: None }] if u == "km"
         ));
         assert!(matches!(
-            lex("{min:_t}").unwrap().as_slice(),
+            lex("{min:*_t}").unwrap().as_slice(),
             [Token::Budget { floor: None, ceiling: None, unit: Some(u), rule: Some(r) }]
                 if u == "t" && r == "min"
         ));
         assert!(matches!(
-            lex("{ _m/s }").unwrap().as_slice(),
+            lex("{ *_m/s }").unwrap().as_slice(),
             [Token::Budget { unit: Some(u), .. }] if u == "m/s"
         ));
-        for src in ["{_m;20_km}", "{_m;}", "{;_m}"] {
+        for src in ["{*_m;20_km}", "{*_m;}", "{;*_m}"] {
             let e = lex(src).unwrap_err().to_string();
-            assert!(e.contains("a bare unit takes no bounds"), "{src}: {e}");
+            assert!(e.contains("a star takes no bound"), "{src}: {e}");
         }
-        assert!(lex("{_}").unwrap_err().to_string().contains("names none"));
+        assert!(lex("{*_}").unwrap_err().to_string().contains("names none"));
+        assert!(lex("{*km}").unwrap_err().to_string().contains("'{*_km}'"));
+        assert!(lex("{*}").unwrap_err().to_string().contains("'(->x)*'"));
+        let e = lex("{_km}").unwrap_err().to_string();
+        assert!(e.contains("written with the star, '{*_km}'"), "{e}");
+        let e = lex("{min:_m}").unwrap_err().to_string();
+        assert!(e.contains("'{min:*_m}'"), "{e}");
         assert!(lex("{1,3}").unwrap_err().to_string().contains("retired"));
         assert_eq!(quant("{2;}"), (2, None));
         assert_eq!(quant("{ 1 ; 3 }"), (1, Some(3)));

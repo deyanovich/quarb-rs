@@ -75,13 +75,17 @@ pub struct UnitDecl {
 
 /// One item of a `weights(…)` clause: the property, and under the
 /// typed form `::km<_km>` the unit a bare number in it is read in
-/// (spec: Weights, the typed clause; the unit spelled with its
-/// underscore as a quantity writes it, ruling 2026-11-07).
+/// and a quantity cell is checked against and shown in (spec:
+/// Weights, the typed clause; the unit spelled with its underscore
+/// as a quantity writes it, ruling 2026-11-07; the type on a quantity
+/// column a dimension check and the edge's display unit, ruling
+/// 2026-11-08).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WeightSpec {
     /// The property name, `::` stripped.
     pub prop: String,
-    /// The unit of a bare number, as written between `<_` and `>`.
+    /// The unit a bare number is read in and a quantity cell is shown
+    /// in, as written between `<_` and `>`.
     pub unit: Option<String>,
 }
 
@@ -481,8 +485,8 @@ pub struct PotentialDecl {
     pub scope: String,
     pub prop: String,
     /// `::elevation<_m>`: the unit a bare number in the property is
-    /// read in, as the weights clause's typed item (spec: Weight
-    /// Potentials).
+    /// read in, and a quantity cell checked against and shown in, as
+    /// the weights clause's typed item (spec: Weight Potentials).
     pub unit: Option<String>,
     /// The statement as written, for messages.
     pub stmt: String,

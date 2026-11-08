@@ -294,10 +294,11 @@ impl QueryArbor {
         if let Some(mark) = reach_mark(g.reach) {
             props.push(("reach".to_string(), Value::Str(mark.to_string())));
         }
-        // the cost rule of the last brace, the one the reach orders by
-        // (spec: Def. Cost Rule); absent for the signed sum
+        // the cost function of the last brace, the one the reach orders
+        // by (spec: Def. Cost Rule; the term "cost function", ruling
+        // 2026-11-08); absent for the signed sum
         if let Some(rule) = g.more.last().map_or(g.quant.rule, |q| q.rule) {
-            props.push(("rule".to_string(), Value::Str(rule.name().to_string())));
+            props.push(("cost".to_string(), Value::Str(rule.name().to_string())));
         }
         if !g.more.is_empty() {
             props.push(("braces".to_string(), Value::Int(1 + g.more.len() as i64)));
@@ -404,6 +405,32 @@ impl QueryArbor {
         for p in &s.predicates {
             self.walk_predicate(p, id);
         }
+    }
+
+    /// A typed projector's node (draft 166): a `projection` with its
+    /// kind, its key and the `type` word; the unit trait as a value
+    /// rides the same node (ruling 2026-11-08).
+    fn walk_typed(&mut self, inner: &Operand, word: String, parent: usize) {
+        let (kind, key): (&str, Option<String>) = match inner {
+            Operand::Field { base, name, .. } if matches!(**base, Operand::Topic) => {
+                ("core", Some(name.clone()))
+            }
+            Operand::Rel {
+                projection: Some(p),
+                ..
+            } => match p {
+                Projection::Property(k) => ("property", k.clone()),
+                Projection::CoreMeta(k) => ("core", Some(k.clone())),
+                Projection::AdapterMeta(k) => ("adapter", Some(k.clone())),
+            },
+            _ => ("core", None),
+        };
+        let mut props = vec![("kind".to_string(), Value::Str(kind.to_string()))];
+        if let Some(k) = key {
+            props.push(("key".to_string(), Value::Str(k)));
+        }
+        props.push(("type".to_string(), Value::Str(word)));
+        self.intern(Some("projection"), props, Some(parent));
     }
 
     fn walk_trait(&mut self, t: &TraitClause, parent: usize) {
@@ -854,30 +881,16 @@ impl QueryArbor {
             // `type` (`*` under the star); `map`'s bare trait body
             // has no key.
             Operand::Typed { inner, typing } => {
-                let (kind, key): (&str, Option<String>) = match inner.as_ref() {
-                    Operand::Field { base, name, .. } if matches!(**base, Operand::Topic) => {
-                        ("core", Some(name.clone()))
-                    }
-                    Operand::Rel {
-                        projection: Some(p),
-                        ..
-                    } => match p {
-                        Projection::Property(k) => ("property", k.clone()),
-                        Projection::CoreMeta(k) => ("core", Some(k.clone())),
-                        Projection::AdapterMeta(k) => ("adapter", Some(k.clone())),
-                    },
-                    _ => ("core", None),
-                };
-                let mut props = vec![("kind".to_string(), Value::Str(kind.to_string()))];
-                if let Some(k) = key {
-                    props.push(("key".to_string(), Value::Str(k)));
-                }
                 let word = match typing {
                     crate::Typing::Declared(t) => t.word().to_string(),
                     crate::Typing::Star(_) => "*".to_string(),
                 };
-                props.push(("type".to_string(), Value::Str(word)));
-                self.intern(Some("projection"), props, Some(parent));
+                self.walk_typed(inner, word, parent);
+            }
+            // the unit trait as a value (ruling 2026-11-08): the same
+            // node, its `type` the unit's word
+            Operand::InUnit { inner, unit } => {
+                self.walk_typed(inner, format!("_{unit}"), parent);
             }
             Operand::ValueMeta { base, key } => {
                 // `:%provenance` / `:@origin`: the shape sigil and

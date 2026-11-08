@@ -562,7 +562,7 @@ fn lp_in_operand(o: &Operand) -> Option<String> {
         | Operand::Field { base, .. }
         | Operand::ValueMeta { base, .. } => lp_in_operand(base),
         Operand::Projected { base, .. } => lp_in_operand(base),
-        Operand::Typed { inner, .. } => lp_in_operand(inner),
+        Operand::Typed { inner, .. } | Operand::InUnit { inner, .. } => lp_in_operand(inner),
         Operand::List(items) => items.iter().find_map(lp_in_operand),
         Operand::Row(items) => items.iter().find_map(|(_, e)| lp_in_operand(e)),
         Operand::Cond { then, other, .. } => lp_in_operand(then).or_else(|| lp_in_operand(other)),
@@ -807,7 +807,8 @@ fn rename_in_operand(o: &mut Operand, f: &mut dyn FnMut(&str) -> String) {
         | Operand::Invoking(i)
         | Operand::Position(i)
         | Operand::Driver(i)
-        | Operand::Typed { inner: i, .. } => rename_in_operand(i, f),
+        | Operand::Typed { inner: i, .. }
+        | Operand::InUnit { inner: i, .. } => rename_in_operand(i, f),
         Operand::Through { base, .. }
         | Operand::Field { base, .. }
         | Operand::ValueMeta { base, .. }
@@ -5864,8 +5865,11 @@ impl Parser<'_> {
                 None
             };
             let mut item = self.additive()?;
-            if let (Some(key), Operand::Typed { inner, typing }) = (&name, &item) {
-                return Err(typed_value_refusal(key, inner, typing.clone()));
+            if let Some(key) = &name {
+                item = match value_in_unit(key, Arg::Expr(item))? {
+                    Arg::Expr(e) => e,
+                    _ => unreachable!("an expression stays one"),
+                };
             }
             let name = match typed {
                 Some((key, typing)) => {
@@ -7023,18 +7027,12 @@ impl Parser<'_> {
                 .filter(|v| !matches!(v, Value::Str(_)));
             if let Some(k) = typed_key {
                 args.push(Arg::Key(k));
-                let value = self.func_arg()?;
-                if let Arg::Expr(Operand::Typed { inner, typing }) = &value {
-                    return Err(typed_value_refusal(&key, inner, typing.clone()));
-                }
+                let value = value_in_unit(&key, self.func_arg()?)?;
                 args.push(value);
                 return Ok(());
             }
             args.push(Arg::Lit(Value::Str(key.clone())));
-            let value = self.func_arg()?;
-            if let Arg::Expr(Operand::Typed { inner, typing }) = &value {
-                return Err(typed_value_refusal(&key, inner, typing.clone()));
-            }
+            let value = value_in_unit(&key, self.func_arg()?)?;
             args.push(value);
             return Ok(());
         }
@@ -7694,14 +7692,14 @@ impl Parser<'_> {
                 let (min, max) = (*min, *max);
                 if let Some(r) = rule {
                     return Err(QuarbError::parse(format!(
-                        "'{r}:' is a cost rule, and this brace counts hops: a rule folds a \
-                         weight's legs, so it takes a budget's bounds ('{{{r}:;12_m}}') or the \
-                         bare unit ('{{{r}:_m}}'); a count of hops is '{{m;n}}'"
+                        "'{r}:' is a cost function, and this brace counts hops: a cost function \
+                         folds a weight's legs, so it takes a budget's bounds ('{{{r}:;12_m}}') \
+                         or the star unit ('{{{r}:*_m}}'); a count of hops is '{{m;n}}'"
                     )));
                 }
                 if max.is_some_and(|n| n < min) {
                     return Err(QuarbError::parse(format!(
-                        "quantifier {{{min},{}}} has max below min",
+                        "quantifier {{{min};{}}} has max below min",
                         max.expect("checked")
                     )));
                 }
@@ -9198,14 +9196,66 @@ impl Parser<'_> {
         }
         // `:A<int>`, `::price<float>`, `:A<*>` — the typed projector
         // (spec: Projectors, draft 166): the trait brackets glued to a
-        // bare projection declare the field it names.
-        if is_bare_projection(&o)
-            && let Some(typing) = self.typing_brackets()?
-        {
-            o = Operand::Typed {
-                inner: Box::new(o),
-                typing,
-            };
+        // bare projection declare the field it names. The unit trait
+        // `<_h>` (ruling 2026-11-08) glues to any projection spelling
+        // — `::x`, `:x`, `$.x`, `$-::x`, `$-:total` — and never to a
+        // literal or a parenthesized expression, whose road is
+        // `| convert(h)`.
+        let bracket_word = |starts: fn(&str) -> bool| {
+            matches!(
+                (self.peek(), self.toks.get(self.pos + 1)),
+                (
+                    Some(Token::Lt { spaced: false, .. }),
+                    Some(Token::Name {
+                        text,
+                        quoted: false,
+                        ..
+                    })
+                ) if starts(text)
+            )
+        };
+        let unit_word = bracket_word(|t| t.starts_with('_'));
+        let any_word = bracket_word(|_| true);
+        if is_bare_projection(&o) || unit_word || (any_word && is_projection_spelling(&o)) {
+            let start = self.pos;
+            if let Some(typing) = self.typing_brackets()? {
+                match typing.unit() {
+                    // a type trait on a projection that is no bare one
+                    // (`$-::price<float>`, `$.x<int>`) declares nothing
+                    // here: the pointer at the cast (lang's note,
+                    // 2026-11-08), where the brackets once fell through
+                    // to "unexpected trailing input"
+                    None if !is_bare_projection(&o) && is_projection_spelling(&o) => {
+                        let spelled = crate::syntax::unparse::operand(&o);
+                        let cast = match typing.declared() {
+                            Some(t) => format!("; cast a value with {}({spelled})", t.word()),
+                            None => String::new(),
+                        };
+                        return Err(QuarbError::parse(format!(
+                            "'{spelled}{}' declares a field, and stands where a value does: a trait \
+                             describes a field, never a value — a bare projection ('::price{}') or a \
+                             key ('price{} = {spelled}') declares one{cast}",
+                            typing.spelling(),
+                            typing.spelling(),
+                            typing.spelling()
+                        )));
+                    }
+                    None if !is_bare_projection(&o) => self.pos = start,
+                    Some(u) if !is_projection_spelling(&o) => {
+                        let spelled = crate::syntax::unparse::operand(&o);
+                        return Err(QuarbError::parse(format!(
+                            "'{spelled}<_{u}>' puts a unit trait on a value: the trait glues to a \
+                             projection ('::time<_{u}>'); a value converts, '{spelled} | convert({u})'"
+                        )));
+                    }
+                    _ => {
+                        o = Operand::Typed {
+                            inner: Box::new(o),
+                            typing,
+                        };
+                    }
+                }
+            }
         }
         Ok(o)
     }
@@ -9332,7 +9382,9 @@ impl Parser<'_> {
                 ));
             }
             self.pos += 1;
-            return Ok(Some(Typing::Declared(ty)));
+            let typing = Typing::Declared(ty);
+            self.check_unit_typing(&typing)?;
+            return Ok(Some(typing));
         }
         let Some(first) = word(self.peek()) else {
             self.pos = start;
@@ -9343,17 +9395,35 @@ impl Parser<'_> {
             let reported = if matches!(self.peek(), Some(Token::Semi | Token::Comma)) {
                 self.pos += 1;
                 let Some(w) = word(self.peek()) else {
+                    // `<*; _h>` — the unit word after the star lexes as
+                    // the rounded `$h`: the star reports a type, never
+                    // a unit (ruling 2026-11-08)
+                    if let (Some(Token::Dollar), Some(Token::Name { text, .. })) =
+                        (self.peek(), self.toks.get(self.pos + 1))
+                    {
+                        return Err(QuarbError::parse(format!(
+                            "'<*; _{text}>': the star reports a type, and '_{text}' is a unit; a \
+                             unit is declared, '<_{text}>'"
+                        )));
+                    }
                     return Err(QuarbError::parse(
                         "'<*; type>' reports the inferred type after the star: '<*; float>'",
                     ));
                 };
                 self.pos += 1;
-                Some(ColumnType::from_word(&w).ok_or_else(|| {
+                let reported = ColumnType::from_word(&w).ok_or_else(|| {
                     QuarbError::parse(format!(
                         "'<*; {w}>': '{w}' is no type; the types are {}",
                         ColumnType::words().join(", ")
                     ))
-                })?)
+                })?;
+                if let Some(u) = reported.unit() {
+                    return Err(QuarbError::parse(format!(
+                        "'<*; _{u}>': the star reports a type, and '_{u}' is a unit; a unit is \
+                         declared, '<_{u}>'"
+                    )));
+                }
+                Some(reported)
             } else {
                 None
             };
@@ -9364,7 +9434,7 @@ impl Parser<'_> {
                 None => {
                     if matches!(self.peek(), Some(Token::Gt { .. })) {
                         return Err(QuarbError::parse(format!(
-                            "'<{first}>' on a projector declares its type, and '{first}' is none; the types are {}; '<*>' declares nothing",
+                            "'<{first}>' on a projector declares its type, and '{first}' is none; the types are {}; a unit is written with its underscore, '<_{first}>'; '<*>' declares nothing",
                             ColumnType::words().join(", ")
                         )));
                     }
@@ -9380,7 +9450,42 @@ impl Parser<'_> {
             )));
         }
         self.pos += 1;
+        self.check_unit_typing(&typing)?;
         Ok(Some(typing))
+    }
+
+    /// The unit of a unit trait (`<_h>`, ruling 2026-11-08) must name
+    /// a unit the query knows, as convert's operand must (spec: The
+    /// conversion): the built-in table, a model's declarations, an
+    /// adapter's minted units; an unknown or opaque name is refused
+    /// with the nearest known symbols. With a dataset at hand the
+    /// unit is judged here; a fragment body parsed without one
+    /// records it for the splice site.
+    fn check_unit_typing(&mut self, typing: &crate::value::Typing) -> Result<()> {
+        fn units(t: &ColumnType, out: &mut Vec<String>) {
+            match t {
+                ColumnType::Unit(u) => out.push(u.to_string()),
+                ColumnType::Tuple(items) => items.iter().for_each(|i| units(i, out)),
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        if let crate::value::Typing::Declared(t) = typing {
+            units(t, &mut found);
+        }
+        for u in found {
+            let spelled = format!("<_{u}>");
+            match self.expander.unit_names() {
+                Some(names) => {
+                    if let Some(why) = unit_operand_refusal(&spelled, &u, &names) {
+                        return Err(QuarbError::parse(why));
+                    }
+                }
+                None if self.in_def_body => self.body_unit_operands.push((spelled, u)),
+                None => {}
+            }
+        }
+        Ok(())
     }
 
     /// `name<type> =` — a record key written with its trait (spec:
@@ -12083,6 +12188,17 @@ impl Parser<'_> {
                 if !*quoted && text == "." && in_pattern {
                     return Ok(Matcher::Dot);
                 }
+                // Outside a group a lone dot named a node called "."
+                // and matched nothing, silently; refused with the
+                // three readings it could have meant (ruling
+                // 2026-11-08).
+                if !*quoted && text == "." {
+                    return Err(QuarbError::parse(
+                        "'.' alone names no node here: any name is '*' ('/employees/*'), the \
+                         pattern's dot stands inside a group ('(/.)*'), and a node called \".\" \
+                         is the quoted name ('/\".\"')",
+                    ));
+                }
                 matcher_for(text, *quoted)
             }
             // `/${…}` — a name expansion: the value spelled as the
@@ -12274,8 +12390,54 @@ fn agg_command(call: FnCall) -> Result<Command> {
 /// The refusal of a unit operand nobody knows, in the command's
 /// words: `convert(KB): no unit 'KB' (kB is 1000 B, KiB is 1024 B)`.
 fn unit_operand_refusal(command: &str, operand: &str, names: &[String]) -> Option<String> {
-    crate::value::quantity::unit_operand_refusal(operand, names)
-        .map(|why| format!("{command}({operand}): {why}"))
+    crate::value::quantity::unit_operand_refusal(operand, names).map(|why| {
+        // the unit trait names itself whole (`<_KB>`), a command its
+        // operand
+        if command.starts_with('<') {
+            format!("'{command}': {why}")
+        } else {
+            format!("{command}({operand}): {why}")
+        }
+    })
+}
+
+/// A typed operand right of `=`: the unit trait stands as a value
+/// (ruling 2026-11-08) and becomes the reading under its unit, the
+/// key undeclared; a type trait is refused there, with the pointer at
+/// the declared key and the cast.
+fn value_in_unit(key: &str, arg: Arg) -> Result<Arg> {
+    match arg {
+        Arg::Expr(Operand::Typed { inner, typing }) => match typing.unit() {
+            Some(u) => Ok(Arg::Expr(Operand::InUnit {
+                inner,
+                unit: u.to_string(),
+            })),
+            None => Err(typed_value_refusal(key, &inner, typing.clone())),
+        },
+        other => Ok(other),
+    }
+}
+
+/// A projection spelling a unit trait glues to (ruling 2026-11-08):
+/// `::x`, `:x`, `$.x`, `$-::x`, `$-:total`, `$_:x`, `REF::x` — a value
+/// read off a node, an edge, a record or a register; never a literal
+/// or a parenthesized expression, whose road is `| convert(h)`.
+fn is_projection_spelling(o: &Operand) -> bool {
+    matches!(
+        o,
+        Operand::Rel {
+            projection: Some(_),
+            ..
+        } | Operand::Field { .. }
+            | Operand::Through { .. }
+            | Operand::Recall(_)
+            | Operand::Edge {
+                projection: Some(_)
+            }
+            | Operand::PeerReg { .. }
+            | Operand::ValueMeta { .. }
+            | Operand::Projected { .. }
+    )
 }
 
 /// The adjacency rule (spec: Pipelines, "Stdin"): a built-in after
@@ -13810,7 +13972,7 @@ fn subst_operand(o: &mut Operand, map: &Subst<'_>) {
                 }
             }
         }
-        Operand::Typed { inner, .. } => subst_operand(inner, map),
+        Operand::Typed { inner, .. } | Operand::InUnit { inner, .. } => subst_operand(inner, map),
         Operand::LabelIndex { base, labels } => {
             subst_operand(base, map);
             for l in labels {

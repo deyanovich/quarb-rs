@@ -583,7 +583,8 @@ impl Filler<'_> {
             | Operand::Invoking(i)
             | Operand::Position(i)
             | Operand::Driver(i)
-            | Operand::Typed { inner: i, .. } => self.operand(i),
+            | Operand::Typed { inner: i, .. }
+            | Operand::InUnit { inner: i, .. } => self.operand(i),
             Operand::Through { base, projection } => {
                 self.operand(base);
                 self.projection(projection);

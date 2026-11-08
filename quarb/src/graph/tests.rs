@@ -756,8 +756,20 @@ fn dot_wildcard_and_sugar() {
     // A named hop takes a brace quantifier directly.
     let lists = MockTree::lists();
     assert_eq!(run("/div/ul/li(/ul/li){1}", &lists), vec![5]);
-    // Outside a pattern, `.` stays a literal name (no such node).
-    assert!(run("/.", &t).is_empty());
+    // Outside a pattern a lone `.` is refused with the three readings
+    // it could have meant (ruling 2026-11-08); the quoted name is the
+    // literal (no such node here), the parent hop and a dotted name
+    // stay what they are.
+    for q in ["/.", "/b->.", "/b/."] {
+        let e = parse(&lex(q).unwrap()).unwrap_err().to_string();
+        assert!(e.contains("'.' alone names no node here"), "{q}: {e}");
+        assert!(
+            e.contains("('(/.)*')") && e.contains("('/\".\"')"),
+            "{q}: {e}"
+        );
+    }
+    assert!(run("/\".\"", &t).is_empty());
+    assert!(run("/b/..", &t).contains(&1) || !run("/b/..", &t).is_empty());
 }
 
 #[test]

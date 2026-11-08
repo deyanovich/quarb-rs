@@ -2634,9 +2634,13 @@ impl<A: AstAdapter> ModelAdapter<A> {
 
     /// A declared weight's value as a quantity: under the typed
     /// clause (`weights(::km<_km>)`) a bare number — or numeric text —
-    /// is read in the named unit, anything else as `as_quantity`
-    /// reads it; untyped, `as_quantity` alone (a bare number is no
-    /// weight).
+    /// is read in the named unit, and a quantity cell (`110 min`
+    /// under `<_h>`) is checked against the unit's dimension and
+    /// shown in the unit, its magnitude converted on the fly and its
+    /// base value untouched (ruling 2026-11-08); a quantity of another
+    /// dimension is no weight, `None`, which the load check names
+    /// ([`Self::dimension_clash`]). Untyped, `as_quantity` alone (a
+    /// bare number is no weight).
     fn weight_quantity(&self, v: Value, unit: Option<&str>) -> Option<Value> {
         let Some(unit) = unit else {
             return self.as_quantity(v);
@@ -2647,17 +2651,37 @@ impl<A: AstAdapter> ModelAdapter<A> {
             Value::Str(s) => s.trim().parse::<f64>().ok(),
             _ => None,
         };
+        let (f, base) = self.unit_scale(unit)?;
         match number {
-            Some(n) => {
-                let (f, base) = self.unit_scale(unit)?;
-                Some(Value::Quantity {
-                    value: n * f,
+            Some(n) => Some(Value::Quantity {
+                value: n * f,
+                base,
+                written: Some((n, unit.to_string())),
+            }),
+            None => match self.as_quantity(v)? {
+                Value::Quantity {
+                    value, base: held, ..
+                } if held == base => Some(Value::Quantity {
+                    value,
                     base,
-                    written: Some((n, unit.to_string())),
-                })
-            }
-            None => self.as_quantity(v),
+                    written: Some((quarb::quantity::unscale_by(value, f), unit.to_string())),
+                }),
+                _ => None,
+            },
         }
+    }
+
+    /// Whether a typed clause's cell is a quantity of another
+    /// dimension than the type's unit — the model/cells contradiction
+    /// the load check refuses by name (ruling 2026-11-08).
+    fn dimension_clash(&self, v: &Value, unit: &str) -> bool {
+        let Some((_, base)) = self.unit_scale(unit) else {
+            return false;
+        };
+        matches!(
+            self.as_quantity(v.clone()),
+            Some(Value::Quantity { base: held, .. }) if held != base
+        )
     }
 
     /// The weights declarations checked at load (spec: Weights): every
@@ -2712,6 +2736,10 @@ impl<A: AstAdapter> ModelAdapter<A> {
                     self.weight_quantity(q.clone(), spec.unit.as_deref())
                 else {
                     return Err(match &spec.unit {
+                        Some(u) if self.dimension_clash(&q, u) => format!(
+                            "{what}: weights(::{name}<_{u}>) types the rows' cells in {u}, and \
+                             the rows hold {q} — a quantity of another dimension"
+                        ),
                         Some(u) => format!(
                             "{what}: weights(::{name}<_{u}>) names no number — the rows hold {q}"
                         ),
@@ -2792,18 +2820,29 @@ impl<A: AstAdapter> ModelAdapter<A> {
             // or ISO text the elapsed time; a bare number has no dimension
             let base = match self.weight_quantity(v.clone(), decl.unit.as_deref()) {
                 Some(Value::Quantity { base, .. }) => base,
-                _ => match &v {
-                    Value::Instant { .. } | Value::Period { .. } => "s".to_string(),
-                    Value::Str(_) if v.temporal_reading().is_some() => "s".to_string(),
-                    other => {
+                _ => {
+                    if let Some(u) = &decl.unit
+                        && self.dimension_clash(&v, u)
+                    {
                         return Err(format!(
-                            "{}: '::{}' is no potential — the nodes hold {other} (a potential is \
-                             an instant or a quantity; a bare number has no dimension, a unit \
-                             types it: '::{}<_UNIT>')",
-                            decl.stmt, decl.prop, decl.prop
+                            "{}: '::{}<_{u}>' types the nodes' cells in {u}, and the nodes hold \
+                             {v} — a quantity of another dimension",
+                            decl.stmt, decl.prop
                         ));
                     }
-                },
+                    match &v {
+                        Value::Instant { .. } | Value::Period { .. } => "s".to_string(),
+                        Value::Str(_) if v.temporal_reading().is_some() => "s".to_string(),
+                        other => {
+                            return Err(format!(
+                                "{}: '::{}' is no potential — the nodes hold {other} (a potential \
+                                 is an instant or a quantity; a bare number has no dimension, a \
+                                 unit types it: '::{}<_UNIT>')",
+                                decl.stmt, decl.prop, decl.prop
+                            ));
+                        }
+                    }
+                }
             };
             if dimensionless(&base) {
                 return Err(format!(
@@ -2851,10 +2890,14 @@ fn potential_difference(
         _ => {
             let (
                 Some(Value::Quantity {
-                    value: a, base: ba, ..
+                    value: a,
+                    base: ba,
+                    written: wa,
                 }),
                 Some(Value::Quantity {
-                    value: b, base: bb, ..
+                    value: b,
+                    base: bb,
+                    written: wb,
                 }),
             ) = (as_quantity(source.clone()), as_quantity(target.clone()))
             else {
@@ -2879,10 +2922,17 @@ fn potential_difference(
             if ba != bb {
                 return None;
             }
+            // the ends' shared written unit carries to the difference:
+            // a typed potential shows its unit (ruling 2026-11-08);
+            // ends written apart print in the base
+            let written = match (wa, wb) {
+                (Some((ma, ua)), Some((mb, ub))) if ua == ub => Some((mb - ma, ua)),
+                _ => None,
+            };
             Some(Value::Quantity {
                 value: b - a,
                 base: ba,
-                written: None,
+                written,
             })
         }
     }

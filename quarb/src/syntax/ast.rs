@@ -599,7 +599,7 @@ pub fn auto_field_name(op: &Operand) -> Option<&str> {
     if let Operand::Field { name, .. } = op {
         return Some(name);
     }
-    if let Operand::Typed { inner, .. } = op {
+    if let Operand::Typed { inner, .. } | Operand::InUnit { inner, .. } = op {
         return auto_field_name(inner);
     }
     if let Operand::Lit(crate::Value::Projection { key, .. }) = op {
@@ -749,7 +749,7 @@ pub struct Quant {
     /// A budget instead of a count (spec: The budget quantifier):
     /// `{;100_km}`, `{10_km;100_km}`, `{2_h;}` — the floor and the
     /// ceiling as written, quantities the walk sums an edge weight
-    /// against — or the bare unit `{_km}`, the dimension named and
+    /// against — or the star unit `{*_km}`, the dimension named and
     /// no bound. With a budget `min` is 0 and `max` is `None`.
     pub budget: Option<Budget>,
 }
@@ -758,13 +758,13 @@ pub struct Quant {
 /// literal (`100_km`, `2_h`, `-200_m`), resolved at the walk under
 /// the run's declared units; an absent bound is no bound (ruling
 /// 2026-11-07: the formalia's `a ≤ c ≤ b`, either side absent). The
-/// bare-unit brace `{_km}` / `{min:_m}` names the dimension and the
-/// printing unit alone, both bounds absent.
+/// star-unit brace `{*_km}` / `{min:*_m}` (ruling 2026-11-08) names
+/// the dimension and the printing unit alone, both bounds absent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Budget {
     pub floor: Option<String>,
     pub ceiling: Option<String>,
-    /// The bare unit, `km` of `{_km}`, when the brace names its
+    /// The star unit, `km` of `{*_km}`, when the brace names its
     /// dimension without bounds.
     pub unit: Option<String>,
 }
@@ -1113,6 +1113,13 @@ pub enum Operand {
         inner: Box<Operand>,
         typing: crate::value::Typing,
     },
+    /// `::time<_h>` as a value — right of `=`, as an operand, as a
+    /// body (spec: Projectors, the unit trait, ruling 2026-11-08):
+    /// the inner's reading under the unit, convert's rule plus the
+    /// minting of bare numbers, null where it does not read; the
+    /// field, if any, stays undeclared. The same brackets on a
+    /// declaring item are [`Operand::Typed`].
+    InUnit { inner: Box<Operand>, unit: String },
     /// `base:key` — a value's provenance: the core-metadata rung
     /// after a register value or the topic, defined over the
     /// origins the value was read from (`source`, `instant`,

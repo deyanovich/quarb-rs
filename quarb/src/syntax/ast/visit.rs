@@ -219,7 +219,7 @@ pub fn walk_operand<V: Visitor + ?Sized>(v: &mut V, o: &Operand) {
         | Operand::Invoking(inner)
         | Operand::Position(inner)
         | Operand::Driver(inner) => v.operand(inner),
-        Operand::Typed { inner, .. } => v.operand(inner),
+        Operand::Typed { inner, .. } | Operand::InUnit { inner, .. } => v.operand(inner),
         Operand::LabelIndex { base, labels } => {
             v.operand(base);
             for l in labels {

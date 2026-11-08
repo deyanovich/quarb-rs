@@ -262,7 +262,7 @@ pub(crate) fn quant_text(q: &Quant) -> String {
         _ if q.budget.is_some() => {
             let b = q.budget.as_ref().expect("checked");
             match &b.unit {
-                Some(u) => format!("{{{rule}_{u}}}"),
+                Some(u) => format!("{{{rule}*_{u}}}"),
                 None => format!(
                     "{{{rule}{};{}}}",
                     b.floor.as_deref().unwrap_or(""),
@@ -965,6 +965,7 @@ pub(crate) fn operand(o: &Operand) -> String {
             Operand::Topic => typing.spelling(),
             _ => format!("{}{}", operand(inner), typing.spelling()),
         },
+        Operand::InUnit { inner, unit } => format!("{}<_{unit}>", operand(inner)),
         Operand::ValueMeta { base, key } => format!("{}:{key}", operand(base)),
         Operand::PeerReg { at, reg: r } => match at {
             Some(at) => format!("{}:{}", operand(at), reg(r).trim_start_matches('$')),

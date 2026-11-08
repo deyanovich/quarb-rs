@@ -1596,7 +1596,21 @@ pub(crate) fn eval_operand<H: Host>(
         // A typed projector stands where a field is declared — a
         // header item, a record key, a structured projector's item,
         // `map`'s body — never as a value (spec: Projectors, draft
-        // 166): a trait describes a field, not a value.
+        // 166): a trait describes a field, not a value. The unit
+        // trait is the exception (ruling 2026-11-08): `::time<_h>`
+        // as a value is the reading under the unit, null where it
+        // does not read.
+        Operand::Typed {
+            inner,
+            typing: crate::Typing::Declared(crate::ColumnType::Unit(unit)),
+        } => forking(eval_operand(host, ext, inner, trace, scope))
+            .into_iter()
+            .map(|v| crate::value::unit_reading(v, unit))
+            .collect(),
+        Operand::InUnit { inner, unit } => forking(eval_operand(host, ext, inner, trace, scope))
+            .into_iter()
+            .map(|v| crate::value::unit_reading(v, unit))
+            .collect(),
         Operand::Typed { inner, typing } => {
             let spelled = crate::syntax::unparse::operand(operand);
             let cast = match typing.declared() {

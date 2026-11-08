@@ -1386,9 +1386,26 @@ pub enum ColumnType {
     /// compared item by item, printed in the quarb form; never
     /// inferred, it arises by declaration or as the flattened index.
     Tuple(std::sync::Arc<Vec<ColumnType>>),
+    /// A UNIT column (spec: Projectors, the unit trait, ruling
+    /// 2026-11-08), declared only: `t<_h>` holds quantities of the
+    /// unit's dimension written in the unit — a quantity converted
+    /// on the fly, its base value untouched, a bare number or
+    /// numeric text minted in the unit; never inferred (a column of
+    /// quantities infers `quantity`). The word is the unit with the
+    /// underscore a quantity writes, `_h`.
+    Unit(std::sync::Arc<str>),
 }
 
 impl ColumnType {
+    /// The unit a unit column is declared in, `None` for every other
+    /// type.
+    pub fn unit(&self) -> Option<&str> {
+        match self {
+            ColumnType::Unit(u) => Some(u),
+            _ => None,
+        }
+    }
+
     /// The type's word, as `| type` lists it (`(int; text)` for a
     /// tuple).
     pub fn word(&self) -> String {
@@ -1402,6 +1419,7 @@ impl ColumnType {
             ColumnType::Quantity => "quantity".to_string(),
             ColumnType::Node => "node".to_string(),
             ColumnType::Text => "text".to_string(),
+            ColumnType::Unit(u) => format!("_{u}"),
             ColumnType::Tuple(items) => {
                 format!(
                     "({})",
@@ -1419,6 +1437,12 @@ impl ColumnType {
     /// (`#(--header=@(:age<int>))`); a tuple by its words in
     /// parentheses, `(int; text)`; `None` for no such word.
     pub fn from_word(word: &str) -> Option<ColumnType> {
+        // `_h` — the unit trait's word (ruling 2026-11-08): the
+        // underscore a quantity writes, then a unit expression; that
+        // the unit is one the run knows is the parser's check
+        if let Some(u) = word.strip_prefix('_') {
+            return unit_shaped(u).then(|| ColumnType::Unit(u.into()));
+        }
         if let Some(inner) = word.strip_prefix('(').and_then(|w| w.strip_suffix(')')) {
             let items: Option<Vec<ColumnType>> = inner
                 .split([';', ','])
@@ -1500,6 +1524,89 @@ impl Typing {
             Typing::Star(_) => None,
         }
     }
+
+    /// The unit a unit trait declares (`<_h>`), `None` under a type
+    /// word or the star.
+    pub fn unit(&self) -> Option<&str> {
+        match self {
+            Typing::Declared(ColumnType::Unit(u)) => Some(u),
+            _ => None,
+        }
+    }
+}
+
+/// Whether `u` is shaped as a unit expression: a unit letter (or a
+/// currency sign) first, then letters, digits and the operators of
+/// an expression (`km/h`, `m^2`).
+fn unit_shaped(u: &str) -> bool {
+    use crate::value::quantity::is_name_char;
+    u.chars().next().is_some_and(is_name_char)
+        && u.chars()
+            .all(|c| is_name_char(c) || c.is_ascii_digit() || matches!(c, '*' | '/' | '^'))
+}
+
+/// `v` under the unit trait `<_unit>` (spec: Projectors, the unit
+/// trait, ruling 2026-11-08) — convert's rule and the minting of
+/// bare numbers: a quantity of the unit's dimension keeps its base
+/// value and is written in the unit; a bare number, or numeric text,
+/// is read IN the unit; quantity text reads as the quantity it
+/// spells; null is null. `None` where the value does not read — a
+/// quantity of another dimension (a currency a dimension of its
+/// own), text that is neither a number nor a quantity, any other
+/// value — and where `unit` names no unit the run knows.
+pub(crate) fn cast_unit(v: &Value, unit: &str) -> Option<Value> {
+    use crate::value::quantity::{parse_unit_text, scale_by, unscale_by};
+    if matches!(v, Value::Null) {
+        return Some(Value::Null);
+    }
+    // spaced text reads no opaque unit: the unit is built in or
+    // declared, resolved through the run's resolver as convert's is
+    let (factor, base, _, _) = parse_unit_text(&format!("1 {unit}"))?;
+    let minted = |n: f64| Value::Quantity {
+        value: scale_by(n, factor),
+        base: base.clone(),
+        written: Some((n, unit.to_string())),
+    };
+    let converted = |value: f64, held: &str| {
+        (held == base).then(|| Value::Quantity {
+            value,
+            base: base.clone(),
+            written: Some((unscale_by(value, factor), unit.to_string())),
+        })
+    };
+    match v {
+        Value::Int(n) => Some(minted(*n as f64)),
+        Value::Float(x) => Some(minted(*x)),
+        Value::Quantity {
+            value, base: held, ..
+        } => converted(*value, held),
+        Value::Str(s) => {
+            match crate::value::number::read(s, crate::value::number::Decimal::Point) {
+                Some(Value::Int(n)) => Some(minted(n as f64)),
+                Some(Value::Float(x)) => Some(minted(x)),
+                _ => {
+                    let (value, held, _, _) = parse_unit_text(s)?;
+                    converted(value, &held)
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
+/// A value's reading under a unit trait in value position (ruling
+/// 2026-11-08): [`cast_unit`] with null where the value does not
+/// read, a list item by item.
+pub(crate) fn unit_reading(v: Value, unit: &str) -> Value {
+    match v {
+        Value::List(items) => Value::list(
+            items
+                .iter()
+                .map(|i| unit_reading(i.clone(), unit))
+                .collect(),
+        ),
+        other => cast_unit(&other, unit).unwrap_or(Value::Null),
+    }
 }
 
 /// `v` cast to the declared column type `t`, `None` where it does
@@ -1507,6 +1614,9 @@ impl Typing {
 /// under a declared integer (the cast is lossless), and under a
 /// tuple a list of the arity whose items cast each.
 pub(crate) fn cast_cell(v: &Value, t: &ColumnType) -> Option<Value> {
+    if let ColumnType::Unit(u) = t {
+        return cast_unit(v, u);
+    }
     if let ColumnType::Tuple(items) = t {
         if matches!(v, Value::Null) {
             return Some(Value::Null);
@@ -1551,6 +1661,7 @@ pub(crate) fn coerce_text(s: &str, t: &ColumnType) -> Option<Value> {
     use ColumnType as T;
     match t {
         T::Tuple(_) => None,
+        T::Unit(u) => cast_unit(&Value::Str(s.to_string()), u),
         T::Boolean => match s {
             "true" => Some(Value::Bool(true)),
             "false" => Some(Value::Bool(false)),
@@ -1610,6 +1721,7 @@ fn coerce_cell(v: &Value, t: &ColumnType) -> Option<Value> {
     match t {
         // a tuple is cast, never coerced: see `cast_cell`
         T::Tuple(_) => None,
+        T::Unit(u) => cast_unit(v, u),
         T::Boolean => match v {
             Value::Bool(_) => Some(v.clone()),
             Value::Str(s) if s == "true" => Some(Value::Bool(true)),
