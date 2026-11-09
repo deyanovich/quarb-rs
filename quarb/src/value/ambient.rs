@@ -249,6 +249,13 @@ pub fn record_diagnostic(d: Diagnostic) {
     with_ambient(|a| a.diagnostics.push(d));
 }
 
+/// Drop the diagnostics raised so far in the run that `drop` names:
+/// a warning on dirt a later command cleaned (`| # | clean`) is no
+/// longer a warning the answer should carry.
+pub fn retract_diagnostics(drop: impl Fn(&Diagnostic) -> bool) {
+    with_ambient(|a| a.diagnostics.retain(|d| !drop(d)));
+}
+
 /// Raise a debug diagnostic when the run asks for them
 /// (`RunOptions::debug`); the message is built only then. Behind
 /// the `debug-diagnostics` feature: a build without it raises none,

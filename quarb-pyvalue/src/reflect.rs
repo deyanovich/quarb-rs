@@ -748,7 +748,10 @@ impl Reflective {
 
     /// Walk the name with the call's values; the result as a value
     /// (plain data) or a library value (anything else).
-    pub fn call(&self, syn: &Synopsis, name: &str, call: LibCall) -> Result<Value, LibFailure> {
+    pub fn call(&self, syn: &Synopsis, name: &str, mut call: LibCall) -> Result<Value, LibFailure> {
+        // a quantity sample computes in its written unit and the
+        // answer wears it again (the dressing rule, 2026-11-09)
+        let dress = crate::dress::lift(name, &mut call)?;
         let (positional, keyword, input_at) = placed(syn, call);
         Python::attach(|py| -> Result<Value, LibFailure> {
             let failed = |e: PyErr| LibFailure::Failed(e.value(py).to_string());
@@ -769,7 +772,11 @@ impl Reflective {
                     self.pure,
                 ))
                 .map_err(failed)?;
-            crate::py_to_value(&out).map_err(failed)
+            let value = crate::py_to_value(&out).map_err(failed)?;
+            Ok(match dress {
+                Some(d) => d.apply(name, value),
+                None => value,
+            })
         })
     }
 }

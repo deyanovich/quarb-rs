@@ -63,6 +63,119 @@ pub struct ReadOptions {
     /// column is the index, named by its header label; `-i`
     /// overrides, `-i=` keeps it a column.
     pub th_index: bool,
+    /// `#(--autounits)` (every column) or `#(--autounit=:col…)` (the
+    /// named ones): a unit the title names at its end read as the
+    /// column's unit, the title losing it (ruling 2026-11-09). `None`
+    /// off; an empty list every column.
+    pub autounits: Option<Vec<String>>,
+    /// `#(--slugs)` / `#(--slugs="-")`: the titles slugged, with the
+    /// separator.
+    pub slugs: Option<String>,
+    /// The column-scoped options and the word dictionary (the
+    /// header-units round, ruling 2026-11-09).
+    pub scopes: ReadScopes,
+}
+
+/// The options scoped to a column by name (`--null:Price=…`,
+/// `--locale:Draught=de`, `--unit:Weight=_lb`, `--unit:Weight=%(pounds
+/// = _lb)`) and the dictionary for every title (`--units=%(…)`): the
+/// unscoped option stays the default, a scoped one overrides it for
+/// its column.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ReadScopes {
+    /// Per column title, its null words.
+    pub nulls_by: Vec<(String, Vec<String>)>,
+    /// Per column title, its number convention.
+    pub locale_by: Vec<(String, crate::value::number::Decimal)>,
+    /// Word → unit, for every title.
+    pub units: Vec<(String, String)>,
+    /// Per column title, word → unit for that title alone.
+    pub units_by: Vec<(String, Vec<(String, String)>)>,
+    /// Per column title, the unit the column is declared in.
+    pub declare_by: Vec<(String, String)>,
+}
+
+impl ReadScopes {
+    pub fn is_empty(&self) -> bool {
+        self.nulls_by.is_empty()
+            && self.locale_by.is_empty()
+            && self.units.is_empty()
+            && self.units_by.is_empty()
+            && self.declare_by.is_empty()
+    }
+
+    /// Every column title the scopes name.
+    pub fn columns(&self) -> impl Iterator<Item = &str> {
+        self.nulls_by
+            .iter()
+            .map(|(c, _)| c.as_str())
+            .chain(self.locale_by.iter().map(|(c, _)| c.as_str()))
+            .chain(self.units_by.iter().map(|(c, _)| c.as_str()))
+            .chain(self.declare_by.iter().map(|(c, _)| c.as_str()))
+    }
+
+    /// The unit a word maps to for a column: the column's own
+    /// dictionary first, then the call's.
+    pub fn resolve(&self, column: &str, word: &str) -> Option<String> {
+        let word = word.to_lowercase();
+        self.units_by
+            .iter()
+            .filter(|(c, _)| c == column)
+            .flat_map(|(_, m)| m.iter())
+            .chain(self.units.iter())
+            .find(|(w, _)| *w == word)
+            .map(|(_, u)| u.clone())
+    }
+
+    /// The columns the dictionaries ask to read when `--autounits`
+    /// is not written: every column under `--units=%(…)`, the scoped
+    /// columns under `--unit:col=%(…)`; `None` when neither stands.
+    pub fn implied_autounits(&self) -> Option<Vec<String>> {
+        if !self.units.is_empty() {
+            return Some(Vec::new());
+        }
+        if !self.units_by.is_empty() {
+            return Some(self.units_by.iter().map(|(c, _)| c.clone()).collect());
+        }
+        None
+    }
+
+    /// The unit a column is declared in, if any.
+    pub fn declared(&self, column: &str) -> Option<String> {
+        self.declare_by
+            .iter()
+            .find(|(c, _)| c == column)
+            .map(|(_, u)| u.clone())
+    }
+
+    /// A text cell of the named column under its scoped null words
+    /// and locale: a null word the empty cell, a number respelled
+    /// canonical; `None` where the scopes say nothing.
+    pub fn normalize(&self, column: &str, text: &str) -> Option<String> {
+        if let Some((_, words)) = self.nulls_by.iter().find(|(c, _)| c == column)
+            && words.iter().any(|w| w == text)
+        {
+            return Some(String::new());
+        }
+        if let Some((_, d)) = self.locale_by.iter().find(|(c, _)| c == column)
+            && crate::value::number::read(text, *d).is_some()
+            && let Some(c) = crate::value::number::canonical(text, *d)
+        {
+            return Some(c);
+        }
+        None
+    }
+
+    /// The scopes that name no column of the header, for the refusal.
+    pub fn unknown_columns<'a>(&'a self, header: &'a [String]) -> Vec<&'a str> {
+        let mut out: Vec<&str> = Vec::new();
+        for c in self.columns() {
+            if !header.iter().any(|h| h == c) && !out.contains(&c) {
+                out.push(c);
+            }
+        }
+        out
+    }
 }
 
 /// The cell texts a document table reads as missing values by
@@ -75,6 +188,9 @@ impl Default for ReadOptions {
             nulls: DEFAULT_NULLS.iter().map(|s| s.to_string()).collect(),
             locale: None,
             th_index: true,
+            autounits: None,
+            slugs: None,
+            scopes: ReadScopes::default(),
         }
     }
 }
@@ -511,7 +627,82 @@ fn build(
     site: &str,
     th_index: bool,
 ) -> Result<Table, String> {
-    let mut b = crate::TableBuilder::shaped(header.clone(), Vec::new());
+    // the title rules (the unit at the end of a title, the slug) on
+    // the header, before the typed build: a unit column is declared
+    // in its unit (the percent one included), the titles are renamed
+    // the column-scoped null words and locale first (the header-units
+    // round): a scope naming no column refuses
+    let rows: Vec<Vec<String>> = match &header {
+        Some(h) if !opts.scopes.is_empty() => {
+            let unknown = opts.scopes.unknown_columns(h);
+            if !unknown.is_empty() {
+                return Err(format!(
+                    "{} no column: the table's columns are {}",
+                    unknown
+                        .iter()
+                        .map(|c| format!("'{c}' names"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    h.join(", ")
+                ));
+            }
+            rows.into_iter()
+                .map(|r| {
+                    r.into_iter()
+                        .enumerate()
+                        .map(|(j, c)| {
+                            match h.get(j).and_then(|col| opts.scopes.normalize(col, &c)) {
+                                Some(n) => n,
+                                None => c,
+                            }
+                        })
+                        .collect()
+                })
+                .collect()
+        }
+        _ => rows,
+    };
+    let autounits: Option<Vec<String>> = opts
+        .autounits
+        .clone()
+        .or_else(|| opts.scopes.implied_autounits());
+    let title_rules =
+        autounits.is_some() || opts.slugs.is_some() || !opts.scopes.declare_by.is_empty();
+    let (header, rows, declared) = match (&header, title_rules) {
+        (Some(h), true) => {
+            let scopes = &opts.scopes;
+            let plan = crate::graph::autounits::title_plan_with(
+                h,
+                autounits.as_deref(),
+                opts.slugs.as_deref(),
+                &|j| {
+                    rows.iter()
+                        .find_map(|r| r.get(j).filter(|c| !c.trim().is_empty()).cloned())
+                },
+                site,
+                &|column, word| scopes.resolve(column, word),
+                &|column| scopes.declared(column),
+            )?;
+            let rows: Vec<Vec<String>> = if plan.factors.iter().all(|f| *f == 1.0) {
+                rows
+            } else {
+                rows.into_iter()
+                    .map(|r| {
+                        r.into_iter()
+                            .enumerate()
+                            .map(|(j, c)| match plan.scale_cell(j, Value::Str(c)) {
+                                Value::Str(t) => t,
+                                other => other.to_string(),
+                            })
+                            .collect()
+                    })
+                    .collect()
+            };
+            (Some(plan.header), rows, plan.declared)
+        }
+        _ => (header, rows, Vec::new()),
+    };
+    let mut b = crate::TableBuilder::shaped(header.clone(), declared);
     for r in &rows {
         let refs: Vec<&str> = r.iter().map(String::as_str).collect();
         b.push_text_row(&refs);
@@ -625,7 +816,7 @@ fn warn_text_columns(t: &Table, rows: &[Vec<String>], opts: &ReadOptions, site: 
             ));
         }
         let msg = format!(
-            "column '{}' falls to text: {}{more}; cleanup: {}",
+            "column '{}' falls to text: {}{more}; cleanup: | clean (or {})",
             t.column_name(j),
             shown.join(", "),
             cleanup.join(", or ")
@@ -653,7 +844,16 @@ pub fn table_rows_of(
     render: &dyn Fn(NodeId) -> String,
 ) -> Vec<Value> {
     match result {
-        crate::QueryResult::Values(values) => values,
+        // a TABLE value among the values is its rows (the one-cell
+        // bug of the browser hosts: `//table[1] | # | clean @| pretty`
+        // drew one cell holding the whole literal; 2026-11-09)
+        crate::QueryResult::Values(values) => values
+            .into_iter()
+            .flat_map(|v| match v {
+                Value::Table(t) => table_value_records(&t),
+                other => vec![other],
+            })
+            .collect(),
         crate::QueryResult::Nodes(nodes) => {
             let mut rows = Vec::with_capacity(nodes.len());
             for n in nodes {
@@ -673,6 +873,23 @@ pub fn table_rows_of(
             rows
         }
     }
+}
+
+/// A table value as the records of its rows: every column a field,
+/// the index levels among them, in the table's order.
+pub fn table_value_records(t: &crate::Table) -> Vec<Value> {
+    let names: Vec<String> = (0..t.width()).map(|j| t.column_name(j)).collect();
+    (0..t.n_rows())
+        .map(|i| {
+            Value::record(
+                names
+                    .iter()
+                    .enumerate()
+                    .map(|(j, n)| (n.clone(), t.cell(i, j)))
+                    .collect(),
+            )
+        })
+        .collect()
 }
 
 /// A koine `table` node read into records — the text-level lowering

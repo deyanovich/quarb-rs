@@ -677,10 +677,12 @@ fn apply_scalar_inner(
         "types" => return vec![refusing(call, Err(TYPES_RETIRED.into()))],
         "@" | "rows" | "%" | "columns" | "#" | "transpose" | "header" | "dim" | "[]" | "cell"
         | "row-to-header" | "header-to-row" | "flatten" | "keys" | "values" | "stack"
-        | "unstack" | "autoindex" | "autocast" | "clean" => {
+        | "unstack" | "autoindex" | "autocast" | "clean" | "correlate" => {
             return vec![refusing(
                 call,
                 match call.name.as_str() {
+                    // the foreign-key join (ruling 2026-11-09)
+                    "correlate" => correlate(call, topic),
                     // the columns typed again from the cells present
                     // (ruling 2026-11-06): the explicit form of what a
                     // rebuild did implicitly before a selection kept
@@ -949,6 +951,15 @@ fn apply_scalar_inner(
             vec![Value::Str(out)]
         }
         "trim" => vec![Value::Str(text.trim().to_string())],
+        // `slug(sep?)`: the text as a slug — lowercased, every run of
+        // characters that are neither letters nor digits the separator
+        // (`_`, or the argument), the ends trimmed; null where nothing
+        // is left (the header-units round, 2026-11-09)
+        "slug" => vec![
+            crate::graph::autounits::slug_text(&text, arg_str(call, 0, "_"))
+                .map(Value::Str)
+                .unwrap_or(Value::Null),
+        ],
         "ltrim" => vec![Value::Str(text.trim_start().to_string())],
         "rtrim" => vec![Value::Str(text.trim_end().to_string())],
         // `cc` counts codepoints (né `chars`, the pre-0.25 alias);
@@ -2451,6 +2462,21 @@ fn convert_scalar(
     scale: &dyn Fn(&str) -> Option<(f64, String)>,
 ) -> Vec<Value> {
     let target = arg_str(call, 0, "").to_string();
+    // a bare number into a unit of dimension one (`0.12 | convert(%)`
+    // is `12_%`, `3.14 | convert(rad)`): the number is the base
+    // magnitude, dressed (ruling 2026-11-09)
+    if !matches!(topic, Value::Quantity { .. } | Value::Str(_))
+        && !target.is_empty()
+        && let Some(n) = topic.numeric()
+        && let Some((factor, base)) = scale(&target)
+        && base == "1"
+    {
+        return vec![Value::Quantity {
+            value: n,
+            base,
+            written: Some((crate::value::quantity::unscale_by(n, factor), target)),
+        }];
+    }
     let Some(topic) = lift_quantity(topic, scale) else {
         return vec![Value::Null];
     };
@@ -2458,6 +2484,9 @@ fn convert_scalar(
     // (spec: Quantity Commands), 5_km as 5000_m, 1.5_h as 5400_s
     if target.is_empty() {
         return vec![match topic {
+            // the base form of dimension one is the bare number
+            // (`12_% | convert` is 0.12)
+            Value::Quantity { value, base, .. } if base == "1" => Value::Float(value),
             Value::Quantity { value, base, .. } => Value::Quantity {
                 value,
                 base: base.clone(),
@@ -2616,13 +2645,14 @@ fn round_to(n: f64, d: i64) -> f64 {
 /// The table reshapers `stack` and `unstack` and `map` itself take
 /// `|` alone (the inventory's kind `scalar` since its 0.43.0 rows) and
 /// read the structure whole.
-const BROADCAST_EXEMPT: [&str; 19] = [
+const BROADCAST_EXEMPT: [&str; 20] = [
     "map",
     "stack",
     "unstack",
     "autoindex",
     "autocast",
     "clean",
+    "correlate",
     "record",
     "rec",
     "xml",
@@ -3415,12 +3445,14 @@ fn quantital_fold(input: &[Value], scale: Scale) -> QuantFold {
                 Some((bv, b, wmag, wunit)) => (bv, b, Some((wmag, wunit))),
                 None => match crate::temporal::parse_span(s) {
                     Some((secs, nanos)) => (secs as f64 + nanos as f64 / 1e9, "s".into(), None),
-                    None => match s.trim().parse::<f64>() {
-                        Ok(n) => {
+                    // numeric text as the numeric fold reads it
+                    // (grouped thousands included)
+                    None => match v.numeric_reading().and_then(|n| n.numeric()) {
+                        Some(n) => {
                             numbers.push(n);
                             continue;
                         }
-                        Err(_) => continue,
+                        None => continue,
                     },
                 },
             },
@@ -3448,7 +3480,11 @@ fn quantital_fold(input: &[Value], scale: Scale) -> QuantFold {
             if let Some((mag, u)) = &written
                 && *mag != 0.0
             {
-                unit = Some((value / mag, u.clone()));
+                // the unit's factor from the table (exact for a
+                // decimal one, so 12_% + 2_% is 14_%), the quotient
+                // where the table does not know it
+                let factor = scale(u).map_or(value / mag, |(f, _)| f);
+                unit = Some((factor, u.clone()));
             }
         }
         mags.push(value);
@@ -3458,6 +3494,10 @@ fn quantital_fold(input: &[Value], scale: Scale) -> QuantFold {
             mags.extend(numbers);
             QuantFold::Same { base, unit, mags }
         }
+        // quantities of dimension one (percents, angles) beside bare
+        // numbers fold as the numbers they are (ruling 2026-11-09):
+        // the numeric fold reads them through their numeric reading
+        Some(base) if base == "1" => QuantFold::Absent,
         Some(_) => QuantFold::Unsound,
         None => QuantFold::Absent,
     }
@@ -3466,6 +3506,10 @@ fn quantital_fold(input: &[Value], scale: Scale) -> QuantFold {
 /// Mint a fold's result on its base, re-expressed in the shared
 /// written unit where one survived.
 fn quantital_result(value: f64, base: String, unit: Option<(f64, String)>) -> Value {
+    // dimension one with no unit to wear is the bare number
+    if base == "1" && unit.is_none() {
+        return Value::Float(value);
+    }
     Value::Quantity {
         value,
         base,
@@ -3856,11 +3900,658 @@ fn clean(call: &FnCall, topic: Value) -> Result<Value, String> {
             let cleaned = crate::Table::typed(header, rows, declared)?
                 .with_index(t.index)
                 .with_name(t.name.clone());
+            // the dirt the constructor warned of is cleaned: its
+            // warning leaves the run (the document-tables round, F4)
+            let cleaned_names: Vec<String> = (0..t.width())
+                .filter(|&j| chosen[j])
+                .map(|j| t.column_name(j))
+                .collect();
+            crate::value::ambient::retract_diagnostics(|d| {
+                d.code == "TABLE_TEXT"
+                    && cleaned_names.iter().any(|n| {
+                        d.message
+                            .starts_with(&format!("column '{n}' falls to text"))
+                    })
+            });
+            // the title rules after the cells are clean (the
+            // header-units round, 2026-11-09), the scoped options
+            // (`--null:col`, `--locale:col`, `--unit:col`, `--units`)
+            // with them
+            let scopes = read_scopes(call)?;
+            let cleaned = apply_scopes(&cleaned, &scopes)?;
+            let site = t.name.clone().unwrap_or_else(|| "the table".to_string());
+            let (autounits, slugs) = title_options(call)?;
+            let autounits = autounits.or_else(|| scopes.implied_autounits());
+            let cleaned = match (autounits, slugs) {
+                (None, None) if scopes.declare_by.is_empty() => cleaned,
+                (autounits, slugs) => title_pass(
+                    &cleaned,
+                    autounits.as_deref(),
+                    slugs.as_deref(),
+                    &site,
+                    &scopes,
+                )?,
+            };
             Ok(Value::table(cleaned))
         }
         Value::List(items) => Ok(Value::list(items.iter().map(cell).collect())),
         Value::Str(s) => Ok(clean_text(&s, &nulls, locale)),
         other => Ok(other),
+    }
+}
+
+/// `correlate(t; --on=:col?; --inner? --first-wins? --last-wins?
+/// --many?)` (ruling 2026-11-09): the foreign-key join. The topic's
+/// key — the column `--on` names, its own index when omitted — is
+/// matched, as `=` matches, against the argument table's index (one
+/// level, set with `#(-i=:col)`); the answer is the topic's rows in
+/// the topic's order with the topic's index kept and the argument's
+/// data columns appended in the argument's order, its index not
+/// repeated. An unmatched topic row keeps its row with the appended
+/// cells null; `--inner` drops it. A title the topic already carries
+/// lands as `title_2` (`_3`, …), told. A label repeated in the
+/// argument's index refuses by default; `--first-wins` and
+/// `--last-wins` take one row of it, `--many` every row (the topic's
+/// row repeated, its index with it). One info line (CORRELATE): the
+/// counts, the repeats taken, the renames.
+fn correlate(call: &FnCall, topic: Value) -> Result<Value, String> {
+    use crate::syntax::ast::Operand;
+    use std::collections::HashMap;
+    let Value::Table(t) = &topic else {
+        return Err(format!("correlate joins a table, not {}", kind_of(&topic)));
+    };
+    let u = match call.args.iter().find(|a| !matches!(a, Arg::Opt { .. })) {
+        Some(Arg::Lit(Value::Table(u))) => u.clone(),
+        Some(Arg::Lit(other)) => {
+            return Err(format!(
+                "the argument is {}, not a table: correlate($,t2; --on=:col)",
+                kind_of(other)
+            ));
+        }
+        _ => return Err("takes the table to join: correlate($,t2; --on=:col)".into()),
+    };
+    let flag = |n: &str| {
+        call.args
+            .iter()
+            .any(|a| matches!(a, Arg::Opt { name, value: None } if name == n))
+    };
+    let (inner, first_wins, last_wins, many) = (
+        flag("--inner"),
+        flag("--first-wins"),
+        flag("--last-wins"),
+        flag("--many"),
+    );
+    if [first_wins, last_wins, many].iter().filter(|b| **b).count() > 1 {
+        return Err(
+            "--first-wins, --last-wins and --many each choose a way with a repeated label; name one"
+                .into(),
+        );
+    }
+    // `--on=:col`: the key column by name — a projection, a quoted
+    // title, or the field of the topic as the parser read it
+    fn column_named(v: &Value) -> Option<String> {
+        match v {
+            Value::Projection { key, .. } => Some(key.to_string()),
+            Value::Str(s) => Some(s.clone()),
+            _ => None,
+        }
+    }
+    let on: Option<String> = call
+        .args
+        .iter()
+        .find_map(|a| match a {
+            Arg::Opt { name, value } if name == "--on" => Some(match value {
+                Some(Operand::Lit(Value::List(items))) if items.len() == 1 => {
+                    column_named(&items[0])
+                        .ok_or_else(|| "--on names the topic's key column (--on=:col)".to_string())
+                }
+                Some(Operand::List(items)) if items.len() == 1 => match &items[0] {
+                    Operand::Lit(v) => column_named(v)
+                        .ok_or_else(|| "--on names the topic's key column (--on=:col)".to_string()),
+                    Operand::Field { base, name, .. } if matches!(**base, Operand::Topic) => {
+                        Ok(name.clone())
+                    }
+                    _ => Err("--on names the topic's key column (--on=:col)".to_string()),
+                },
+                Some(Operand::Lit(Value::List(_))) | Some(Operand::List(_)) => {
+                    Err("one key column for now: --on=:col".to_string())
+                }
+                Some(Operand::Lit(v)) => column_named(v)
+                    .ok_or_else(|| "--on names the topic's key column (--on=:col)".to_string()),
+                Some(Operand::Field { base, name, .. }) if matches!(**base, Operand::Topic) => {
+                    Ok(name.clone())
+                }
+                Some(other) => {
+                    let text = crate::syntax::unparse::operand(other);
+                    match text.strip_prefix(':') {
+                        Some(n) => Ok(n.trim_matches(['"', '\'']).to_string()),
+                        None => Err(format!(
+                            "--on names the topic's key column (--on=:col); {text} given"
+                        )),
+                    }
+                }
+                None => Err("--on names the topic's key column (--on=:col)".to_string()),
+            }),
+            _ => None,
+        })
+        .transpose()?;
+    let names =
+        |x: &crate::Table| -> Vec<String> { (0..x.width()).map(|j| x.column_name(j)).collect() };
+    let (tn, un) = (names(t), names(&u));
+    let key_col = match &on {
+        Some(name) => tn.iter().position(|n| n == name).ok_or_else(|| {
+            format!(
+                "the topic has no column '{name}'; its columns: {}",
+                tn.join(", ")
+            )
+        })?,
+        None if t.index == 0 => {
+            return Err(
+                "the topic has no index to match on: name the key with --on=:col, or index it with #(-i=:col)"
+                    .into(),
+            );
+        }
+        None if t.index > 1 => {
+            return Err(
+                "one key column for now: the topic's index has several levels, name one with --on=:col"
+                    .into(),
+            );
+        }
+        None => 0,
+    };
+    if u.index == 0 {
+        return Err("the argument's index is the key: set it with #(-i=:col)".into());
+    }
+    if u.index > 1 {
+        return Err("one key column for now: the argument's index has several levels".into());
+    }
+    // the key as `=` reads it: a number by magnitude whatever its
+    // spelling, a quantity in its base, text as itself; null matches
+    // nothing
+    fn key_text(v: &Value) -> Option<String> {
+        match v {
+            Value::Null => None,
+            Value::Quantity { value, base, .. } => Some(format!("q:{base}:{value}")),
+            other => match other.numeric_reading().and_then(|n| n.numeric()) {
+                Some(x) => Some(format!("n:{x}")),
+                None => Some(format!("t:{other}")),
+            },
+        }
+    }
+    let mut by_label: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+    for r in 0..u.n_rows() {
+        if let Some(k) = key_text(&u.cell(r, 0)) {
+            let rows = by_label.entry(k.clone()).or_default();
+            if rows.is_empty() {
+                order.push(k);
+            }
+            rows.push(r);
+        }
+    }
+    let repeated: Vec<(String, Vec<usize>)> = order
+        .iter()
+        .filter_map(|k| {
+            let rows = &by_label[k];
+            (rows.len() > 1).then(|| (u.cell(rows[0], 0).to_string(), rows.clone()))
+        })
+        .collect();
+    if !repeated.is_empty() && !(first_wins || last_wins || many) {
+        let (label, rows) = &repeated[0];
+        return Err(format!(
+            "the argument's index is not unique: '{label}' {} (rows {}){}; --first-wins or --last-wins take one row of a repeated label, --many every row",
+            match rows.len() {
+                2 => "twice".to_string(),
+                n => format!("{n} times"),
+            },
+            rows.iter()
+                .map(|r| (r + 1).to_string())
+                .collect::<Vec<_>>()
+                .join(" and "),
+            if repeated.len() > 1 {
+                format!(", and {} more", repeated.len() - 1)
+            } else {
+                String::new()
+            }
+        ));
+    }
+    // the appended columns: the argument's data columns, renamed where
+    // the topic has the title
+    let mut header = tn.clone();
+    let mut declared: Vec<Option<crate::value::ColumnType>> =
+        (0..t.width()).map(|j| t.declaration(j)).collect();
+    let mut renamed: Vec<(String, String)> = Vec::new();
+    for j in u.index..u.width() {
+        let mut name = un[j].clone();
+        if header.contains(&name) {
+            let mut n = 2;
+            while header.contains(&format!("{}_{n}", un[j])) {
+                n += 1;
+            }
+            name = format!("{}_{n}", un[j]);
+            renamed.push((un[j].clone(), name.clone()));
+        }
+        header.push(name);
+        declared.push(u.declaration(j));
+    }
+    let appended: Vec<usize> = (u.index..u.width()).collect();
+    let mut rows: Vec<Vec<Value>> = Vec::with_capacity(t.n_rows());
+    let (mut matched, mut unmatched) = (0usize, 0usize);
+    for i in 0..t.n_rows() {
+        let left: Vec<Value> = (0..t.width()).map(|j| t.cell(i, j)).collect();
+        let hits: Vec<usize> = key_text(&t.cell(i, key_col))
+            .and_then(|k| by_label.get(&k).cloned())
+            .unwrap_or_default();
+        if hits.is_empty() {
+            unmatched += 1;
+            if !inner {
+                let mut row = left;
+                row.extend(appended.iter().map(|_| Value::Null));
+                rows.push(row);
+            }
+            continue;
+        }
+        matched += 1;
+        let taken: Vec<usize> = if many {
+            hits
+        } else if last_wins {
+            vec![*hits.last().expect("a hit")]
+        } else {
+            vec![hits[0]]
+        };
+        for r in taken {
+            let mut row = left.clone();
+            row.extend(appended.iter().map(|&j| u.cell(r, j)));
+            rows.push(row);
+        }
+    }
+    let site = t.name.clone().unwrap_or_else(|| "the table".to_string());
+    let mut msg = format!(
+        "correlate on {site}: {} row{}, {matched} matched, {unmatched} unmatched {}",
+        t.n_rows(),
+        if t.n_rows() == 1 { "" } else { "s" },
+        if inner { "dropped" } else { "kept with nulls" }
+    );
+    if many && rows.len() != t.n_rows() {
+        msg.push_str(&format!(
+            "; --many: {} rows from {}",
+            rows.len(),
+            t.n_rows()
+        ));
+    }
+    if !repeated.is_empty() && (first_wins || last_wins) {
+        msg.push_str(&format!(
+            "; repeated in the argument's index: {}, the {} row taken",
+            repeated
+                .iter()
+                .map(|(l, r)| format!("'{l}' ×{}", r.len()))
+                .collect::<Vec<_>>()
+                .join(", "),
+            if first_wins { "first" } else { "last" }
+        ));
+    }
+    if !renamed.is_empty() {
+        msg.push_str(&format!(
+            "; renamed: {}",
+            renamed
+                .iter()
+                .map(|(a, b)| format!("{a} → {b}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    crate::value::ambient::record_diagnostic(crate::Diagnostic::info(
+        "CORRELATE",
+        site.clone(),
+        msg,
+    ));
+    Ok(Value::table(
+        crate::Table::typed(Some(header), rows, declared)?
+            .with_index(t.index)
+            .with_name(t.name.clone()),
+    ))
+}
+
+/// The column-scoped options and the word dictionary of a call (`#`,
+/// `clean`): `--null:col=list`, `--locale:col=tag`, `--unit:col=_u`
+/// (a declaration), `--unit:col=%(word = _u)` (the column's own
+/// dictionary), `--units=%(word = _u)` (every column's) — the
+/// header-units round, ruling 2026-11-09.
+pub(crate) fn read_scopes(call: &FnCall) -> Result<crate::graph::tabula::ReadScopes, String> {
+    use crate::graph::tabula::ReadScopes;
+    use crate::syntax::ast::Operand;
+    fn dictionary(v: &Value, name: &str) -> Result<Vec<(String, String)>, String> {
+        let unit_of = |k: &str, u: &str| -> Result<(String, String), String> {
+            let unit = u.trim_start_matches('_').to_string();
+            if !crate::value::quantity::known_unit_expr(&unit) {
+                return Err(format!(
+                    "{name}: '{k}' maps to '{u}', and '{unit}' is no unit the table knows"
+                ));
+            }
+            Ok((k.to_lowercase(), unit))
+        };
+        match v {
+            Value::Record(r) => r
+                .iter()
+                .map(|(k, v)| match v {
+                    Value::Str(u) if !u.is_empty() => unit_of(k, u),
+                    Value::Projection { key, .. } => unit_of(k, &key.to_string()),
+                    other => Err(format!(
+                        "{name}: '{k}' maps to {}, not a unit in the suffix form (_lb)",
+                        kind_of(other)
+                    )),
+                })
+                .collect(),
+            other => Err(format!(
+                "{name} takes a record of word → unit (%(pounds = _lb)), not {}",
+                kind_of(other)
+            )),
+        }
+    }
+    let mut scopes = ReadScopes::default();
+    for a in &call.args {
+        let Arg::Opt { name, value } = a else {
+            continue;
+        };
+        let (base, scope) = crate::syntax::parser::split_option_scope(name);
+        match (base, scope) {
+            ("--units", None) => match value
+                .clone()
+                .and_then(crate::syntax::parser::record_operand)
+            {
+                Some(Operand::Lit(v)) => scopes.units.extend(dictionary(&v, name)?),
+                _ => return Err(format!("{name} takes a record of word → unit")),
+            },
+            ("--unit", Some(col)) => match value {
+                Some(Operand::Lit(Value::Str(u))) => {
+                    scopes
+                        .declare_by
+                        .push((col.to_string(), u.trim_start_matches('_').to_string()));
+                }
+                Some(Operand::Lit(Value::Projection { key, .. })) => {
+                    scopes
+                        .declare_by
+                        .push((col.to_string(), key.trim_start_matches('_').to_string()));
+                }
+                Some(op)
+                    if let Some(Operand::Lit(v)) =
+                        crate::syntax::parser::record_operand(op.clone()) =>
+                {
+                    scopes
+                        .units_by
+                        .push((col.to_string(), dictionary(&v, name)?));
+                }
+                _ => {
+                    return Err(format!(
+                        "{name} takes a unit in the suffix form (_lb) or a record of word → unit"
+                    ));
+                }
+            },
+            ("--unit", None) => {
+                return Err(
+                    "--unit takes a column: --unit:col=_lb, or --unit:col=%(word = _u); --units=%(…) maps every title's words"
+                        .into(),
+                );
+            }
+            ("--null", Some(col)) => {
+                let words: Vec<String> = match value {
+                    Some(Operand::Lit(Value::List(l))) => l.iter().map(|v| v.to_string()).collect(),
+                    Some(Operand::Lit(Value::Str(w))) => vec![w.clone()],
+                    Some(Operand::List(items)) => items
+                        .iter()
+                        .filter_map(|i| match i {
+                            Operand::Lit(v) => Some(v.to_string()),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => {
+                        return Err(format!(
+                            "{name} takes the cell texts read as null, a list of strings"
+                        ));
+                    }
+                };
+                scopes.nulls_by.push((col.to_string(), words));
+            }
+            ("--locale", Some(col)) => {
+                let tag = match value {
+                    Some(Operand::Lit(Value::Str(t))) if !t.is_empty() => t.clone(),
+                    _ => {
+                        return Err(format!(
+                            "{name} names the locale the numbers are written in, a tag quoted"
+                        ));
+                    }
+                };
+                let d = crate::value::number::locale_convention(&tag).ok_or_else(|| {
+                    format!(
+                        "{name}={tag}: no number conventions for that locale (carried: {})",
+                        crate::value::locale::SHIPPED.join(", ")
+                    )
+                })?;
+                scopes.locale_by.push((col.to_string(), d));
+            }
+            _ => {}
+        }
+    }
+    Ok(scopes)
+}
+
+/// The scoped null words and locale applied to a table in hand: the
+/// named columns' text cells, a null word null, a number under the
+/// column's locale that number; the columns retype.
+fn apply_scopes(
+    t: &crate::Table,
+    scopes: &crate::graph::tabula::ReadScopes,
+) -> Result<crate::Table, String> {
+    if scopes.nulls_by.is_empty() && scopes.locale_by.is_empty() {
+        return Ok(t.clone());
+    }
+    let names: Vec<String> = (0..t.width()).map(|j| t.column_name(j)).collect();
+    let unknown = scopes.unknown_columns(&names);
+    if !unknown.is_empty() {
+        return Err(format!(
+            "{} no column: the table's columns are {}",
+            unknown
+                .iter()
+                .map(|c| format!("'{c}' names"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            names.join(", ")
+        ));
+    }
+    let rows: Vec<Vec<Value>> = t
+        .rows()
+        .map(|r| {
+            r.cells()
+                .into_iter()
+                .enumerate()
+                .map(|(j, c)| {
+                    let normalized = match &c {
+                        Value::Str(text) => scopes.normalize(&names[j], text),
+                        _ => None,
+                    };
+                    match normalized {
+                        Some(n) if n.is_empty() => Value::Null,
+                        Some(n) => {
+                            crate::value::number::read(&n, crate::value::number::Decimal::Point)
+                                .unwrap_or(Value::Str(n))
+                        }
+                        None => c,
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    let declared: Vec<Option<crate::value::ColumnType>> = (0..t.width())
+        .map(|j| {
+            if scopes.nulls_by.iter().any(|(c, _)| *c == names[j])
+                || scopes.locale_by.iter().any(|(c, _)| *c == names[j])
+            {
+                None
+            } else {
+                t.declaration(j)
+            }
+        })
+        .collect();
+    Ok(crate::Table::typed(t.header.clone(), rows, declared)?
+        .with_index(t.index)
+        .with_name(t.name.clone()))
+}
+
+/// The title options of `#` and `clean` on a table in hand:
+/// `--autounits` (every column), `--autounit=:col…` (the named),
+/// `--slugs[=sep]` — as `(autounits, slugs)`: `None` off, an empty
+/// list every column.
+pub(crate) fn title_options(
+    call: &FnCall,
+) -> Result<(Option<Vec<String>>, Option<String>), String> {
+    use crate::syntax::ast::Operand;
+    fn names_of(v: &Operand) -> Vec<String> {
+        fn of_value(v: &Value) -> Vec<String> {
+            match v {
+                Value::Projection { key, .. } => vec![key.to_string()],
+                Value::Str(s) => vec![s.clone()],
+                Value::List(items) => items.iter().flat_map(of_value).collect(),
+                other => vec![other.to_string()],
+            }
+        }
+        match v {
+            Operand::Lit(v) => of_value(v),
+            Operand::List(items) => items.iter().flat_map(names_of).collect(),
+            Operand::Field { base, name, .. } if matches!(**base, Operand::Topic) => {
+                vec![name.clone()]
+            }
+            other => vec![crate::syntax::unparse::operand(other)],
+        }
+    }
+    let mut autounits: Option<Vec<String>> = None;
+    let mut slugs: Option<String> = None;
+    for a in &call.args {
+        let Arg::Opt { name, value } = a else {
+            continue;
+        };
+        match name.as_str() {
+            "--autounits" => {
+                autounits.get_or_insert_with(Vec::new);
+            }
+            "--autounit" => {
+                let names = match value {
+                    Some(v) => names_of(v),
+                    None => Vec::new(),
+                };
+                if names.is_empty() {
+                    return Err(format!(
+                        "{}(--autounit=:col…) names the columns whose titles to read; --autounits reads every title",
+                        call.name
+                    ));
+                }
+                let have = autounits.get_or_insert_with(Vec::new);
+                if have.is_empty() && autounits_is_every(call) {
+                    // `--autounits --autounit=:x`: the flag already
+                    // covers every column
+                } else {
+                    have.extend(names);
+                }
+            }
+            "--slugs" => {
+                slugs = Some(match value {
+                    Some(Operand::Lit(Value::Str(sep))) if !sep.is_empty() => sep.clone(),
+                    Some(Operand::Lit(Value::Str(_))) | None => "_".to_string(),
+                    Some(other) => {
+                        return Err(format!(
+                            "{}(--slugs={}) takes a separator in quotes: --slugs=\"-\"",
+                            call.name,
+                            crate::syntax::unparse::operand(other)
+                        ));
+                    }
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok((autounits, slugs))
+}
+
+fn autounits_is_every(call: &FnCall) -> bool {
+    call.args
+        .iter()
+        .any(|a| matches!(a, Arg::Opt { name, .. } if name == "--autounits"))
+}
+
+/// The title rules over a table in hand (`#(--autounits)`,
+/// `#(--autounit=:col…)`, `#(--slugs)`, and `clean`'s): a unit a
+/// title names at its end read as the column's unit, the title
+/// losing it, the column cast to that unit; a `%` title read as
+/// ratios; the titles slugged; collisions refused; one info line
+/// (the header-units round, 2026-11-09). The index and the name
+/// kept.
+pub(crate) fn title_pass(
+    t: &crate::Table,
+    autounits: Option<&[String]>,
+    slugs: Option<&str>,
+    site: &str,
+    scopes: &crate::graph::tabula::ReadScopes,
+) -> Result<crate::Table, String> {
+    use crate::graph::autounits::title_plan_with;
+    let Some(header) = &t.header else {
+        return Err(format!(
+            "{} reads the column titles, and the table has none: name them first (#(--header=…))",
+            match (autounits, slugs) {
+                (Some(_), Some(_)) => "--autounits with --slugs",
+                (Some(_), None) => "--autounits",
+                _ => "--slugs",
+            }
+        ));
+    };
+    let sample = |j: usize| -> Option<String> {
+        (0..t.n_rows()).find_map(|i| match t.cell(i, j) {
+            Value::Null => None,
+            Value::Str(s) if s.trim().is_empty() => None,
+            other => Some(other.to_string()),
+        })
+    };
+    let plan = title_plan_with(
+        header,
+        autounits,
+        slugs,
+        &sample,
+        site,
+        &|column, word| scopes.resolve(column, word),
+        &|column| scopes.declared(column),
+    )?;
+    let rows: Vec<Vec<Value>> = t
+        .rows()
+        .map(|r| {
+            r.cells()
+                .into_iter()
+                .enumerate()
+                .map(|(j, c)| plan.scale_cell(j, c))
+                .collect()
+        })
+        .collect();
+    // a converted column retypes from its cells and is then cast to
+    // its unit; every other column keeps its declaration
+    let declared: Vec<Option<crate::value::ColumnType>> = (0..t.width())
+        .map(|j| {
+            if plan.declared[j].is_some() {
+                None
+            } else {
+                t.declaration(j)
+            }
+        })
+        .collect();
+    let casts: Vec<(String, crate::value::ColumnType)> = plan
+        .declared
+        .iter()
+        .enumerate()
+        .filter_map(|(j, d)| d.clone().map(|d| (plan.header[j].clone(), d)))
+        .collect();
+    let passed = crate::Table::typed(Some(plan.header.clone()), rows, declared)?
+        .with_index(t.index)
+        .with_name(t.name.clone());
+    if casts.is_empty() {
+        Ok(passed)
+    } else {
+        passed.cast_columns(&casts)
     }
 }
 
@@ -3906,11 +4597,17 @@ pub(crate) fn clean_text(
     if let Some(v) = read(&t, locale) {
         return v;
     }
-    // a percent: the ratio
+    // a percent: the quantity `12_%` (the percent unit, ruling
+    // 2026-11-09), holding the ratio
     if let Some(p) = t.strip_suffix('%')
         && let Some(n) = read(p.trim(), locale).and_then(|v| v.numeric())
+        && let Some((factor, base)) = crate::value::quantity::scale_expr("%")
     {
-        return Value::Float(n / 100.0);
+        return Value::Quantity {
+            value: crate::value::quantity::scale_by(n, factor),
+            base,
+            written: Some((n, "%".to_string())),
+        };
     }
     // a scale suffix
     let scaled = [
@@ -3934,6 +4631,16 @@ pub(crate) fn clean_text(
             Value::Int(n as i64)
         } else {
             Value::Float(n)
+        };
+    }
+    // unit text (`12 km`, `5 metric tonnes`): the quantity (the
+    // header-units round, the word road); a currency stays text here,
+    // as it does in every spaced reading
+    if let Some((value, base, wv, wu)) = crate::value::quantity::parse_unit_text(&t) {
+        return Value::Quantity {
+            value,
+            base,
+            written: Some((wv, wu)),
         };
     }
     Value::Str(t)
@@ -6190,6 +6897,11 @@ pub(crate) fn table_command_shaped(
         ),
         None => None,
     };
+    // `--autounits` / `--autounit=:col…` / `--slugs` on a table in
+    // hand: the title rules (the header-units round, 2026-11-09; a
+    // document table applies them as it is read)
+    let title_opts = title_options(call)?;
+    let scopes = read_scopes(call)?;
     let finish = |v: Value| -> Result<Value, String> {
         let Value::Table(t) = v else { return Ok(v) };
         let t = if nulls.is_empty() && locale.is_none() {
@@ -6211,7 +6923,32 @@ pub(crate) fn table_command_shaped(
                         .collect()
                 })
                 .collect();
+            // the dirt the constructor warned of is gone from the
+            // columns the pass retyped: the warning leaves the run
+            crate::value::ambient::retract_diagnostics(|d| d.code == "TABLE_TEXT");
             std::sync::Arc::new(t.rebuild(rows)?)
+        };
+        let t = if scopes.nulls_by.is_empty() && scopes.locale_by.is_empty() {
+            t
+        } else {
+            std::sync::Arc::new(apply_scopes(&t, &scopes)?)
+        };
+        let implied = (
+            title_opts.0.clone().or_else(|| scopes.implied_autounits()),
+            title_opts.1.clone(),
+        );
+        let t = match &implied {
+            (None, None) if scopes.declare_by.is_empty() => t,
+            (autounits, slugs) => {
+                let site = t.name.clone().unwrap_or_else(|| "the table".to_string());
+                std::sync::Arc::new(title_pass(
+                    &t,
+                    autounits.as_deref(),
+                    slugs.as_deref(),
+                    &site,
+                    &scopes,
+                )?)
+            }
         };
         let t = match &index {
             Some(levels) if levels.is_empty() => t.as_ref().clone().drop_index(),
@@ -6271,6 +7008,15 @@ pub(crate) fn table_command_shaped(
                 .into(),
         ),
     };
+    // on an existing table `#(--header=h)` is the columns the header
+    // names, in its order, cast as declared (spec: The Table; the
+    // selection rule, which the typed header already followed — the
+    // bare names take the same road, 2026-11-09)
+    if let (Value::Table(_), Some(names)) = (&v, &header) {
+        let declared: Vec<(String, Option<crate::value::ColumnType>)> =
+            names.iter().map(|n| (n.clone(), None)).collect();
+        return finish(typed_table(&declared, v)?);
+    }
     let items = match v {
         Value::List(l) => l,
         other => {

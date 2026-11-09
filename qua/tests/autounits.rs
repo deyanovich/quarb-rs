@@ -20,6 +20,11 @@ fn fixture(tag: &str) -> PathBuf {
     )
     .unwrap();
     std::fs::write(dir.join("lengths.csv"), "name,length,length_km\na,1,2\n").unwrap();
+    std::fs::write(
+        dir.join("quays.csv"),
+        "Port,Draught (m),Share %,Checked in,Quay m,Mass [kg]\nPiraeus,18.5,12,3,1200,5000\nKoper,14,2.2,4,650,2100\n",
+    )
+    .unwrap();
     std::fs::write(dir.join("times.csv"), "name,t_min,t_h\na,60,1\n").unwrap();
     std::fs::write(
         dir.join("legs.json"),
@@ -165,7 +170,7 @@ fn the_table_fast_path_types_the_converted_columns() {
     assert!(!header.contains("body_mass_g"), "{header}");
     assert_eq!(
         ok(&d, &["/row @| # | :bill_length | mean", t]),
-        "41.56666666666667_mm"
+        "41.5666666666667_mm"
     );
     assert_eq!(
         ok(&d, &["/row @| # | :body_mass", t]),
@@ -287,7 +292,7 @@ fn a_database_and_a_document_read_alike() {
     assert!(header.contains(":created_at<*; instant>"), "{header}");
     assert_eq!(
         ok(&d, &["/flights/* @| # | :distance | mean", db]),
-        "1318.3333333333333_km"
+        "1318.33333333333_km"
     );
     let (_, _, err) = qua(&d, &["--info", "/flights/*[1] | ::distance", db]);
     assert!(
@@ -344,7 +349,7 @@ fn reducers_over_quantities_skip_nulls_and_text() {
     .unwrap();
     assert_eq!(
         ok(&d, &["/row::body_mass @| mean", "na.csv?autounits"]),
-        "3775.0000000000005_g"
+        "3775_g"
     );
 }
 
@@ -388,7 +393,7 @@ fn the_null_option_reads_cells_as_missing_at_the_csv() {
     );
     assert_eq!(
         ok(&d, &["/row::flipper @| sum", "na.csv?autounits&null=NA"]),
-        "556.9999999999999_mm"
+        "557_mm"
     );
     // the option repeats and unions; an empty list refuses
     assert_eq!(
@@ -427,5 +432,62 @@ fn a_min_beside_a_max_is_the_minimum() {
     assert_eq!(
         ok(&d, &["/row[1] | ::price", "prices.csv?autounit=_min"]),
         "10_min"
+    );
+}
+
+#[test]
+fn titles_read_as_units_on_a_mount_and_slug() {
+    // one meaning everywhere (ruling 2026-11-09): `?autounits` reads a
+    // unit at the end of a column title as the suffix rule reads a
+    // property's `_km`; `%` is the percent unit; `?slugs` slugs
+    // the names, the unit off first when both are on
+    let d = fixture("titles");
+    let t = "quays.csv?autounits";
+    assert_eq!(
+        ok(&d, &["/row[1] | :props", t]),
+        "@(::Port; ::Draught; ::Share; ::'Checked in'; ::Quay; ::Mass)"
+    );
+    assert_eq!(ok(&d, &["/row[1] | ::Draught", t]), "18.5_m");
+    assert_eq!(ok(&d, &["/row[1] | ::Share", t]), "12_%");
+    assert_eq!(ok(&d, &["/row[2] | ::Share", t]), "2.2_%");
+    assert_eq!(ok(&d, &["/row @| # | :Share", t]), "@(12_%; 2.2_%)");
+    let (_, _, err) = qua(&d, &["--info", "/row[1] | ::Draught", t]);
+    assert!(
+        err.contains(
+            "autounits on quays.csv: Draught (m) → Draught in m, Share % → Share in %, \
+             Quay m → Quay in m, Mass [kg] → Mass in kg"
+        ),
+        "{err}"
+    );
+    // the named form by unit takes the titles naming it
+    assert_eq!(
+        ok(&d, &["/row[1] | :props", "quays.csv?autounit=_m"]),
+        "@(::Port; ::Draught; ::'Share %'; ::'Checked in'; ::Quay; ::'Mass [kg]')"
+    );
+    // `?slugs`, alone and with the units
+    assert_eq!(
+        ok(&d, &["/row[1] | :props", "quays.csv?slugs"]),
+        "@(::port; ::draught_m; ::share; ::checked_in; ::quay_m; ::mass_kg)"
+    );
+    let (_, _, err) = qua(&d, &["--info", "/row[1] | ::port", "quays.csv?slugs"]);
+    assert!(
+        err.contains("slugs on quays.csv: Port → port, Draught (m) → draught_m, Share % → share"),
+        "{err}"
+    );
+    let both = "quays.csv?autounits&slugs";
+    assert_eq!(
+        ok(&d, &["/row[1] | :props", both]),
+        "@(::port; ::draught; ::share; ::checked_in; ::quay; ::mass)"
+    );
+    assert_eq!(
+        ok(&d, &["/row @| # | :::header", both]),
+        "@(:port<*; text>; :draught<*; quantity>; :share<*; quantity>; :checked_in<*; int>; \
+         :quay<*; quantity>; :mass<*; quantity>)"
+    );
+    assert_eq!(ok(&d, &["/row @| # | :share | sum", both]), "14.2_%");
+    assert_eq!(ok(&d, &["/row @| # | :draught | sum", both]), "32.5_m");
+    assert_eq!(
+        ok(&d, &["/row[1] | :props", "quays.csv?slugs=-"]),
+        "@(::port; ::draught-m; ::share; ::checked-in; ::quay-m; ::mass-kg)"
     );
 }

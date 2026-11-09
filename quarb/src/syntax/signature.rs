@@ -48,6 +48,10 @@ pub struct OptSpec {
     /// `--by=col…`: the value takes several — a list, or the option
     /// repeated (ruling 2026-11-06); zero or more, never `…?`.
     pub many: bool,
+    /// `--slugs[=sep]`: the value is optional on the option itself —
+    /// written bare the option is a switch, with a value it carries
+    /// it (the header-units round, 2026-11-09). Never required.
+    pub bare: bool,
 }
 
 impl OptSpec {
@@ -64,12 +68,18 @@ impl OptSpec {
             .collect();
         let mut s = names.join("|");
         if let Some(v) = &self.value {
-            s.push('=');
-            s.push_str(v);
-            if self.many {
-                s.push('…');
-            } else if !self.required {
-                s.push('?');
+            if self.bare {
+                s.push_str("[=");
+                s.push_str(v);
+                s.push(']');
+            } else {
+                s.push('=');
+                s.push_str(v);
+                if self.many {
+                    s.push('…');
+                } else if !self.required {
+                    s.push('?');
+                }
             }
         }
         s
@@ -240,8 +250,27 @@ pub fn parse_form(form: &str) -> Result<Signature, String> {
     })
 }
 
-/// `-k|--kind`, `--from=PATH`, `--weight=UNIT?`, `-p|--pretty=a|b`.
+/// `-k|--kind`, `--from=PATH`, `--weight=UNIT?`, `-p|--pretty=a|b`,
+/// `--slugs[=sep]` (the value optional on the option).
 fn parse_option(word: &str) -> Result<OptSpec, String> {
+    // `--slugs[=sep]`: bare or valued
+    if let Some((names, rest)) = word.split_once("[=") {
+        let Some(v) = rest.strip_suffix(']') else {
+            return Err(format!(
+                "'{word}': an optional value is bracketed whole, '--opt[=VALUE]'"
+            ));
+        };
+        if v.is_empty() || v.ends_with('?') || v.ends_with('…') {
+            return Err(format!(
+                "'{word}': a bracketed value is the placeholder alone, '--opt[=VALUE]'"
+            ));
+        }
+        let mut spec = parse_option(names)?;
+        spec.value = Some(v.to_string());
+        spec.required = false;
+        spec.bare = true;
+        return Ok(spec);
+    }
     let (names, value) = match word.find('=') {
         Some(eq) => (&word[..eq], Some(&word[eq + 1..])),
         None => (word, None),
@@ -312,6 +341,7 @@ fn parse_option(word: &str) -> Result<OptSpec, String> {
         value: value.map(str::to_string),
         required,
         many,
+        bare: false,
     })
 }
 

@@ -1007,6 +1007,83 @@ struct Parser<'a> {
 /// room to spare: at 64 the chain ran within a tenth of the 2 MB.
 const MAX_NEST: usize = 56;
 
+/// A record written as an option's value (`--units=%(pounds = _lb)`),
+/// as the literal it folds to: the record literal itself, or the row
+/// form the option reader hands over (`%(a = x)` with every field a
+/// literal); `None` for anything else.
+pub(crate) fn record_operand(op: Operand) -> Option<Operand> {
+    // a field's value: a literal, or the unit's suffix form `_lb`,
+    // which the lexer reads as the parameter `$lb` — no parameter
+    // stands in a dictionary, so the word is the unit
+    fn field_value(v: &Operand) -> Option<Value> {
+        match v {
+            Operand::Lit(v) => Some(v.clone()),
+            Operand::Param(n) => Some(Value::Str(format!("_{n}"))),
+            _ => None,
+        }
+    }
+    match op {
+        op @ Operand::Lit(Value::Record(_)) => Some(op),
+        // the record constructor as the option reader of a command
+        // body hands it over: `%(pounds = _lb)` piped on the topic
+        Operand::Piped { ref commands, .. }
+            if let [Command::Func(call)] = commands.as_slice()
+                && matches!(call.name.as_str(), "rec" | "record") =>
+        {
+            let mut fields: Vec<(String, Value)> = Vec::new();
+            let mut args = call.args.iter();
+            while let Some(arg) = args.next() {
+                match arg {
+                    Arg::Lit(Value::Str(name)) => {
+                        let value = match args.next()? {
+                            Arg::Expr(e) => field_value(e).or_else(|| fold_closed(e))?,
+                            Arg::Lit(v) => v.clone(),
+                            _ => return None,
+                        };
+                        fields.push((name.clone(), value));
+                    }
+                    _ => return None,
+                }
+            }
+            Some(Operand::Lit(Value::Record(fields.into())))
+        }
+        Operand::Row(items) => {
+            let mut fields: Vec<(String, Value)> = Vec::new();
+            for (name, value) in items {
+                let (Some(name), Some(v)) = (name, field_value(&value)) else {
+                    return None;
+                };
+                fields.push((name, v));
+            }
+            Some(Operand::Lit(Value::Record(fields.into())))
+        }
+        _ => None,
+    }
+}
+
+/// An option's name split from its column scope: `--null:Price` is
+/// (`--null`, Some(`Price`)); a name with no colon has none (the
+/// header-units round, ruling 2026-11-09).
+pub(crate) fn split_option_scope(name: &str) -> (&str, Option<&str>) {
+    match name.split_once(':') {
+        Some((base, scope)) if base.starts_with('-') && !scope.is_empty() => (base, Some(scope)),
+        _ => (name, None),
+    }
+}
+
+/// Run one level of the parser's recursion with room for it: when
+/// the remaining stack is below the red zone, the level runs on a
+/// fresh heap segment. A debug build spends tens of kilobytes of
+/// stack per nesting level, so [`MAX_NEST`] levels do not fit the
+/// 2 MiB of a test thread or a tokio worker; the bound refuses the
+/// deeper query, the growth keeps the levels under it from
+/// overflowing. Where the stack cannot be measured (wasm) the
+/// level runs in place.
+#[inline(always)]
+fn grow_stack<T>(f: impl FnOnce() -> T) -> T {
+    stacker::maybe_grow(256 * 1024, 2 * 1024 * 1024, f)
+}
+
 /// Where a path-position splice stands (spec: Bodies and Splice
 /// Positions) — inside a branch's walk, or as (part of) a group
 /// alternative. The distinction matters only for projections: a
@@ -5287,9 +5364,16 @@ impl Parser<'_> {
                 } else if matches!(self.peek(), Some(Token::Percent))
                     && matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
                 {
-                    // the typed header, a record of names and types
+                    // the typed header, a record of names and types;
+                    // the dictionary of words (`--units=%(pounds =
+                    // _lb)`), whose `_lb` reads as the unit in an
+                    // option's value
                     self.pos += 2;
-                    Some(Operand::Row(self.record_row()?))
+                    let outer = self.in_option_value;
+                    self.in_option_value = true;
+                    let row = self.record_row();
+                    self.in_option_value = outer;
+                    Some(Operand::Row(row?))
                 } else if matches!(self.peek(), Some(Token::LParen))
                     && matches!(name.as_str(), "--index" | "-i")
                 {
@@ -5340,8 +5424,60 @@ impl Parser<'_> {
         // document table (the document-tables round, 2026-11-08)
         let mut nulls: Option<Operand> = None;
         let mut locale: Option<Operand> = None;
+        let mut autounits: Option<Operand> = None;
+        let mut slugs: Option<Operand> = None;
+        // the column-scoped options (`--null:Price=…`, `--locale:x=…`,
+        // `--unit:Weight=_lb`) ride with their scope in the name; the
+        // dictionary of words `--units=%(pounds = _lb)` (the
+        // header-units round, ruling 2026-11-09)
+        let mut scoped: Vec<(String, Operand)> = Vec::new();
+        let mut units: Option<Operand> = None;
         for (name, value) in opts {
-            match name.as_str() {
+            let (base, scope) = split_option_scope(&name);
+            if scope.is_some() && !matches!(base, "--null" | "--locale" | "--unit") {
+                return Err(QuarbError::parse(format!(
+                    "'{base}' takes no column scope: '{name}' given (--null, --locale and --unit scope to a column, '--null:Price=@(\"n/a\")')"
+                )));
+            }
+            let base = base.to_string();
+            match base.as_str() {
+                // `--units=%(pounds = _lb; tons = _t)`: the words of the
+                // titles mapped to units before the dictionary
+                "--units" => {
+                    units = Some(match value.and_then(record_operand) {
+                        Some(op) => op,
+                        None => {
+                            return Err(QuarbError::parse(format!(
+                                "'#({name}=…)' takes a record of word → unit: '#(--units=%(pounds = _lb; tons = _t))'"
+                            )));
+                        }
+                    });
+                }
+                // `--unit:col=_lb` declares the column in the unit;
+                // `--unit:col=%(pounds = _lb)` maps the words of that
+                // column's title alone
+                "--unit" => {
+                    if scope.is_none() {
+                        return Err(QuarbError::parse(
+                            "'--unit' takes a column: '--unit:Weight=_lb' declares the column in lb, '--unit:Weight=%(pounds = _lb)' maps its title's words; '--units=%(…)' maps every title's",
+                        ));
+                    }
+                    let op = match value {
+                        Some(Operand::Lit(Value::Str(u))) if !u.is_empty() => {
+                            Operand::Lit(Value::Str(u))
+                        }
+                        Some(Operand::Lit(Value::Projection { key, .. })) => {
+                            Operand::Lit(Value::Str(key.to_string()))
+                        }
+                        Some(op) if let Some(rec) = record_operand(op.clone()) => rec,
+                        _ => {
+                            return Err(QuarbError::parse(format!(
+                                "'#({name}=…)' takes a unit in the suffix form (_lb) or a record of word → unit (%(pounds = _lb))"
+                            )));
+                        }
+                    };
+                    scoped.push((name.clone(), op));
+                }
                 // `-c|--cast=:col<type>` (ruling 2026-11-06): the column
                 // declared and cast after the build, as `map(<type>;
                 // --to=:col)` does; several as a list or repeated
@@ -5494,11 +5630,79 @@ impl Parser<'_> {
                             }
                         }
                     }
-                    nulls = Some(Operand::Lit(Value::list(words)));
+                    if scope.is_some() {
+                        scoped.push((name.clone(), Operand::Lit(Value::list(words))));
+                    } else {
+                        nulls = Some(Operand::Lit(Value::list(words)));
+                    }
+                }
+                // `--autounits` / `--autounit=:col…`: the unit a column's
+                // title names (`Draught, m`) read as the column's unit;
+                // `--slugs` / `--slugs="-"`: the titles slugged
+                // (ruling 2026-11-09)
+                "--autounits" => {
+                    if value.is_some() {
+                        return Err(QuarbError::parse(format!(
+                            "'#({name})' takes no value (it reads every column whose title \
+                             names a unit); the named form is '--autounit=:col'"
+                        )));
+                    }
+                    autounits = Some(Operand::Lit(Value::Null));
+                }
+                "--autounit" => {
+                    let Some(mut op) = value else {
+                        return Err(QuarbError::parse(format!(
+                            "'#({name}=:col)' names the columns whose titles are read for a \
+                             unit; every such column is '--autounits'"
+                        )));
+                    };
+                    head_projections(&mut op);
+                    let more: Vec<Value> = match op {
+                        Operand::Lit(Value::List(l)) => l.to_vec(),
+                        Operand::Lit(v @ Value::Projection { .. }) => vec![v],
+                        Operand::Lit(Value::Str(s)) => vec![Value::projection(1, s)],
+                        Operand::List(items) => items
+                            .into_iter()
+                            .map(|i| match i {
+                                Operand::Lit(v @ Value::Projection { .. }) => Ok(v),
+                                Operand::Lit(Value::Str(s)) => Ok(Value::projection(1, s)),
+                                _ => Err(QuarbError::parse(
+                                    "'#(--autounit=…)' names columns: '--autounit=:a' or \
+                                     '--autounit=@(:a; :b)'",
+                                )),
+                            })
+                            .collect::<Result<Vec<_>>>()?,
+                        _ => {
+                            return Err(QuarbError::parse(
+                                "'#(--autounit=…)' names columns: '--autounit=:a' or \
+                                 '--autounit=@(:a; :b)'",
+                            ));
+                        }
+                    };
+                    let mut have: Vec<Value> = match autounits.take() {
+                        Some(Operand::Lit(Value::List(l))) => l.to_vec(),
+                        _ => Vec::new(),
+                    };
+                    have.extend(more);
+                    autounits = Some(Operand::Lit(Value::list(have)));
+                }
+                "--slugs" => {
+                    slugs = Some(match value {
+                        None => Operand::Lit(Value::Str("_".into())),
+                        Some(Operand::Lit(Value::Str(sep))) if !sep.is_empty() => {
+                            Operand::Lit(Value::Str(sep))
+                        }
+                        _ => {
+                            return Err(QuarbError::parse(format!(
+                                "'#({name})' slugs the column titles; a separator is a quoted \
+                                 string ('#({name}=\"-\")'), '_' when none"
+                            )));
+                        }
+                    });
                 }
                 // `--locale="de"`: the convention the numbers are written in
                 "--locale" => {
-                    locale = Some(match value {
+                    let op = match value {
                         Some(Operand::Lit(Value::Str(s))) if !s.is_empty() => {
                             Operand::Lit(Value::Str(s))
                         }
@@ -5508,7 +5712,12 @@ impl Parser<'_> {
                                  in, a tag quoted"
                             )));
                         }
-                    });
+                    };
+                    if scope.is_some() {
+                        scoped.push((name.clone(), op));
+                    } else {
+                        locale = Some(op);
+                    }
                 }
                 "--width" | "-w" => {
                     width = Some(match value {
@@ -5596,7 +5805,7 @@ impl Parser<'_> {
                 other => {
                     return Err(QuarbError::parse(format!(
                         "'#(…)' takes '--width=n' ('-w=n'), '--header=list' ('-h=list'), \
-                         '--index=:col' ('-i=:col'), '--name=word' ('-n=word'), '--autoindex' ('-a'), '--cast=:col<type>' ('-c=…'), '--null=list' or '--locale=\"tag\"'; '{other}' given"
+                         '--index=:col' ('-i=:col'), '--name=word' ('-n=word'), '--autoindex' ('-a'), '--cast=:col<type>' ('-c=…'), '--null=list', '--locale=\"tag\"', '--autounits' ('--autounit=:col'), '--slugs', '--units=%(word = _u)', or a column-scoped '--null:col', '--locale:col', '--unit:col'; '{other}' given"
                     )));
                 }
             }
@@ -5617,7 +5826,11 @@ impl Parser<'_> {
                     || autoindex
                     || !casts.is_empty()
                     || nulls.is_some()
-                    || locale.is_some() =>
+                    || locale.is_some()
+                    || autounits.is_some()
+                    || slugs.is_some()
+                    || units.is_some()
+                    || !scoped.is_empty() =>
             {
                 None
             }
@@ -5663,6 +5876,38 @@ impl Parser<'_> {
         if let Some(op) = locale {
             args.push(Arg::Opt {
                 name: "--locale".into(),
+                value: Some(op),
+            });
+        }
+        if let Some(op) = autounits {
+            // the flag rides as `--autounits` with no value, the named
+            // form as `--autounit=@(…)`
+            match op {
+                Operand::Lit(Value::Null) => args.push(Arg::Opt {
+                    name: "--autounits".into(),
+                    value: None,
+                }),
+                op => args.push(Arg::Opt {
+                    name: "--autounit".into(),
+                    value: Some(op),
+                }),
+            }
+        }
+        if let Some(op) = slugs {
+            args.push(Arg::Opt {
+                name: "--slugs".into(),
+                value: Some(op),
+            });
+        }
+        if let Some(op) = units {
+            args.push(Arg::Opt {
+                name: "--units".into(),
+                value: Some(op),
+            });
+        }
+        for (name, op) in scoped {
+            args.push(Arg::Opt {
+                name,
                 value: Some(op),
             });
         }
@@ -6951,12 +7196,27 @@ impl Parser<'_> {
                 let Arg::Opt { name: opt, value } = arg else {
                     continue;
                 };
-                let Some(spec) = opts.iter().find(|o| o.answers_to(opt)) else {
+                // a column scope (`--null:Price`) rides on the name;
+                // `clean` reads it on its reading options, no other
+                // command takes one
+                let (base, scope) = split_option_scope(opt);
+                let (base, scope) = (base.to_string(), scope.map(str::to_string));
+                if scope.is_some()
+                    && !(name == "clean"
+                        && matches!(base.as_str(), "--null" | "--locale" | "--unit"))
+                {
+                    return Err(QuarbError::parse(format!(
+                        "'{name}' takes no column scope on '{base}' ('{opt}' given); the signature: {signature}"
+                    )));
+                }
+                let Some(spec) = opts.iter().find(|o| o.answers_to(&base)) else {
                     return Err(QuarbError::parse(format!(
                         "'{name}' has no option '{opt}'; the signature: {signature}"
                     )));
                 };
                 match (&spec.value, value.is_some()) {
+                    // `--slugs[=sep]`: bare is the switch
+                    (Some(_), false) if spec.bare => {}
                     (Some(placeholder), false) => {
                         return Err(QuarbError::parse(format!(
                             "option '{opt}' of '{name}' takes a value ('{opt}={placeholder}'); the signature: {signature}"
@@ -6970,7 +7230,10 @@ impl Parser<'_> {
                     _ => {}
                 }
                 if let Some(long) = &spec.long {
-                    *opt = long.clone();
+                    *opt = match &scope {
+                        Some(sc) => format!("{long}:{sc}"),
+                        None => long.clone(),
+                    };
                     present.push(long.as_str());
                 } else if let Some(short) = &spec.short {
                     present.push(short.as_str());
@@ -7394,7 +7657,7 @@ impl Parser<'_> {
     /// `(/div){2}`).
     fn path_elem(&mut self) -> Result<PathElem> {
         self.descend()?;
-        let r = self.path_elem_inner();
+        let r = grow_stack(|| self.path_elem_inner());
         self.nest_depth -= 1;
         r
     }
@@ -8607,7 +8870,7 @@ impl Parser<'_> {
     fn pred_not(&mut self) -> Result<PredExpr> {
         self.refuse_bare_bool_word()?;
         self.descend()?;
-        let r = self.pred_not_inner();
+        let r = grow_stack(|| self.pred_not_inner());
         self.nest_depth -= 1;
         r
     }
@@ -9011,7 +9274,7 @@ impl Parser<'_> {
     /// truth value, so `(a or b) and c` still groups as before.
     fn unary(&mut self) -> Result<Operand> {
         self.descend()?;
-        let r = self.unary_inner();
+        let r = grow_stack(|| self.unary_inner());
         self.nest_depth -= 1;
         r
     }
@@ -9890,6 +10153,19 @@ impl Parser<'_> {
     /// as `| name` applies to its input, with whatever pipe tail
     /// follows (`cc`, `unique @| count`).
     fn headless_body(&mut self, name: String) -> Result<Operand> {
+        // a unit in its suffix form (`_lb`, `_t/a`) stands as a value
+        // where an option or a record field takes a unit
+        // (`--unit:Weight=_lb`, `%(pounds = _lb)`; the header-units
+        // round): the word, not a command
+        if let Some(unit) = name.strip_prefix('_')
+            && !unit.is_empty()
+            && unit.chars().all(|c| {
+                c.is_alphanumeric() || matches!(c, '^' | '/' | '*' | '%' | '$' | '€' | '£')
+            })
+            && crate::syntax::registry::spec(&name).is_none()
+        {
+            return Ok(Operand::Lit(Value::Str(name)));
+        }
         if crate::syntax::registry::split_env(&name).is_none()
             && crate::syntax::registry::spec(&name).is_none()
             && retired_command(&name).is_none()
@@ -10964,6 +11240,35 @@ impl Parser<'_> {
                     commands: vec![command],
                 })
             }
+            // `s/pat/repl/mods` at the head of a body — `map(s/, m$//)`,
+            // `map(s/a/b/; --to=:::keys)` — is the substitution command
+            // headless, as a bare command name is (2026-11-09; before
+            // it, only `map(lower | s/a/b/)` parsed)
+            Some(Token::Subst {
+                pattern,
+                replacement,
+                mods,
+            }) if self.arg_depth == 0 => {
+                let flags = super::lexer::subst_flags(mods);
+                Regex::new(&format!("{flags}{pattern}"))
+                    .map_err(|e| QuarbError::parse(format!("bad substitution pattern: {e}")))?;
+                let call = FnCall {
+                    headless: true,
+                    name: "s".to_string(),
+                    args: vec![
+                        Arg::Lit(Value::Str(pattern.clone())),
+                        Arg::Lit(Value::Str(replacement.clone())),
+                        Arg::Lit(Value::Str(mods.clone())),
+                    ],
+                };
+                self.pos += 1;
+                let mut commands = vec![func_command(call)?];
+                commands.extend(self.inline_pipe_tail()?);
+                Ok(Operand::Piped {
+                    expr: Box::new(Operand::Seed),
+                    commands,
+                })
+            }
             Some(Token::Name { text, quoted, .. }) => {
                 // `1_KB` is refused at the literal, as `convert(KB)` is:
                 // the kilobyte is ambiguous (the review's row 15489)
@@ -11489,6 +11794,20 @@ impl Parser<'_> {
                             let name = text.clone();
                             self.pos += 1;
                             return Ok(Operand::Param(name));
+                        }
+                        // `_lb` in an option's value (`--units=%(pounds =
+                        // _lb)`, the dictionary of the header-units
+                        // round): the lexer reads the suffix form as a
+                        // parameter; where no parameter of that name
+                        // stands, the word is the unit
+                        Some(Token::Name {
+                            text,
+                            quoted: false,
+                            glued: true,
+                        }) if self.in_option_value => {
+                            let unit = format!("_{text}");
+                            self.pos += 1;
+                            return Ok(Operand::Lit(Value::Str(unit)));
                         }
                         _ => {
                             return Err(QuarbError::parse(
@@ -13184,6 +13503,13 @@ fn validate_window_shift(call: &FnCall) -> Result<()> {
                         _ => None,
                     };
                     return Err(QuarbError::parse(match switch {
+                        // `tree(%)`: the sign now lexes as the percent
+                        // unit's name, the retired operand keeps its
+                        // pointer
+                        Some(_) if s == "%" => {
+                            "'%' is retired as tree's operand: write --record or -r for the properties record"
+                                .to_string()
+                        }
                         Some(sw) => format!("'{s}' is a string here: write {sw}"),
                         None => format!(
                             "tree takes column expressions, then the options -d=n (--depth=n), \
@@ -14484,7 +14810,7 @@ fn fold_closed(op: &Operand) -> Option<Value> {
 /// A record constructor's constant value from its arguments (the
 /// record convention: `name = value` pairs, bare projections keyed
 /// by their own name); `None` where a field is read at run time.
-fn fold_record(args: &[Arg]) -> Option<Value> {
+pub(crate) fn fold_record(args: &[Arg]) -> Option<Value> {
     let mut fields = Vec::new();
     let mut args = args.iter();
     while let Some(arg) = args.next() {

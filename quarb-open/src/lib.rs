@@ -2079,20 +2079,24 @@ pub fn open_mount(p: &Path, cli: &OpenOpts) -> anyhow::Result<Mounted> {
     // `?autounits` / `?autounit=_km,_g` come off next (spec: Mounts,
     // the autounits option; ruling 2026-11-08): the source opens as
     // it is, and the convention wraps whatever opened
-    let (p, suffixes) = take_units_option(&p)?;
+    let (p, suffixes, slugs, units) = take_units_option(&p)?;
     let ctx = &SourceCtx::default();
     let p = take_encoding_option(&p, ctx)?;
     let _ = ctx.take_record();
     let m = open_mount_inner(&p, cli, ctx)?;
-    let m = match suffixes {
-        Some(suffixes) => {
+    let m = match (suffixes, slugs) {
+        (None, None) if units.is_empty() => m,
+        (suffixes, slugs) => {
             let family = m.family;
             let inner_render = m.render;
-            let wrapped = Rc::new(quarb::autounits::AutoUnits::new(
-                m.adapter,
-                suffixes,
-                &target_text(&p),
-            ));
+            // `?units=pounds:_lb` alone reads the titles under the
+            // override, as `?autounits` does
+            let suffixes = suffixes
+                .or_else(|| (!units.is_empty()).then_some(quarb::autounits::Suffixes::Known));
+            let wrapped = Rc::new(
+                quarb::autounits::AutoUnits::with(m.adapter, suffixes, slugs, &target_text(&p))
+                    .with_units(units),
+            );
             let w = wrapped.clone();
             // the locator spells a renamed member by its new name
             let render: Box<dyn Fn(NodeId) -> String> =
@@ -2101,7 +2105,6 @@ pub fn open_mount(p: &Path, cli: &OpenOpts) -> anyhow::Result<Mounted> {
             m.family = family;
             m
         }
-        None => m,
     };
     ctx.clear_encoding();
     let m = match take_source_record(ctx) {
@@ -2141,26 +2144,33 @@ pub fn open_mount(p: &Path, cli: &OpenOpts) -> anyhow::Result<Mounted> {
 /// flag, and `autounit=_km,_g`, the list, merged — and the target
 /// without them; a path that exists on disk, or one with no query,
 /// is taken as is. A malformed option refuses here, naming the target.
-fn take_units_option(p: &Path) -> anyhow::Result<(PathBuf, Option<quarb::autounits::Suffixes>)> {
+fn take_units_option(
+    p: &Path,
+) -> anyhow::Result<(
+    PathBuf,
+    Option<quarb::autounits::Suffixes>,
+    Option<String>,
+    Vec<(String, String)>,
+)> {
     let Some(s) = p.to_str() else {
-        return Ok((p.to_path_buf(), None));
+        return Ok((p.to_path_buf(), None, None, Vec::new()));
     };
     if p.exists() || !s.contains('?') {
-        return Ok((p.to_path_buf(), None));
+        return Ok((p.to_path_buf(), None, None, Vec::new()));
     }
     let (path, query) = s.rsplit_once('?').unwrap();
-    let (suffixes, rest) =
-        quarb::autounits::take_options(query.split('&').filter(|x| !x.is_empty()))
+    let (suffixes, slugs, units, rest) =
+        quarb::autounits::take_options_with_units(query.split('&').filter(|x| !x.is_empty()))
             .map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
-    if suffixes.is_none() {
-        return Ok((p.to_path_buf(), None));
+    if suffixes.is_none() && slugs.is_none() && units.is_empty() {
+        return Ok((p.to_path_buf(), None, None, Vec::new()));
     }
     let target = if rest.is_empty() {
         path.to_string()
     } else {
         format!("{path}?{}", rest.join("&"))
     };
-    Ok((PathBuf::from(target), suffixes))
+    Ok((PathBuf::from(target), suffixes, slugs, units))
 }
 
 /// The target as written, without its options: what a message

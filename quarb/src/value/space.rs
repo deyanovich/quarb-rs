@@ -1119,6 +1119,27 @@ impl ColumnBuilder {
     /// The next type of the order every raw cell coerces to becomes
     /// the leader, its column packed from the raw cells.
     fn widen(&mut self) {
+        // numbers beside quantities of dimension one type as numbers
+        // whichever came first (ruling 2026-11-09): a percent leader
+        // widens down to the float rank for them
+        let dimless_mixed = (0..self.raw.len())
+            .any(|i| matches!(self.raw.get(i), Value::Int(_) | Value::Float(_)))
+            && (0..self.raw.len())
+                .any(|i| matches!(self.raw.get(i), Value::Quantity { base, .. } if base == "1"));
+        if dimless_mixed
+            && let Some(rank) = ColumnType::ORDER
+                .iter()
+                .position(|t| *t == ColumnType::Float)
+            && rank <= self.leader
+        {
+            let mut base = None;
+            if let Some(col) = Self::coerced_all(&self.raw, &ColumnType::Float, &mut base) {
+                self.leader = rank;
+                self.base = None;
+                self.typed = Some(col);
+                return;
+            }
+        }
         for rank in self.leader + 1..=TEXT_RANK {
             let t = &ColumnType::ORDER[rank];
             let mut base = None;
@@ -1142,8 +1163,20 @@ impl ColumnBuilder {
     /// does not coerce or the quantity bases differ.
     fn coerced_all(raw: &Column, t: &ColumnType, base: &mut Option<String>) -> Option<Column> {
         let mut out = Column::Null(0);
+        // a quantity of dimension one (a percent, an angle) beside bare
+        // numbers is the number it is (ruling 2026-11-09): such a
+        // column types as numbers, the percent as its ratio; a column
+        // of percents alone stays a quantity column
+        let mixed = *t == ColumnType::Float
+            && (0..raw.len()).any(|i| matches!(raw.get(i), Value::Int(_) | Value::Float(_)))
+            && (0..raw.len())
+                .any(|i| matches!(raw.get(i), Value::Quantity { base, .. } if base == "1"));
         for i in 0..raw.len() {
-            let v = coerce_cell(&raw.get(i), t)?;
+            let cell = raw.get(i);
+            let v = match (&cell, mixed) {
+                (Value::Quantity { value, base, .. }, true) if base == "1" => Value::Float(*value),
+                _ => coerce_cell(&cell, t)?,
+            };
             if *t == ColumnType::Quantity
                 && let Value::Quantity { base: b, .. } = &v
             {
@@ -3542,6 +3575,11 @@ impl Value {
             // writes decimal commas declares it (`?decimal=comma`)
             // and its text arrives in canonical form.
             Value::Str(s) => crate::value::number::read(s, crate::value::number::Decimal::Point),
+            // a quantity of dimension one (a percent, an angle) reads
+            // as the number it is, its base magnitude (ruling
+            // 2026-11-09); a dimensioned quantity has no numeric
+            // reading — the quantital fragment reads it
+            Value::Quantity { value, base, .. } if base == "1" => Some(Value::Float(*value)),
             _ => None,
         }
     }

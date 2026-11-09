@@ -149,6 +149,69 @@ impl Session {
         }
     }
 
+    /// Evaluate a line and hand back its rich form beside the cells
+    /// (the rendering rule, 2026-11-09): the browser hosts' path for
+    /// every line — see [`crate::Executor::run_rich`].
+    pub fn eval_rich(&self, line: &str) -> Result<(Vec<Cell>, Option<String>)> {
+        let q = self.combined(line);
+        self.within_budget(&q)?;
+        self.executor.run_rich(&q)
+    }
+
+    /// The rich form of values already in hand (a frozen `&N#`
+    /// replay), under the session's setting.
+    pub fn rich_of(&self, cells: &[Cell]) -> Option<String> {
+        let mode = self.pretty_mode();
+        let values: Vec<quarb::Value> = cells
+            .iter()
+            .filter_map(|c| match c {
+                Cell::Value(v) => Some(v.clone()),
+                Cell::Node(_) => None,
+            })
+            .collect();
+        quarb::rich::html_of(&values, None, None, mode)
+    }
+
+    /// The session's `--pretty` setting (`off` when it keeps no
+    /// memory).
+    pub fn pretty_mode(&self) -> quarb::PrettyMode {
+        self.session_memory()
+            .map(|m| m.borrow().pretty)
+            .unwrap_or(quarb::PrettyMode::Off)
+    }
+
+    /// Set the session's `--pretty` setting from the host (the
+    /// extension opens at `structures`, the playground at `off`).
+    pub fn set_pretty(&self, mode: quarb::PrettyMode) {
+        if let Some(m) = self.session_memory() {
+            m.borrow_mut().pretty = mode;
+        }
+    }
+
+    /// A line's rich form as a document fragment for an export
+    /// (the stylesheet, the form, the diagnostics down to the
+    /// session's level), or the text lines in a `<pre>` where there
+    /// is none.
+    pub fn export_rich(&self, line: &str) -> Result<String> {
+        let (cells, html) = self.eval_rich(line)?;
+        let diagnostics = self.diagnostics();
+        let level = self.diagnostics_level();
+        Ok(match html {
+            Some(h) => quarb::rich::document(&h, &diagnostics, level),
+            None => {
+                let text: Vec<String> = cells.iter().map(|c| c.display()).collect();
+                quarb::rich::document(
+                    &format!(
+                        "<pre class=\"quarb-text\">{}</pre>",
+                        quarb::table::escape(&text.join("\n"))
+                    ),
+                    &diagnostics,
+                    level,
+                )
+            }
+        })
+    }
+
     /// The unresolved external references the last evaluation
     /// recorded — see [`crate::Executor::refs`]. The host closes
     /// the loop: acquire, remount, re-run.

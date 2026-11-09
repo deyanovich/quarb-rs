@@ -66,7 +66,7 @@ fn a_unit_trait_stands_as_a_value() {
     let d = fixture("value");
     let q = |query: &str| ok(&d, &[query, "leg.json"]);
     // a quantity of the dimension, written in the unit, convert's rule
-    assert_eq!(q("^ | ::time<_h>"), "1.8333333333333333_h");
+    assert_eq!(q("^ | ::time<_h>"), "1.83333333333333_h");
     assert_eq!(q("^ | ::time<_min>"), "110_min");
     // a bare number is minted in the unit, not converted
     assert_eq!(q("^ | ::n<_h>"), "12_h");
@@ -79,13 +79,13 @@ fn a_unit_trait_stands_as_a_value() {
     // a list item by item
     assert_eq!(q("^ | ::legs<_h>"), "@(1.5_h; 2_h; 30_h)");
     // right of `=` the key stays undeclared, the value converted
-    assert_eq!(q("^ | %(h = ::time<_h>)"), "%(h = 1.8333333333333333_h)");
+    assert_eq!(q("^ | %(h = ::time<_h>)"), "%(h = 1.83333333333333_h)");
     // the header reports the inferred type under the star, as for
     // any undeclared field; the declared key reads back its unit
     assert_eq!(q("^ | %(h = ::time<_h>) | :::header"), "@(:h<*; duration>)");
     assert_eq!(q("^ | %(h<_h> = ::time) | :::header"), "@(:h<_h>)");
     // as an operand
-    assert_eq!(q("^ | (::time<_h> | magnitude)"), "1.8333333333333333");
+    assert_eq!(q("^ | (::time<_h> | magnitude)"), "1.83333333333333");
     assert_eq!(q("^ | ::n<_h> + 1_h"), "13_h");
     // in a predicate: legal and idle, the criterion converting anyway
     assert_eq!(q("^ | [::time<_h> > 1_h] | ::n"), "12");
@@ -115,9 +115,9 @@ fn a_unit_trait_declares_a_field_where_a_typed_projector_stands() {
     // the record key and the bare item
     assert_eq!(
         q("^ | %(hours<_h> = ::time)"),
-        "%(hours = 1.8333333333333333_h)"
+        "%(hours = 1.83333333333333_h)"
     );
-    assert_eq!(q("^ | %(::time<_h>)"), "%(time = 1.8333333333333333_h)");
+    assert_eq!(q("^ | %(::time<_h>)"), "%(time = 1.83333333333333_h)");
     assert_eq!(q("^ | %(::n<_h>; ::km<_km>)"), "%(n = 12_h; km = 1235_km)");
     // the header item, the bare typed projector over the topic's
     // fields: the declaration read back, the type listed; a value
@@ -129,7 +129,7 @@ fn a_unit_trait_declares_a_field_where_a_typed_projector_stands() {
     assert_eq!(q("^ | %(::time) | #(:time<_h>) | type"), "_h");
     assert_eq!(
         q("^ | %(::time; ::n) | #(:time<_h>; :n<_mi>) | :time"),
-        "@(1.8333333333333333_h)"
+        "@(1.83333333333333_h)"
     );
     assert_eq!(q("^ | #(t = ::time<_h>) | :::header"), "@(:t<*; duration>)");
     // a value that does not read refuses on build, naming the field
@@ -188,11 +188,11 @@ fn the_edge_cursor_and_the_register_take_the_unit_trait() {
     // lang's six lines on the LJU edge ('130 min', 1235 km, '155 EUR')
     assert_eq!(
         q("/airports/LJU | ->*[..1] | %($-::carrier; hours<_h> = $-::duration)"),
-        "%(carrier = \"swissair\"; hours = 2.1666666666666665_h)"
+        "%(carrier = \"swissair\"; hours = 2.16666666666667_h)"
     );
     assert_eq!(
         q("/airports/LJU | ->*[..1] | $-::duration<_h>"),
-        "2.1666666666666665_h"
+        "2.16666666666667_h"
     );
     assert_eq!(q("/airports/LJU | ->*[..1] | $-::km<_km>"), "1235_km");
     assert_eq!(q("/airports/LJU | ->*[..1] | $-::km<_mi>"), "1235_mi");
@@ -212,7 +212,7 @@ fn the_edge_cursor_and_the_register_take_the_unit_trait() {
     // the register and the walk's facts
     assert_eq!(
         q("/airports/LJU | ->*[..1] | .d($-::duration) | $.d<_h>"),
-        "2.1666666666666665_h"
+        "2.16666666666667_h"
     );
     assert_eq!(
         q("/airports/LJU(->*){;5_h} | $-:total<_min>"),

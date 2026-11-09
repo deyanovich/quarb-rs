@@ -57,7 +57,11 @@ impl PyGlue {
     /// unless `$_` placed it among the written operands), the
     /// operands in order, the options by their long name. A Python
     /// exception is a failed call carrying its text.
-    pub fn call(&self, syn: &Synopsis, name: &str, call: LibCall) -> Result<Value, LibFailure> {
+    pub fn call(&self, syn: &Synopsis, name: &str, mut call: LibCall) -> Result<Value, LibFailure> {
+        // a sample of quantities of one dimension computes on the
+        // magnitudes in its written unit, and the answer wears the
+        // unit again (the dressing rule, 2026-11-09)
+        let dress = crate::dress::lift(name, &mut call)?;
         let (positional, keyword) = arguments(syn, call);
         Python::attach(|py| -> Result<Value, LibFailure> {
             let failed = |e: PyErr| LibFailure::Failed(format!("{e}"));
@@ -68,7 +72,11 @@ impl PyGlue {
                 .map_err(failed)?
                 .call1((name, args, kwargs))
                 .map_err(failed)?;
-            crate::py_to_value(&out).map_err(failed)
+            let value = crate::py_to_value(&out).map_err(failed)?;
+            Ok(match dress {
+                Some(d) => d.apply(name, value),
+                None => value,
+            })
         })
     }
 }

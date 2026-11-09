@@ -308,6 +308,7 @@ pub fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     ))))
 }
 
+pub mod dress;
 pub mod foreign;
 pub mod glue;
 pub mod module;
