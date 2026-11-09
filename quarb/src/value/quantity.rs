@@ -375,12 +375,38 @@ pub fn scale_by(v: f64, factor: f64) -> f64 {
     }
 }
 
-/// `v` divided by a unit factor, the inverse of [`scale_by`].
+/// `v` divided by a unit factor, the inverse of [`scale_by`]: the
+/// written magnitude of a COMPUTED quantity, rounded to 15
+/// significant digits (ruling 2026-11-09: `4.8999999999999995_cm` is
+/// `4.9_cm`; a literal never passes here).
 pub fn unscale_by(v: f64, factor: f64) -> f64 {
-    match decimal_exponent(factor) {
+    let w = match decimal_exponent(factor) {
         Some(e) => shift10(v, -e),
         None => v / factor,
+    };
+    round_significant(w, 15)
+}
+
+/// Whether `expr` is a unit expression the table reads strictly — the
+/// packs, the engine's declarations, the run's custom units, the
+/// currencies, the dictionary's words — with no opaque reading, so a
+/// dictionary entry mapping to `_nope` refuses.
+pub fn known_unit_expr(expr: &str) -> bool {
+    with_opaque(false, || {
+        crate::value::ambient::unit_scale(expr)
+            .flatten()
+            .or_else(|| scale_expr(expr))
+    })
+    .is_some()
+}
+
+/// `x` rounded to `digits` significant digits, through its decimal
+/// spelling (so the double is the one the rounded literal reads to).
+pub fn round_significant(x: f64, digits: usize) -> f64 {
+    if x == 0.0 || !x.is_finite() || digits == 0 {
+        return x;
     }
+    format!("{:.*e}", digits - 1, x).parse().unwrap_or(x)
 }
 
 /// The scale of one unit name over the built-in table: the factor
@@ -401,6 +427,7 @@ pub fn builtin_unit_names() -> Vec<String> {
         out.extend(e.names.iter().map(|n| n.to_string()));
     }
     out.extend(CURRENCIES.iter().map(|c| c.to_string()));
+    out.push("%".to_string());
     for e in table.entries() {
         for stem in e.names {
             match e.prefixes {
@@ -501,6 +528,10 @@ pub fn unit_operand_refusal(expr: &str, declared: &[String]) -> Option<String> {
         match tables().0.lookup_with(factor, &Names(NO_NAMES)) {
             Ok(_) => {}
             Err(quanto::Error::Unknown { .. }) => {
+                // a word the dictionary knows is a unit (the word road)
+                if crate::value::unit_words::word_symbol(factor).is_some() {
+                    continue;
+                }
                 return Some(with_nearest(
                     format!("no unit '{factor}'"),
                     &nearest_units(factor, declared),
@@ -564,7 +595,7 @@ fn refused_spelling(name: &str, declared: &[String]) -> String {
 /// a currency symbol (`€`, `$`, `£`, `¥`, `₽`), so a declared
 /// currency alias reads.
 pub fn is_name_char(c: char) -> bool {
-    c.is_alphabetic() || is_currency_symbol(c)
+    c.is_alphabetic() || is_currency_symbol(c) || c == '%'
 }
 
 fn is_currency_symbol(c: char) -> bool {
@@ -622,7 +653,39 @@ fn with_opaque<T>(allowed: bool, f: impl FnOnce() -> T) -> T {
 /// unknown name, the open one reads it as an opaque unit.
 fn tables() -> &'static (Table, Table) {
     static TABLES: std::sync::OnceLock<(Table, Table)> = std::sync::OnceLock::new();
-    TABLES.get_or_init(|| (Table::all(), Table::all().unknown(Unknown::Opaque)))
+    TABLES.get_or_init(|| {
+        (
+            with_percent(Table::all()),
+            with_percent(Table::all().unknown(Unknown::Opaque)),
+        )
+    })
+}
+
+/// The characters a unit name may hold beside letters: quanto's
+/// currency signs, and the percent sign.
+const SYMBOL_CHARS: &str = "$€£¥₽₴₹₩₺₪₫฿₦₱₡₲₵₸₮¢֏₾₼₭₣₧₨₿%";
+
+/// The engine's own units beside quanto's packs, declared table-wide
+/// (they take no prefix): the percent, a unit of dimension one with
+/// factor 1/100 of the ratio (ruling 2026-11-09), so `12_%`, `12 %`,
+/// `convert(%)` and a `<_%>` trait all read it; the year `a` (with
+/// `yr`), 365.25 days, the denominator of `t/a`; the short ton
+/// `ton`, 2000 lb, what "tons" alone names in a title (the
+/// header-units round).
+fn with_percent(t: Table) -> Table {
+    let mut t = t.symbol_chars(SYMBOL_CHARS);
+    t.declare(
+        "%",
+        Unit::new(Factor::ratio(1, 100), quanto::Dimension::ONE),
+    );
+    let year = Unit::new(Factor::integer(31_557_600), quanto::Dimension::TIME);
+    t.declare("a", year.clone());
+    t.declare("yr", year);
+    t.declare(
+        "ton",
+        Unit::new(Factor::decimal(90_718_474, -5), quanto::Dimension::MASS),
+    );
+    t
 }
 
 /// The table the moment asks for: opaque units where allowed.
@@ -776,6 +839,9 @@ fn prefixable(stem: &str) -> bool {
 /// A built-in unit by its own name, no prefix: the factor and the
 /// canonical base expansion.
 fn full_name_scale(name: &str) -> Option<(f64, &'static str)> {
+    if name == "%" {
+        return Some((0.01, canonical_base(&quanto::Dimension::ONE)));
+    }
     let e = tables().0.entries().find(|e| e.names.contains(&name))?;
     Some((e.factor.to_f64(), canonical_base(&e.dimension)))
 }
@@ -835,16 +901,43 @@ pub fn scale_expr_with(
             return None;
         }
     }
-    let table = table();
-    let unit = table.unit_with(expr, &Names(custom)).ok()?;
-    Some((unit.factor.to_f64(), table.spell(&unit.dimension)))
+    // the strict table first: the packs, the engine's declarations,
+    // the run's custom units, the currencies
+    let (strict, open) = tables();
+    if let Ok(unit) = strict.unit_with(expr, &Names(custom)) {
+        return Some((unit.factor.to_f64(), strict.spell(&unit.dimension)));
+    }
+    // the word road (the header-units round, 2026-11-09): a unit
+    // written as a word the dictionary knows (`tonnes`, `miles`,
+    // `percent`), before any opaque reading, with no spaces here — a
+    // title's tail of several words goes through
+    // `unit_words::parse_unit_words`
+    if !expr.contains([' ', '*', '/', '^'])
+        && let Some(symbol) = crate::value::unit_words::word_symbol(expr)
+    {
+        // a currency is an opaque unit: it reads where opaque units
+        // may (`12_euros`, a title, `convert(euros)`), not glued or
+        // spaced in text (`12€` stays text, as today)
+        if currency_code(symbol).is_some() && !OPAQUE_ALLOWED.with(|c| c.get()) {
+            return None;
+        }
+        if let Ok(unit) = open.unit_with(symbol, &Names(custom)) {
+            return Some((unit.factor.to_f64(), open.spell(&unit.dimension)));
+        }
+    }
+    // an opaque unit where the moment allows one
+    if OPAQUE_ALLOWED.with(|c| c.get()) {
+        let unit = open.unit_with(expr, &Names(custom)).ok()?;
+        return Some((unit.factor.to_f64(), open.spell(&unit.dimension)));
+    }
+    None
 }
 
 /// Whether a base expansion holds an opaque factor.
 /// The written unit of a product (`mul` true) or quotient of two
 /// quantities written in `a` and `b`: the compound spelling quanto
 /// composes (`km/h`, `m^2`), the empty text when every term cancels.
-pub(crate) fn compose_written(a: &str, b: &str, mul: bool) -> Option<String> {
+pub fn compose_written(a: &str, b: &str, mul: bool) -> Option<String> {
     let op = if mul {
         quanto::Op::Mul
     } else {
@@ -1182,7 +1275,23 @@ pub fn parse_unit_text_with(
     };
     // A unit name is letters in any script (a declaration may name
     // `пуд`) or a currency symbol, with digits and the operators of
-    // an expression.
+    // an expression. Words with spaces (`5 metric tonnes`, `12
+    // million dollars`) read through the dictionary (the
+    // header-units round, 2026-11-09): the expression they name, the
+    // scale they carry on the magnitude.
+    if !underscored
+        && unit.contains(' ')
+        && let Ok(Some(w)) = crate::value::unit_words::parse_unit_words(unit, &|_| None, &|sym| {
+            with_opaque(false, || scale(sym)).is_some()
+        })
+    {
+        let (factor, base) = with_opaque(false, || scale(&w.expr))?;
+        if base == "1" && w.expr != "rad" && w.expr != "sr" && w.expr != "%" {
+            return None;
+        }
+        let magnitude = value * w.factor;
+        return Some((scale_by(magnitude, factor), base, magnitude, w.expr));
+    }
     if unit.is_empty()
         || !unit
             .chars()
@@ -1194,7 +1303,10 @@ pub fn parse_unit_text_with(
     // An opaque unit reads through the underscore alone: `12_EUR`
     // is a price, `2nd`, `5G` and `2 copies` are text.
     let (factor, base) = with_opaque(underscored, || scale(unit))?;
-    if base == "1" && unit != "rad" && unit != "sr" && !unit.contains('/') {
+    // the dimension-one units read as quantities (the radian, the
+    // steradian, the percent); any other dimensionless result is a
+    // plain number in disguise
+    if base == "1" && unit != "rad" && unit != "sr" && unit != "%" && !unit.contains('/') {
         return None;
     }
     Some((scale_by(value, factor), base, value, unit.to_string()))
@@ -1522,8 +1634,8 @@ mod tests {
             Some("no unit 'lbs' (the nearest: lb)")
         );
         assert_eq!(
-            unit_operand_refusal("kilometer", &[]).as_deref(),
-            Some("no unit 'kilometer'")
+            unit_operand_refusal("kilometr", &[]).as_deref(),
+            Some("no unit 'kilometr'")
         );
         // a declared unit is known, and a neighbour of one
         let mery = vec!["пуд".to_string(), "верста".to_string()];
@@ -1611,7 +1723,9 @@ mod tests {
         );
         assert_eq!(parse_unit_text("5 parsec"), None);
         assert_eq!(parse_unit_text("5parsec"), None);
-        assert_eq!(parse_unit_text("12_€").map(|t| t.1), Some("€".into()));
+        // a currency sign names its currency (the word road): one base
+        // with the code, so `12_€ = 12_EUR`
+        assert_eq!(parse_unit_text("12_€").map(|t| t.1), Some("EUR".into()));
         assert_eq!(parse_unit_text("12€"), None);
         assert_eq!(parse_unit_text("2nd"), None);
         assert_eq!(

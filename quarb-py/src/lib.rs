@@ -144,16 +144,21 @@ impl Doc {
         }
     }
 
-    fn execute(&self, query: &str) -> Result<QueryResult, String> {
-        self.execute_html(query).map(|(r, _)| r)
+    fn execute(&self, query: &str, session: &quarb::SessionMemory) -> Result<QueryResult, String> {
+        self.execute_html(query, session).map(|(r, _)| r)
     }
 
     /// Run `query`, keeping the HTML form a closing drawing
     /// (`@| tree`, `@| histogram`) leaves beside its text.
-    fn execute_html(&self, query: &str) -> Result<(QueryResult, Option<String>), String> {
+    fn execute_html(
+        &self,
+        query: &str,
+        session: &quarb::SessionMemory,
+    ) -> Result<(QueryResult, Option<String>), String> {
         let (secs, nanos) = now_parts();
         let run = quarb::Run {
             now: Some((secs, nanos)),
+            session: Some(session.clone()),
             ..Default::default()
         };
         macro_rules! go {
@@ -181,10 +186,15 @@ impl Doc {
     /// Run `query` with its closing `@| pretty` taken off: the rows
     /// (a koine `table` node as its rows' records), the text table,
     /// and the HTML grid.
-    fn table(&self, query: &str) -> Result<(Vec<Value>, String, String), String> {
+    fn table(
+        &self,
+        query: &str,
+        session: &quarb::SessionMemory,
+    ) -> Result<(Vec<Value>, String, String), String> {
         let (secs, nanos) = now_parts();
         let run = quarb::Run {
             now: Some((secs, nanos)),
+            session: Some(session.clone()),
             ..Default::default()
         };
         macro_rules! go {
@@ -336,6 +346,7 @@ fn mount(paths: Vec<String>, graft: bool, no_graft: bool, descend: bool) -> PyRe
                 .map_err(|e| PyValueError::new_err(format!("mount: {e}")))?,
         ),
         fmt: "mount".into(),
+        session: notebook_session(),
     })
 }
 
@@ -395,6 +406,18 @@ fn set_last_diagnostics(ds: &[quarb::Diagnostic]) {
 struct Document {
     doc: Doc,
     fmt: String,
+    /// The session memory the document's queries run with: the filed
+    /// values and the settings `session(--pretty=…)` sets. A notebook
+    /// opens at `structures` (the rendering rule, 2026-11-09): a table
+    /// value and a drawing render rich by default.
+    session: quarb::SessionMemory,
+}
+
+/// A notebook's opening session memory: `--pretty=structures`.
+fn notebook_session() -> quarb::SessionMemory {
+    let memory = quarb::session_memory();
+    memory.borrow_mut().pretty = quarb::PrettyMode::Structures;
+    memory
 }
 
 impl Document {
@@ -411,12 +434,93 @@ impl Document {
                 ));
             }
         }
-        self.doc.execute(query).map_err(PyValueError::new_err)
+        self.doc
+            .execute(query, &self.session)
+            .map_err(PyValueError::new_err)
     }
 }
 
 #[pymethods]
 impl Document {
+    /// Run `query` under the rendering rule (2026-11-09): the values
+    /// as `values` gives them, the text form (the table's text under
+    /// `@| pretty`, else None), and the rich HTML form the session's
+    /// `--pretty` setting draws — a table value as its grid, a record
+    /// stream closed by `@| pretty` as the grid, a drawing as its
+    /// HTML, under `always` a bare record or a list of scalars too;
+    /// None where the text is the only form. Dress it with
+    /// `quarb.rich_css()`.
+    #[pyo3(signature = (query, budget=None))]
+    fn run_rich(
+        &self,
+        py: Python<'_>,
+        query: &str,
+        budget: Option<&str>,
+    ) -> PyResult<(Vec<Py<PyAny>>, Option<String>, Option<String>)> {
+        if let Some(spec) = budget {
+            let b = quarb::plan::Budget::parse(spec).map_err(PyValueError::new_err)?;
+            let plan = self
+                .doc
+                .plan(query, Some(&b))
+                .map_err(PyValueError::new_err)?;
+            if let Some(why) = b.exceeded_by(&plan) {
+                return Err(PyValueError::new_err(
+                    quarb::QuarbError::refused(why).to_string(),
+                ));
+            }
+        }
+        let mode = self.session.borrow().pretty;
+        if quarb::closes_with_table(query) {
+            let (rows, text, grid) = self
+                .doc
+                .table(query, &self.session)
+                .map_err(PyValueError::new_err)?;
+            let values = rows
+                .iter()
+                .map(|v| value_to_py(py, v))
+                .collect::<PyResult<Vec<_>>>()?;
+            let html = quarb::rich::html_of(&[], Some(&grid), None, mode);
+            return Ok((values, Some(text), html));
+        }
+        let (result, drawing) = self
+            .doc
+            .execute_html(query, &self.session)
+            .map_err(PyValueError::new_err)?;
+        let (values, plain): (Vec<Py<PyAny>>, Vec<Value>) = match result {
+            QueryResult::Values(vs) => (
+                vs.iter()
+                    .map(|v| value_to_py(py, v))
+                    .collect::<PyResult<Vec<_>>>()?,
+                vs,
+            ),
+            QueryResult::Nodes(ns) => (
+                ns.iter()
+                    .map(|n| self.doc.render(*n).into_py_any(py))
+                    .collect::<PyResult<Vec<_>>>()?,
+                Vec::new(),
+            ),
+        };
+        let html = quarb::rich::html_of(&plain, None, drawing.as_deref(), mode);
+        Ok((values, None, html))
+    }
+
+    /// The session's `--pretty` setting as its word (`off`,
+    /// `structures`, `always`); `session(--pretty=…)` sets it from a
+    /// query, `set_pretty` from the host.
+    fn pretty(&self) -> String {
+        self.session.borrow().pretty.word().to_string()
+    }
+
+    fn set_pretty(&self, word: &str) -> PyResult<()> {
+        let mode = quarb::PrettyMode::parse(word).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "set_pretty({word:?}): the setting is off, structures or always"
+            ))
+        })?;
+        self.session.borrow_mut().pretty = mode;
+        Ok(())
+    }
+
     /// The format this document was parsed as.
     #[getter]
     fn format(&self) -> &str {
@@ -477,7 +581,7 @@ impl Document {
         }
         let (result, html) = self
             .doc
-            .execute_html(query)
+            .execute_html(query, &self.session)
             .map_err(PyValueError::new_err)?;
         let values = match result {
             QueryResult::Values(vs) => vs
@@ -570,7 +674,10 @@ impl Document {
                 ));
             }
         }
-        let (rows, text, html) = self.doc.table(query).map_err(PyValueError::new_err)?;
+        let (rows, text, html) = self
+            .doc
+            .table(query, &self.session)
+            .map_err(PyValueError::new_err)?;
         let rows = rows
             .iter()
             .map(|v| value_to_py(py, v))
@@ -609,6 +716,7 @@ fn loads(text: &str, format: &str) -> PyResult<Document> {
     Ok(Document {
         doc: Doc::parse(text, format).map_err(PyValueError::new_err)?,
         fmt: format.to_string(),
+        session: notebook_session(),
     })
 }
 
@@ -632,6 +740,7 @@ fn load(path: PathBuf, format: Option<&str>) -> PyResult<Document> {
     Ok(Document {
         doc: Doc::parse(&text, &format).map_err(PyValueError::new_err)?,
         fmt: format,
+        session: notebook_session(),
     })
 }
 
@@ -669,6 +778,7 @@ fn open(path: &str, graft: bool, no_graft: bool, descend: bool) -> PyResult<Docu
     Ok(Document {
         doc: Doc::Remote(Dyn(m.adapter)),
         fmt: m.family.to_string(),
+        session: notebook_session(),
     })
 }
 
@@ -759,7 +869,10 @@ fn run_file(query: &str, path: PathBuf) -> PyResult<Vec<String>> {
 }
 
 fn render_lines(doc: &Doc, query: &str) -> PyResult<Vec<String>> {
-    match doc.execute(query).map_err(PyValueError::new_err)? {
+    match doc
+        .execute(query, &notebook_session())
+        .map_err(PyValueError::new_err)?
+    {
         QueryResult::Nodes(ns) => Ok(ns.into_iter().map(|n| doc.render(n)).collect()),
         QueryResult::Values(vs) => Ok(vs.into_iter().map(|v| v.display_form()).collect()),
     }
@@ -768,6 +881,42 @@ fn render_lines(doc: &Doc, query: &str) -> PyResult<Vec<String>> {
 /// Whether `query` closes in `@| pretty` — the rule under which a
 /// result renders as the HTML grid in every browser host, and the
 /// notebook's rich display switches on the same condition.
+/// The stylesheet of every rich form (the grid, the drawings, the
+/// diagnostics block): `quarb::rich::css`.
+#[pyfunction]
+fn rich_css() -> &'static str {
+    quarb::rich::css()
+}
+
+/// The diagnostics block under an answer, from the engine's one
+/// renderer: `(severity, code, site, message)` tuples as
+/// `Document.diagnostics` gives them, shown down to `level`
+/// (`warning` by default).
+#[pyfunction]
+#[pyo3(signature = (diagnostics, level="warning"))]
+fn diagnostics_html(diagnostics: Vec<(String, String, String, String)>, level: &str) -> String {
+    let level = match level {
+        "error" => quarb::Severity::Error,
+        "info" => quarb::Severity::Info,
+        "debug" => quarb::Severity::Debug,
+        _ => quarb::Severity::Warning,
+    };
+    let ds: Vec<quarb::Diagnostic> = diagnostics
+        .into_iter()
+        .filter_map(|(sev, code, site, message)| {
+            let severity = match sev.as_str() {
+                "error" => quarb::Severity::Error,
+                "warning" => quarb::Severity::Warning,
+                "info" => quarb::Severity::Info,
+                "debug" => quarb::Severity::Debug,
+                _ => return None,
+            };
+            Some(quarb::Diagnostic::new(severity, code, site, message))
+        })
+        .collect();
+    quarb::rich::diagnostics_html(&ds, level)
+}
+
 #[pyfunction]
 fn closes_with_table(query: &str) -> bool {
     quarb::closes_with_table(query)
@@ -792,6 +941,8 @@ fn take_copy(query: &str) -> Option<(String, String)> {
 fn _quarb(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("TABLE_CSS", quarb::TABLE_CSS)?;
+    m.add_function(wrap_pyfunction!(rich_css, m)?)?;
+    m.add_function(wrap_pyfunction!(diagnostics_html, m)?)?;
     m.add_function(wrap_pyfunction!(closes_with_table, m)?)?;
     m.add_function(wrap_pyfunction!(take_copy, m)?)?;
     m.add_function(wrap_pyfunction!(closes_with_drawing, m)?)?;

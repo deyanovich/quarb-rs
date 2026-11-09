@@ -23,6 +23,9 @@ pub struct LocalExecutor {
     refs: std::cell::RefCell<Vec<String>>,
     /// The diagnostics the last run raised (spec: Diagnostics).
     diagnostics: std::cell::RefCell<Vec<quarb::Diagnostic>>,
+    /// The HTML a drawing the last run closed in left beside its
+    /// text (`@| tree`, `@| histogram`), for the rich form.
+    drawing: std::cell::RefCell<Option<String>>,
     /// The invocation instant `now()` denotes, bound once per session.
     now: (i64, u32),
     allow_shell: bool,
@@ -66,6 +69,7 @@ impl LocalExecutor {
             url_roots: Default::default(),
             refs: Default::default(),
             diagnostics: Default::default(),
+            drawing: Default::default(),
             now,
             allow_shell,
             environments: Vec::new(),
@@ -127,6 +131,7 @@ impl LocalExecutor {
             url_roots: Default::default(),
             refs: Default::default(),
             diagnostics: Default::default(),
+            drawing: Default::default(),
             now,
             allow_shell,
             environments: Vec::new(),
@@ -140,7 +145,12 @@ impl LocalExecutor {
 
 /// Run one query against a `Doc`, rendering its result to [`Cell`]s
 /// and reporting the unresolved references.
-type Ran = (Vec<Cell>, Vec<String>, Vec<quarb::Diagnostic>);
+type Ran = (
+    Vec<Cell>,
+    Vec<String>,
+    Vec<quarb::Diagnostic>,
+    Option<String>,
+);
 
 fn run_doc(doc: &Doc, query: &str, run: &quarb::Run) -> anyhow::Result<Ran> {
     let out = doc.run(query, run).map_err(anyhow::Error::new)?;
@@ -151,7 +161,7 @@ fn run_doc(doc: &Doc, query: &str, run: &quarb::Run) -> anyhow::Result<Ran> {
             .collect(),
         QueryResult::Values(values) => values.into_iter().map(Cell::Value).collect(),
     };
-    Ok((cells, out.refs, out.diagnostics))
+    Ok((cells, out.refs, out.diagnostics, out.html))
 }
 
 /// [`run_doc`], against a model-enriched view.
@@ -171,7 +181,7 @@ fn run_doc_modeled(
             .collect(),
         QueryResult::Values(values) => values.into_iter().map(Cell::Value).collect(),
     };
-    Ok((cells, out.refs, out.diagnostics))
+    Ok((cells, out.refs, out.diagnostics, out.html))
 }
 
 impl LocalExecutor {
@@ -198,14 +208,40 @@ impl Executor for LocalExecutor {
     }
     fn run(&self, query: &str) -> anyhow::Result<Vec<Cell>> {
         let run = self.run_opts();
-        let (cells, refs, diagnostics) = if let Some(model) = &self.model {
+        let (cells, refs, diagnostics, drawing) = if let Some(model) = &self.model {
             run_doc_modeled(&self.doc, query, &run, model)?
         } else {
             run_doc(&self.doc, query, &run)?
         };
         *self.refs.borrow_mut() = refs;
         *self.diagnostics.borrow_mut() = diagnostics;
+        *self.drawing.borrow_mut() = drawing;
         Ok(cells)
+    }
+
+    fn drawing_html(&self) -> Option<String> {
+        self.drawing.borrow().clone()
+    }
+
+    fn run_rich(&self, query: &str) -> anyhow::Result<(Vec<Cell>, Option<String>)> {
+        let mode = self.session.borrow().pretty;
+        // a `@| pretty` closing: the record stream's grid, as before
+        if quarb::closes_with_table(query) {
+            let (cells, grid) = self.run_table(query)?;
+            let html = quarb::rich::html_of(&[], grid.as_deref(), None, mode);
+            return Ok((cells, html));
+        }
+        let cells = self.run(query)?;
+        let values: Vec<Value> = cells
+            .iter()
+            .filter_map(|c| match c {
+                Cell::Value(v) => Some(v.clone()),
+                Cell::Node(_) => None,
+            })
+            .collect();
+        let drawing = self.drawing.borrow().clone();
+        let html = quarb::rich::html_of(&values, None, drawing.as_deref(), mode);
+        Ok((cells, html))
     }
 
     fn refs(&self) -> Vec<String> {
@@ -223,7 +259,7 @@ impl Executor for LocalExecutor {
                 [one] if one.name.is_none() => Doc::open(&one.path, opts)?,
                 many => Doc::mount_specs(many, opts)?,
             };
-            return run_doc(&fresh, query, &self.run_opts()).map(|(cells, _, _)| cells);
+            return run_doc(&fresh, query, &self.run_opts()).map(|(cells, _, _, _)| cells);
         }
         self.run(query)
     }

@@ -3360,6 +3360,9 @@ fn units_target(p: &Path) -> Option<PathBuf> {
                 || pair == "autounit"
                 || pair.starts_with("autounit=")
                 || pair.starts_with("autounits=")
+                || pair == "slugs"
+                || pair.starts_with("slugs=")
+                || pair.starts_with("units=")
         })
         .then(|| p.to_path_buf())
 }

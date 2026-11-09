@@ -122,13 +122,43 @@ pub enum Reading {
     Instant,
     /// As dates, day precision: `published_on` → `published`.
     Date,
+    /// A unit read from the words of a title with a scale on the
+    /// cells (`[millions of cubic feet per second]`: `ft^3/s`, the
+    /// cells ×1e6) — the unit expression and the factor (the
+    /// header-units round, the word road).
+    Scaled(String, f64),
+    /// A rename alone: the slugged title under `slugs`, the cells as
+    /// they are.
+    Plain,
+}
+
+impl Reading {
+    /// The unit a reading converts into, when it converts.
+    pub fn unit(&self) -> Option<&str> {
+        match self {
+            Reading::Unit(u) | Reading::Scaled(u, _) => Some(u),
+            _ => None,
+        }
+    }
+
+    /// The factor the cells take before the unit (1 but for a
+    /// scaled reading).
+    pub fn factor(&self) -> f64 {
+        match self {
+            Reading::Scaled(_, f) => *f,
+            _ => 1.0,
+        }
+    }
 }
 
 impl Reading {
     /// Whether the reading keeps the property's name: the temporal
     /// ones type the column in place, a unit renames.
     fn in_place(&self) -> bool {
-        !matches!(self, Reading::Unit(_))
+        !matches!(
+            self,
+            Reading::Unit(_) | Reading::Scaled(..) | Reading::Plain
+        )
     }
 
     /// The info line's entry for one column: `length_km → length in
@@ -137,6 +167,8 @@ impl Reading {
     fn told(&self, name: &str, stem: &str, cell: Option<&Value>) -> String {
         match self {
             Reading::Unit(u) => format!("{name} → {stem} in {u}"),
+            Reading::Scaled(u, f) => format!("{name} → {stem} in {u}, cells ×{}", scale_text(*f)),
+            Reading::Plain => format!("{name} → {stem}"),
             Reading::Instant | Reading::Date => {
                 let kind = if matches!(self, Reading::Instant) {
                     "instants"
@@ -202,6 +234,381 @@ fn to_date(v: Value) -> Value {
     }
 }
 
+/// The unit a column TITLE names at its end — `Draught, m`, `Length
+/// (km)`, `Mass [kg]`, `Price, EUR`, `Speed km/h` — as `(u)`, `[u]`,
+/// `, u` or a last word after a space (the header rule, ruling
+/// 2026-11-09): the stem and the unit, the unit checked against the
+/// run's table (spaced, no opaque unit) under the same stop list as
+/// the suffix rule; `%` is the percent unit. When no symbol stands
+/// there, the tail reads as WORDS (`Throughput, metric tonnes per
+/// year` → `t/a`, `Flow [millions of cubic feet per second]` →
+/// `ft^3/s` with the cells ×1e6; `unit_words`), the whole parsed
+/// tail leaving the title. `None` for a title that names no unit
+/// either way; `Err` for a tail that nearly does, with what was read
+/// (`'per yer' is no unit`), for the skipped line.
+pub fn header_unit(title: &str) -> Option<(String, Reading)> {
+    header_unit_with(title, &|_| None).ok().flatten()
+}
+
+/// [`header_unit`] with an override of the dictionary (the call's
+/// `--units`, a scoped `--unit:col`): a word → the unit's suffix form
+/// consulted before the dictionary.
+pub fn header_unit_with(
+    title: &str,
+    resolve: crate::value::unit_words::Override<'_>,
+) -> Result<Option<(String, Reading)>, String> {
+    let t = title.trim();
+    if t.is_empty() {
+        return Ok(None);
+    }
+    // the tails, longest first: `(…)`/`[…]` at the end, the text after
+    // the first comma, then the last k words of a comma-less title
+    // (`Area in square kilometres`: `in square kilometres`, `square
+    // kilometres`, `kilometres`)
+    let mut candidates: Vec<(String, String)> = Vec::new();
+    let mut push = |stem: &str, unit: &str| {
+        let stem = stem.trim_end_matches([',', ' ', ':']).trim();
+        let unit = unit.trim();
+        if !stem.is_empty() && !unit.is_empty() {
+            candidates.push((stem.to_string(), unit.to_string()));
+        }
+    };
+    for (open, close) in [('(', ')'), ('[', ']')] {
+        if let Some(inner) = t.strip_suffix(close)
+            && let Some(at) = inner.rfind(open)
+        {
+            push(&inner[..at], &inner[at + 1..]);
+        }
+    }
+    if let Some((stem, unit)) = t.split_once(',') {
+        push(stem, unit);
+    } else {
+        let starts: Vec<usize> = t
+            .char_indices()
+            .filter(|(i, c)| {
+                !c.is_whitespace() && (*i == 0 || t[..*i].ends_with(char::is_whitespace))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        for &at in starts.iter().skip(1) {
+            push(&t[..at], &t[at..]);
+        }
+    }
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    // a word of the dictionary that is no symbol of the table takes
+    // the word road (`year` is `a`, `tons` the short ton); a symbol
+    // keeps its spelling (`кг`, `EUR`)
+    let is_word = |u: &str| {
+        crate::value::unit_words::word_symbol(u).is_some()
+            && crate::value::quantity::unit_scale(u).is_none()
+    };
+    let symbol_known = |sym: &str| {
+        !STOP.contains(&sym) && !TEMPORAL.iter().any(|(s, _)| *s == sym) && scale_of(sym).is_some()
+    };
+    // the symbol road: a tail that is one symbol the table reads (a
+    // word of the dictionary takes the word road, so `year` is `a`)
+    for (stem, unit) in &candidates {
+        if STOP.contains(&unit.as_str()) || TEMPORAL.iter().any(|(s, _)| *s == unit) {
+            continue;
+        }
+        if let Some(over) = resolve(&unit.to_lowercase())
+            && scale_of(&over).is_some()
+        {
+            return Ok(Some((stem.clone(), Reading::Unit(over))));
+        }
+        if !unit.contains(' ') && !is_word(unit) && scale_of(unit).is_some() {
+            return Ok(Some((stem.clone(), Reading::Unit(unit.clone()))));
+        }
+    }
+    // the word road: the longest tail that reads as words
+    let mut told: Option<String> = None;
+    for (stem, unit) in &candidates {
+        match crate::value::unit_words::parse_unit_words(unit, resolve, &symbol_known) {
+            Ok(Some(w)) if scale_of(&w.expr).is_some() => {
+                let reading = if w.factor == 1.0 {
+                    Reading::Unit(w.expr)
+                } else {
+                    Reading::Scaled(w.expr, w.factor)
+                };
+                return Ok(Some((stem.clone(), reading)));
+            }
+            Ok(_) => {}
+            Err(why) => {
+                if told.is_none() {
+                    told = Some(why.told());
+                }
+            }
+        }
+    }
+    match told {
+        // only a tail of several words is "nearly" a unit; a last
+        // word alone that is no unit is an ordinary title
+        Some(why) if candidates.iter().any(|(_, u)| u.contains(' ')) => Err(why),
+        _ => Ok(None),
+    }
+}
+
+/// A scale factor for a message: `1e6`, `1000`.
+fn scale_text(f: f64) -> String {
+    if f >= 1e6 && f.log10().fract() == 0.0 {
+        format!("1e{}", f.log10() as i32)
+    } else if f.fract() == 0.0 {
+        format!("{}", f as i64)
+    } else {
+        f.to_string()
+    }
+}
+
+/// A title slugged (the `slug` command, `--slugs`, `?slugs`; ruling
+/// 2026-11-09): lowercased, every run of characters that are neither
+/// letters nor digits replaced by `sep`, the ends trimmed of it —
+/// `Draught, m` → `draught_m`, `Порт назначения` → `порт_назначения`.
+/// `None` when nothing is left (`—`).
+pub fn slug_text(text: &str, sep: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut pending = false;
+    for c in text.chars() {
+        if c.is_alphanumeric() {
+            if pending && !out.is_empty() {
+                out.push_str(sep);
+            }
+            pending = false;
+            out.extend(c.to_lowercase());
+        } else {
+            pending = true;
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// The title rules applied to one header (the constructor's
+/// `--autounits` / `--autounit=:col…` / `--slugs`, `clean`'s, and the
+/// pass over a table in hand): the new header, the columns declared
+/// in their units, and how a cell of a converted column is respelled
+/// for the typed build. Collisions refuse by name; the conversions
+/// are told under `--info` (code AUTOUNITS, site the table's).
+pub struct TitlePlan {
+    pub header: Vec<String>,
+    /// Per column, the declared type: the unit of a converted column.
+    pub declared: Vec<Option<crate::value::ColumnType>>,
+    /// Per column, the factor its cells take before the unit (1 but
+    /// for a title whose words name a scale: `millions of …`).
+    pub factors: Vec<f64>,
+}
+
+impl TitlePlan {
+    /// A cell of column `j` scaled as its title asks: a number ×
+    /// the factor (text respelled), anything else as it is.
+    pub fn scale_cell(&self, j: usize, cell: Value) -> Value {
+        let f = self.factors.get(j).copied().unwrap_or(1.0);
+        if f == 1.0 {
+            return cell;
+        }
+        match &cell {
+            Value::Int(n) => Value::Float(*n as f64 * f),
+            Value::Float(x) => Value::Float(x * f),
+            Value::Str(t) => match t.trim().parse::<f64>() {
+                Ok(x) => Value::Str(format_scaled(x * f)),
+                Err(_) => cell,
+            },
+            _ => cell,
+        }
+    }
+}
+
+/// A scaled number as cell text: whole when whole.
+fn format_scaled(x: f64) -> String {
+    if x.fract() == 0.0 && x.abs() < 1e15 {
+        format!("{}", x as i64)
+    } else {
+        x.to_string()
+    }
+}
+
+/// The title rules over `header`: `autounits` is `None` for no unit
+/// reading, `Some(&[])` for every column, `Some(names)` for the
+/// named columns; `slugs` the separator when the titles are slugged;
+/// `sample(j)` the first non-empty cell of column `j` (the
+/// deciding-cell guard). Told as one info line on `site`.
+pub fn title_plan(
+    header: &[String],
+    autounits: Option<&[String]>,
+    slugs: Option<&str>,
+    sample: &dyn Fn(usize) -> Option<String>,
+    site: &str,
+) -> Result<TitlePlan, String> {
+    title_plan_with(
+        header,
+        autounits,
+        slugs,
+        sample,
+        site,
+        &|_, _| None,
+        &|_| None,
+    )
+}
+
+/// [`title_plan`] with the call's dictionary: `resolve(column, word)`
+/// answers the unit the call maps a title's word to, for that column
+/// (`--unit:col=%(…)`) or for every column (`--units=%(…)`);
+/// `declare(column)` the unit a column is declared in regardless of
+/// its title (`--unit:col=_lb`): the title loses a unit tail it has,
+/// the cells are cast to the unit, told "(declared)".
+pub fn title_plan_with(
+    header: &[String],
+    autounits: Option<&[String]>,
+    slugs: Option<&str>,
+    sample: &dyn Fn(usize) -> Option<String>,
+    site: &str,
+    resolve: &dyn Fn(&str, &str) -> Option<String>,
+    declare: &dyn Fn(&str) -> Option<String>,
+) -> Result<TitlePlan, String> {
+    let mut names: Vec<String> = header.to_vec();
+    let mut declared: Vec<Option<crate::value::ColumnType>> = vec![None; header.len()];
+    let mut factors: Vec<f64> = vec![1.0; header.len()];
+    let mut converted: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    let mut slugged: Vec<String> = Vec::new();
+    let label = match (
+        autounits.is_some() || header.iter().any(|t| declare(t).is_some()),
+        slugs,
+    ) {
+        (true, Some(_)) => "autounits+slugs",
+        (true, None) => "autounits",
+        _ => "slugs",
+    };
+    // `--unit:col=_lb`: the column declared in the unit whatever its
+    // title says, a unit tail dropped from the title
+    let mut declared_cols: Vec<usize> = Vec::new();
+    for (j, title) in header.iter().enumerate() {
+        let Some(unit) = declare(title) else { continue };
+        if scale_of(&unit).is_none() {
+            return Err(format!(
+                "--unit:{title}={unit}: '{unit}' is no unit the table knows"
+            ));
+        }
+        // the title loses a unit tail it has (a symbol, or words the
+        // dictionary knows, the ambiguous `pounds` among them)
+        let as_declared = |w: &str| crate::value::unit_words::is_unit_word(w).then(|| unit.clone());
+        let stem = match header_unit_with(title, &as_declared) {
+            Ok(Some((stem, _))) => stem,
+            _ => title.clone(),
+        };
+        converted.push(format!("{title} → {stem} in {unit} (declared)"));
+        declared[j] = Some(crate::value::ColumnType::Unit(unit.as_str().into()));
+        names[j] = stem;
+        declared_cols.push(j);
+    }
+    if let Some(only) = autounits {
+        // the named form names columns the table has
+        for name in only {
+            if !header.iter().any(|h| h == name) {
+                return Err(format!(
+                    "--autounit names column '{name}', and the table has no such column (its columns: {})",
+                    header.join(", ")
+                ));
+            }
+        }
+        for (j, title) in header.iter().enumerate() {
+            if declared_cols.contains(&j) {
+                continue;
+            }
+            if !only.is_empty() && !only.iter().any(|n| n == title) {
+                continue;
+            }
+            let column_resolve = |word: &str| resolve(title, word);
+            let (stem, reading) = match header_unit_with(title, &column_resolve) {
+                Ok(Some(found)) => found,
+                Ok(None) => {
+                    if !only.is_empty() {
+                        skipped.push(format!("{title} (its title names no unit at its end)"));
+                    }
+                    continue;
+                }
+                // a tail of words that nearly names a unit: told
+                Err(why) => {
+                    skipped.push(format!("{title} ({why})"));
+                    continue;
+                }
+            };
+            let cell = sample(j).map(Value::Str);
+            let admits = match (&reading, &cell) {
+                (_, None) => true,
+                (_, Some(Value::Str(c))) => {
+                    c.trim().parse::<f64>().is_ok()
+                        || (reading.unit().is_some() && parse_unit_text(c).is_some())
+                }
+                _ => true,
+            };
+            if !admits {
+                skipped.push(format!("{title} (its cells are no numbers)"));
+                continue;
+            }
+            let mut told_line = reading.told(title, &stem, cell.as_ref());
+            if reading.unit() == Some("ton") && !title.to_lowercase().contains("short") {
+                told_line.push_str(" (short tons; write tonnes for t)");
+            }
+            converted.push(told_line);
+            if let Some(u) = reading.unit() {
+                declared[j] = Some(crate::value::ColumnType::Unit(u.into()));
+            }
+            factors[j] = reading.factor();
+            names[j] = stem;
+        }
+    }
+    if let Some(sep) = slugs {
+        for (j, name) in names.iter_mut().enumerate() {
+            if let Some(slug) = slug_text(name, sep)
+                && slug != *name
+            {
+                slugged.push(format!("{} → {slug}", header[j]));
+                *name = slug;
+            }
+        }
+    }
+    // the names must be distinct: two titles landing on one refuse
+    for (j, name) in names.iter().enumerate() {
+        if let Some(k) = names.iter().position(|n| n == name)
+            && k != j
+        {
+            return Err(format!(
+                "{label}: '{}' and '{}' would both become '{name}'",
+                header[k.min(j)],
+                header[k.max(j)]
+            ));
+        }
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if autounits.is_some() || !declared_cols.is_empty() {
+        parts.push(if converted.is_empty() {
+            "no title names a unit at its end".to_string()
+        } else {
+            converted.join(", ")
+        });
+    }
+    if slugs.is_some() {
+        // alone the label says it; beside the units the part is named
+        let head = if autounits.is_some() { "slugs: " } else { "" };
+        parts.push(if slugged.is_empty() {
+            format!("{head}every title is a slug already")
+        } else {
+            format!("{head}{}", slugged.join(", "))
+        });
+    }
+    let mut msg = format!("{label} on {site}: {}", parts.join("; "));
+    if !skipped.is_empty() {
+        msg.push_str(&format!("; skipped: {}", skipped.join(", ")));
+    }
+    crate::value::ambient::record_diagnostic(Diagnostic::info("AUTOUNITS", site.to_string(), msg));
+    Ok(TitlePlan {
+        header: names,
+        declared,
+        factors,
+    })
+}
+
 /// The scale of one unit name under the run's table: the factor to
 /// the base and the base expansion, as spaced unit text reads it (no
 /// opaque unit). `None` for a name that is no unit, or a
@@ -253,7 +660,21 @@ impl Plan {
     /// A cell of a converted column as the property answers it.
     fn convert(&self, v: Value, reading: &Reading) -> Value {
         let unit = match reading {
+            Reading::Plain => return v,
             Reading::Unit(u) => u,
+            // the words' scale on the cell, then the unit
+            Reading::Scaled(u, f) => {
+                let scaled = match v {
+                    Value::Int(n) => Value::Float(n as f64 * f),
+                    Value::Float(x) => Value::Float(x * f),
+                    Value::Str(s) => match s.trim().parse::<f64>() {
+                        Ok(x) => Value::Float(x * f),
+                        Err(_) => Value::Str(s),
+                    },
+                    other => other,
+                };
+                return self.convert(scaled, &Reading::Unit(u.clone()));
+            }
             Reading::Instant | Reading::Date => {
                 let inst = match v {
                     Value::Null => Value::Null,
@@ -311,7 +732,13 @@ impl Plan {
 /// decide.
 pub struct AutoUnits<A: AstAdapter> {
     pub inner: A,
-    suffixes: Suffixes,
+    suffixes: Option<Suffixes>,
+    /// `?slugs` / `?slugs=-`: the separator of the slugged names.
+    slugs: Option<String>,
+    /// The dictionary override of the target (`?units=pounds:_lb,
+    /// tons:_t`): a word (lowercase) → the unit it names here, read
+    /// before the dictionary.
+    units: Vec<(String, String)>,
     /// The target as written, without its options, for the info
     /// line and the refusals.
     target: String,
@@ -329,14 +756,56 @@ pub struct AutoUnits<A: AstAdapter> {
 
 impl<A: AstAdapter> AutoUnits<A> {
     pub fn new(inner: A, suffixes: Suffixes, target: &str) -> Self {
+        Self::with(inner, Some(suffixes), None, target)
+    }
+
+    /// The wrapper under `?autounits` / `?autounit=` and/or `?slugs`.
+    pub fn with(inner: A, suffixes: Option<Suffixes>, slugs: Option<String>, target: &str) -> Self {
         AutoUnits {
             inner,
             suffixes,
+            slugs,
+            units: Vec::new(),
             target: target.to_string(),
             plans: RefCell::new(HashMap::new()),
             headers: RefCell::new(HashMap::new()),
             by_parent: RefCell::new(HashMap::new()),
         }
+    }
+
+    /// This wrapper with a dictionary override (`?units=pounds:_lb`):
+    /// each word → the unit it names, in the suffix form or bare.
+    pub fn with_units(mut self, units: Vec<(String, String)>) -> Self {
+        self.units = units
+            .into_iter()
+            .map(|(w, u)| (w.to_lowercase(), u.trim_start_matches('_').to_string()))
+            .collect();
+        self
+    }
+
+    /// The unit the target's override names for a word, if any.
+    fn units_override(&self, word: &str) -> Option<String> {
+        self.units
+            .iter()
+            .find(|(w, _)| w == word)
+            .map(|(_, u)| u.clone())
+    }
+
+    /// The options in force, for messages: `autounits`, `autounit=_km`,
+    /// `slugs`, `autounits+slugs`.
+    fn label(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(s) = &self.suffixes {
+            parts.push(s.spelled());
+        }
+        if let Some(sep) = &self.slugs {
+            parts.push(if sep == "_" {
+                "slugs".to_string()
+            } else {
+                format!("slugs={sep}")
+            });
+        }
+        parts.join("+")
     }
 
     /// The plan for one list of names, decided once; the first
@@ -357,10 +826,11 @@ impl<A: AstAdapter> AutoUnits<A> {
     /// column as it is.
     fn admits(reading: &Reading, v: Option<Value>) -> bool {
         match (reading, v) {
+            (Reading::Plain, _) => true,
             (_, None | Some(Value::Null)) => true,
             (_, Some(Value::Int(_) | Value::Float(_))) => true,
-            (Reading::Unit(_), Some(Value::Quantity { .. })) => true,
-            (Reading::Unit(_), Some(Value::Str(s))) => {
+            (Reading::Unit(_) | Reading::Scaled(..), Some(Value::Quantity { .. })) => true,
+            (Reading::Unit(_) | Reading::Scaled(..), Some(Value::Str(s))) => {
                 s.trim().parse::<f64>().is_ok() || parse_unit_text(&s).is_some()
             }
             (Reading::Instant | Reading::Date, Some(Value::Instant { .. })) => true,
@@ -375,107 +845,187 @@ impl<A: AstAdapter> AutoUnits<A> {
         let mut plan = Plan::default();
         let mut skipped: Vec<String> = Vec::new();
         let mut converted: Vec<String> = Vec::new();
+        let mut slugged: Vec<String> = Vec::new();
+        let label = self.label();
         let refuse = |msg: String| {
             crate::value::ambient::record_refusal_coded(
                 "AUTOUNITS",
                 self.target.clone(),
-                format!("{} on {}: {msg}", self.suffixes.spelled(), self.target),
+                format!("{label} on {}: {msg}", self.target),
             );
         };
+        // Pass one, the unit convention: the suffix rule, then the
+        // header rule (the unit at the end of the title), each name
+        // read once; what neither converts keeps its name.
+        let mut readings: Vec<(String, String, Reading)> = Vec::new(); // (source, stem, reading)
         for name in names {
-            let Some((stem, seg)) = name.rsplit_once('_') else {
+            let Some(suffixes) = &self.suffixes else {
+                readings.push((name.clone(), name.clone(), Reading::Plain));
                 continue;
             };
-            if stem.is_empty() || seg.is_empty() {
-                continue;
-            }
-            let named = match &self.suffixes {
-                Suffixes::Named(list) => {
-                    if !list.iter().any(|s| s == seg) {
-                        continue;
-                    }
-                    true
-                }
-                Suffixes::Known => false,
-            };
-            // the temporal suffixes first; then the stop list; then
-            // the unit table
-            let reading = match TEMPORAL.iter().find(|(s, _)| *s == seg) {
-                Some((_, r)) => r.clone(),
-                None if !named && STOP.contains(&seg) => {
-                    skipped.push(format!("{name} ('{seg}' is a word here, not a unit)"));
-                    continue;
-                }
-                // `price_min` beside `price_max` is the minimum, not
-                // the minute (ruling 2026-11-08); the named form
-                // converts regardless
-                None if !named
-                    && seg == "min"
-                    && names.iter().any(|n| n == &format!("{stem}_max")) =>
-                {
-                    skipped.push(format!("{name} ('min' beside {stem}_max is the minimum)"));
-                    continue;
-                }
-                None => match scale_of(seg) {
-                    Some(scale) => {
-                        plan.scales.insert(seg.to_string(), scale);
-                        Reading::Unit(seg.to_string())
-                    }
-                    None if named => {
-                        refuse(format!(
-                            "'{seg}' is no unit this run knows (a unit statement declares one: \
-                             'unit {seg} = …;')"
-                        ));
-                        return Plan::default();
-                    }
-                    None => {
-                        skipped.push(format!("{name} ('{seg}' is no unit)"));
-                        continue;
-                    }
-                },
-            };
-            let cell = sample(name);
-            if !Self::admits(&reading, cell.clone()) {
-                let kind = match reading {
-                    Reading::Unit(_) => "numbers",
-                    Reading::Instant => "instants",
-                    Reading::Date => "dates",
+            // the suffix rule
+            if let Some((stem, seg)) = name.rsplit_once('_')
+                && !stem.is_empty()
+                && !seg.is_empty()
+            {
+                let named = match suffixes {
+                    Suffixes::Named(list) => list.iter().any(|s| s == seg),
+                    Suffixes::Known => false,
                 };
-                skipped.push(format!("{name} (its cells are no {kind})"));
+                let applies = named || matches!(suffixes, Suffixes::Known);
+                if applies {
+                    let reading = match TEMPORAL.iter().find(|(s, _)| *s == seg) {
+                        Some((_, r)) => Some(r.clone()),
+                        None if !named && STOP.contains(&seg) => {
+                            skipped.push(format!("{name} ('{seg}' is a word here, not a unit)"));
+                            None
+                        }
+                        None if !named
+                            && seg == "min"
+                            && names.iter().any(|n| n == &format!("{stem}_max")) =>
+                        {
+                            skipped
+                                .push(format!("{name} ('min' beside {stem}_max is the minimum)"));
+                            None
+                        }
+                        None => match scale_of(seg) {
+                            Some(scale) => {
+                                plan.scales.insert(seg.to_string(), scale);
+                                Some(Reading::Unit(seg.to_string()))
+                            }
+                            None if named => {
+                                refuse(format!(
+                                    "'{seg}' is no unit this run knows (a unit statement declares \
+                                     one: 'unit {seg} = …;')"
+                                ));
+                                return Plan::default();
+                            }
+                            None => {
+                                skipped.push(format!("{name} ('{seg}' is no unit)"));
+                                None
+                            }
+                        },
+                    };
+                    if let Some(reading) = reading {
+                        let cell = sample(name);
+                        if !Self::admits(&reading, cell.clone()) {
+                            skipped.push(format!(
+                                "{name} (its cells are no {})",
+                                Self::kind_word(&reading)
+                            ));
+                        } else {
+                            converted.push(reading.told(name, stem, cell.as_ref()));
+                            let new = if reading.in_place() {
+                                name.as_str()
+                            } else {
+                                stem
+                            };
+                            readings.push((name.clone(), new.to_string(), reading));
+                        }
+                        continue;
+                    }
+                    if named {
+                        continue;
+                    }
+                }
+            }
+            // the header rule: `Draught, m`, `Length (km)`, `Share, %`,
+            // and the words (`Throughput (metric tonnes per year)`)
+            let resolve = |word: &str| self.units_override(word);
+            let header = match header_unit_with(name, &resolve) {
+                Ok(found) => found,
+                Err(why) => {
+                    skipped.push(format!("{name} ({why})"));
+                    None
+                }
+            };
+            if let Some((stem, reading)) = header {
+                let applies = match suffixes {
+                    Suffixes::Known => true,
+                    Suffixes::Named(list) => match &reading {
+                        Reading::Unit(u) | Reading::Scaled(u, _) => list.iter().any(|s| s == u),
+                        _ => false,
+                    },
+                };
+                if applies {
+                    if let Some(u) = reading.unit()
+                        && let Some(scale) = scale_of(u)
+                    {
+                        plan.scales.insert(u.to_string(), scale);
+                    }
+                    let cell = sample(name);
+                    if !Self::admits(&reading, cell.clone()) {
+                        skipped.push(format!(
+                            "{name} (its cells are no {})",
+                            Self::kind_word(&reading)
+                        ));
+                    } else {
+                        converted.push(reading.told(name, &stem, cell.as_ref()));
+                        readings.push((name.clone(), stem, reading));
+                    }
+                    continue;
+                }
+            }
+            readings.push((name.clone(), name.clone(), Reading::Plain));
+        }
+        // Pass two, the slugs: every resulting name slugged.
+        if let Some(sep) = &self.slugs {
+            for (source, new, _) in readings.iter_mut() {
+                if let Some(slug) = slug_text(new, sep)
+                    && slug != *new
+                {
+                    slugged.push(format!("{source} → {slug}"));
+                    *new = slug;
+                }
+            }
+        }
+        // The names must be free: a renamed column may not take a
+        // name the rows carry, nor may two columns land on one.
+        for (source, new, reading) in readings {
+            if new == source && matches!(reading, Reading::Plain) {
                 continue;
             }
-            // a temporal reading types the column where it is; a
-            // unit renames, and the new name must be free
-            let new = if reading.in_place() {
-                name.as_str()
-            } else {
-                stem
-            };
-            if !reading.in_place() {
-                if names.iter().any(|n| n == stem) {
-                    refuse(format!(
-                        "'{name}' would become '{stem}', a property the rows already carry"
-                    ));
-                    return Plan::default();
-                }
-                if let Some((other, _)) = plan.by_new.get(stem) {
-                    refuse(format!("'{other}' and '{name}' would both become '{stem}'"));
-                    return Plan::default();
-                }
+            if new != source && names.iter().any(|n| *n == new) {
+                refuse(format!(
+                    "'{source}' would become '{new}', a property the rows already carry"
+                ));
+                return Plan::default();
             }
-            converted.push(reading.told(name, stem, cell.as_ref()));
-            plan.by_new.insert(new.to_string(), (name.clone(), reading));
-            plan.by_source.insert(name.clone(), new.to_string());
+            if let Some((other, _)) = plan.by_new.get(&new) {
+                refuse(format!(
+                    "'{other}' and '{source}' would both become '{new}'"
+                ));
+                return Plan::default();
+            }
+            plan.by_new.insert(new.clone(), (source.clone(), reading));
+            plan.by_source.insert(source, new);
         }
-        let mut msg = format!("{} on {}: ", self.suffixes.spelled(), self.target);
-        if converted.is_empty() {
-            msg.push_str(match &self.suffixes {
-                Suffixes::Known => "no property ends in a unit",
-                Suffixes::Named(_) => "no property ends in a named suffix",
+        let mut msg = format!("{label} on {}: ", self.target);
+        let mut parts: Vec<String> = Vec::new();
+        if self.suffixes.is_some() {
+            parts.push(if converted.is_empty() {
+                match &self.suffixes {
+                    Some(Suffixes::Named(_)) => "no property ends in a named suffix".to_string(),
+                    _ => "no property names a unit".to_string(),
+                }
+            } else {
+                converted.join(", ")
             });
-        } else {
-            msg.push_str(&converted.join(", "));
         }
+        if self.slugs.is_some() {
+            // alone the label says it; beside the units the part is named
+            let head = if self.suffixes.is_some() {
+                "slugs: "
+            } else {
+                ""
+            };
+            parts.push(if slugged.is_empty() {
+                format!("{head}every name is a slug already")
+            } else {
+                format!("{head}{}", slugged.join(", "))
+            });
+        }
+        msg.push_str(&parts.join("; "));
         if !skipped.is_empty() {
             msg.push_str(&format!("; skipped: {}", skipped.join(", ")));
         }
@@ -485,6 +1035,16 @@ impl<A: AstAdapter> AutoUnits<A> {
             msg,
         ));
         plan
+    }
+
+    /// The word of a reading's cells, for "its cells are no …".
+    fn kind_word(reading: &Reading) -> &'static str {
+        match reading {
+            Reading::Unit(_) | Reading::Scaled(..) => "numbers",
+            Reading::Instant => "instants",
+            Reading::Date => "dates",
+            Reading::Plain => "names",
+        }
     }
 
     /// The plan a node's properties read through: by its row shape
@@ -784,6 +1344,10 @@ impl<A: AstAdapter> AstAdapter for AutoUnits<A> {
                     Some(Reading::Unit(u)) if c.trim().parse::<f64>().is_ok() => {
                         Some(format!("{}_{u}", c.trim()))
                     }
+                    Some(Reading::Scaled(u, f)) if c.trim().parse::<f64>().is_ok() => {
+                        let x: f64 = c.trim().parse().unwrap_or(0.0);
+                        Some(format!("{}_{u}", format_scaled(x * f)))
+                    }
                     Some(r @ (Reading::Instant | Reading::Date))
                         if c.trim().parse::<f64>().is_ok() =>
                     {
@@ -896,10 +1460,59 @@ impl<A: AstAdapter> AstAdapter for AutoUnits<A> {
 /// neither are returned for the reader's own parsing.
 pub fn take_options<'a>(
     pairs: impl IntoIterator<Item = &'a str>,
-) -> Result<(Option<Suffixes>, Vec<&'a str>), String> {
+) -> Result<(Option<Suffixes>, Option<String>, Vec<&'a str>), String> {
+    let (suffixes, slugs, _, rest) = take_options_with_units(pairs)?;
+    Ok((suffixes, slugs, rest))
+}
+
+/// [`take_options`] with the dictionary override too: `units=
+/// pounds:_lb,tons:_t` (the header-units round), each pair a word and
+/// the unit it names in the suffix form.
+pub fn take_options_with_units<'a>(
+    pairs: impl IntoIterator<Item = &'a str>,
+) -> Result<
+    (
+        Option<Suffixes>,
+        Option<String>,
+        Vec<(String, String)>,
+        Vec<&'a str>,
+    ),
+    String,
+> {
     let mut found: Option<Suffixes> = None;
+    let mut slugs: Option<String> = None;
+    let mut units: Vec<(String, String)> = Vec::new();
     let mut rest = Vec::new();
     for pair in pairs {
+        if let Some(("units", list)) = pair.split_once('=') {
+            for item in list.split(',').filter(|s| !s.trim().is_empty()) {
+                let Some((word, unit)) = item.split_once(':') else {
+                    return Err(format!(
+                        "units= takes word:unit pairs ('units=pounds:_lb,tons:_t'); '{item}' given"
+                    ));
+                };
+                let unit = named_suffix(unit.trim())?;
+                units.push((word.trim().to_lowercase(), unit));
+            }
+            continue;
+        }
+        // `slugs` / `slugs=-`: the titles slugged, with the separator
+        match pair.split_once('=') {
+            None if pair == "slugs" => {
+                slugs = Some("_".to_string());
+                continue;
+            }
+            Some(("slugs", sep)) => {
+                if sep.is_empty() {
+                    return Err(
+                        "slugs= names the separator ('slugs=-'); bare 'slugs' uses '_'".into(),
+                    );
+                }
+                slugs = Some(sep.to_string());
+                continue;
+            }
+            _ => {}
+        }
         let this = match pair.split_once('=') {
             Some(("autounits", v)) => {
                 return Err(format!(
@@ -936,7 +1549,7 @@ pub fn take_options<'a>(
             None => this,
         });
     }
-    Ok((found, rest))
+    Ok((found, slugs, units, rest))
 }
 
 #[cfg(test)]
@@ -971,15 +1584,21 @@ mod tests {
 
     #[test]
     fn the_options_merge_and_refuse() {
-        let (s, rest) = take_options(["autounit=_km,_g", "root=/x", "autounit=_min"]).unwrap();
+        let (s, slugs, rest) =
+            take_options(["autounit=_km,_g", "root=/x", "autounit=_min"]).unwrap();
         assert_eq!(
             s,
             Some(Suffixes::Named(vec!["km".into(), "g".into(), "min".into()]))
         );
+        assert_eq!(slugs, None);
         assert_eq!(rest, vec!["root=/x"]);
-        let (s, _) = take_options(["autounit=_km", "autounits"]).unwrap();
+        let (s, _, _) = take_options(["autounit=_km", "autounits"]).unwrap();
         assert_eq!(s, Some(Suffixes::Known));
         assert_eq!(take_options(["encoding=utf-8"]).unwrap().0, None);
+        let (s, slugs, _) = take_options(["slugs", "autounits"]).unwrap();
+        assert_eq!((s, slugs), (Some(Suffixes::Known), Some("_".into())));
+        assert_eq!(take_options(["slugs=-"]).unwrap().1, Some("-".into()));
+        assert!(take_options(["slugs="]).unwrap_err().contains("separator"));
         assert!(
             take_options(["autounits=yes"])
                 .unwrap_err()
@@ -1087,6 +1706,42 @@ mod tests {
         // a quantity of another dimension stays as it is
         let min = Value::Str("12 min".into());
         assert_eq!(plan.convert(min.clone(), &g), min);
+    }
+
+    #[test]
+    fn a_title_names_its_unit_at_the_end() {
+        let unit = |t: &str| match header_unit(t) {
+            Some((stem, Reading::Unit(u))) => Some((stem, u)),
+            _ => None,
+        };
+        assert_eq!(unit("Draught, m"), Some(("Draught".into(), "m".into())));
+        assert_eq!(unit("Length (km)"), Some(("Length".into(), "km".into())));
+        assert_eq!(unit("Mass [kg]"), Some(("Mass".into(), "kg".into())));
+        assert_eq!(unit("Price, EUR"), Some(("Price".into(), "EUR".into())));
+        assert_eq!(unit("Speed km/h"), Some(("Speed".into(), "km/h".into())));
+        assert_eq!(unit("Масса, кг"), Some(("Масса".into(), "кг".into())));
+        assert_eq!(unit("Checked in"), None);
+        assert_eq!(unit("Created at"), None);
+        assert_eq!(unit("Country"), None);
+        assert_eq!(unit("Port name"), None);
+        assert!(
+            matches!(header_unit("Share, %"), Some((s, Reading::Unit(u))) if s == "Share" && u == "%")
+        );
+        assert!(
+            matches!(header_unit("Growth (%)"), Some((s, Reading::Unit(u))) if s == "Growth" && u == "%")
+        );
+    }
+
+    #[test]
+    fn a_title_slugs() {
+        assert_eq!(slug_text("Draught, m", "_"), Some("draught_m".into()));
+        assert_eq!(slug_text("Quay (m)", "-"), Some("quay-m".into()));
+        assert_eq!(
+            slug_text("Порт назначения", "_"),
+            Some("порт_назначения".into())
+        );
+        assert_eq!(slug_text("  2023 ", "_"), Some("2023".into()));
+        assert_eq!(slug_text("—", "_"), None);
     }
 
     #[test]

@@ -874,8 +874,16 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             // A `/.../` regex literal on the right of `=~` / `!~`,
             // where `/` cannot be a hop. Elsewhere `/` is navigation.
             // `s/pat/repl/mods` directly after a pipe — the
-            // substitution command. `\/` escapes a literal slash.
-            's' if at(i + 1) == Some('/') && matches!(tokens.last(), Some(Token::Pipe)) => {
+            // substitution command — or at the head of a call's body,
+            // after its `(` or an argument separator (`map(s/, m$//)`,
+            // `map(s/a/b/; --to=:::keys)`; 2026-11-09). `\/` escapes a
+            // literal slash.
+            's' if at(i + 1) == Some('/')
+                && matches!(
+                    tokens.last(),
+                    Some(Token::Pipe | Token::LParen | Token::Semi | Token::Comma)
+                ) =>
+            {
                 i = lex_subst(&chars, i, &mut tokens)?
             }
             // A regex designator of the name algebra: `/…/` bare in
@@ -946,6 +954,16 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             // the aggregation and iteration pipes
             // — whole spellings, since `@` and `$` are not on the
             // layouts that lack `|`.
+            // `_%`: the suffix form of the percent unit (`<_%>`,
+            // `-c=:col<_%>`), a name as `_km` is
+            '_' if at(i + 1) == Some('%') && !at(i + 2).is_some_and(is_name_char) => {
+                tokens.push(Token::Name {
+                    text: "_%".to_string(),
+                    quoted: false,
+                    glued,
+                });
+                i += 2;
+            }
             '_' if at(i + 1) == Some('_') && !at(i + 2).is_some_and(is_name_char) => {
                 tokens.push(Token::Pipe);
                 i += 2;
@@ -1370,6 +1388,13 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             // (`/_x`, `::_id`, `x_y` stay names; `<_h>` is the unit
             // trait, ruling 2026-11-08, its word lexed whole)
             '_' if at(i + 1).is_some_and(|c| c.is_alphabetic())
+                // a unit in its suffix form as an option's value
+                // (`--unit:Weight=_lb`) is a name, not a parameter (the
+                // header-units round); after a comparison or a record
+                // field's `=` the parameter form stands (`[::level =
+                // _l]`), the readers taking `$lb` with no such
+                // parameter as the unit
+                && !matches!(tokens.last(), Some(Token::OptEq))
                 && (i == 0
                     || !(is_name_char(chars[i - 1])
                         || matches!(
@@ -2038,6 +2063,23 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 tokens.push(Token::PercentPlus);
                 i += 2;
             }
+            // the percent unit as a call's argument (`convert(%)`,
+            // `unit(%)`): a lone `%` closing the argument is the unit's
+            // name, not the record sigil (the percent unit, ruling
+            // 2026-11-09)
+            '%' if at(i + 1) == Some(')')
+                && matches!(
+                    tokens.last(),
+                    Some(Token::LParen | Token::Semi | Token::Comma)
+                ) =>
+            {
+                tokens.push(Token::Name {
+                    text: "%".to_string(),
+                    quoted: false,
+                    glued: true,
+                });
+                i += 1;
+            }
             '%' => {
                 tokens.push(Token::Percent);
                 i += 1;
@@ -2365,6 +2407,46 @@ fn lex_name(chars: &[char], mut i: usize, glued: bool, tokens: &mut Vec<Token>) 
     {
         tokens.push(Token::Desc);
         return Ok(i);
+    }
+    // A column-scoped option (the header-units round, ruling
+    // 2026-11-09): `--null:Price=…`, `--unit:"Quay, m"=…` — the scope
+    // glued to the option's name through a colon, a bare name or a
+    // quoted title, is one name token (`null:Price`), so the `=` that
+    // follows binds the option's value as ever; the readers split
+    // the scope off.
+    if glued
+        && matches!(tokens.last(), Some(Token::DashDash))
+        && text.chars().next().is_some_and(char::is_alphabetic)
+        && at(i) == Some(':')
+        && at(i + 1).is_some_and(|c| c == '"' || c.is_alphanumeric() || c == '_')
+    {
+        let mut j = i + 1;
+        let mut scope = String::new();
+        if at(j) == Some('"') {
+            j += 1;
+            while let Some(c) = at(j) {
+                j += 1;
+                if c == '"' {
+                    break;
+                }
+                scope.push(c);
+            }
+        } else {
+            while let Some(c) = at(j) {
+                if c.is_alphanumeric() || matches!(c, '_' | '-' | '.') {
+                    scope.push(c);
+                    j += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+        // only an option takes a scope: the value's `=` must follow
+        if !scope.is_empty() && at(j) == Some('=') {
+            text.push(':');
+            text.push_str(&scope);
+            i = j;
+        }
     }
     tokens.push(Token::Name {
         text,

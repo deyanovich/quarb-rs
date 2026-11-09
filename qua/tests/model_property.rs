@@ -139,7 +139,7 @@ fn a_declared_property_reads_its_expression_at_the_node() {
     assert!(header.contains(":ratio<*; float>"), "{header}");
     assert_eq!(
         ok(&d, &[m[0], m[1], "/legs/* @| # | :speed", "legs.json"]),
-        "@(306.8_mph; 340.00000000000006_mph; 393.33333333333337_mph)"
+        "@(306.8_mph; 340_mph; 393.333333333333_mph)"
     );
 }
 
@@ -295,7 +295,7 @@ fn a_table_source_keeps_its_fast_path_and_a_predicate_scope_holds() {
     );
     assert_eq!(
         ok(&d, &[m[0], m[1], "/row @| # | :speed", "legs.csv"]),
-        "@(570_km/h; 517.8947368421052_km/h; 670.5882352941177_km/h)"
+        "@(570_km/h; 517.894736842105_km/h; 670.588235294118_km/h)"
     );
     assert_eq!(
         ok(&d, &[m[0], m[1], "/row[::long] | ::id", "legs.csv"]),

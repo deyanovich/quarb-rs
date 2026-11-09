@@ -15,3 +15,4 @@ pub mod number;
 pub mod quantity;
 pub mod table;
 pub mod translit;
+pub mod unit_words;

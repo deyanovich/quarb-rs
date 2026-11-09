@@ -225,7 +225,14 @@ pub(crate) fn quantital_arith(
         Quantity {
             value: value * k,
             base: base.clone(),
-            written: written.as_ref().map(|(v, u)| (v * k, u.clone())),
+            // the written magnitude of a computed quantity rounds to 15
+            // significant digits (ruling 2026-11-09)
+            written: written.as_ref().map(|(v, u)| {
+                (
+                    crate::value::quantity::round_significant(v * k, 15),
+                    u.clone(),
+                )
+            }),
         }
     };
     // Scaling factors stay numbers, as with durations.
@@ -267,7 +274,13 @@ pub(crate) fn quantital_arith(
                     if u.is_empty() {
                         None
                     } else {
-                        Some((if mul { ma * mb } else { ma / mb }, u))
+                        Some((
+                            crate::value::quantity::round_significant(
+                                if mul { ma * mb } else { ma / mb },
+                                15,
+                            ),
+                            u,
+                        ))
                     }
                 })
             }
@@ -279,6 +292,66 @@ pub(crate) fn quantital_arith(
             written,
         })
     };
+    // A quantity of dimension one (a percent, an angle: base `1`)
+    // computes with a bare number and with a dimensioned quantity as
+    // the number it is (ruling 2026-11-09): `12_% * 50` is 6, `1 -
+    // 12_%` is 0.88, `2_rad * 3` is 6, `12_% * 50_EUR` is `6_EUR`
+    // (the partner's unit, its magnitude scaled); two of one
+    // dimension-one unit still add to that unit below, and
+    // `convert(%)` dresses a number again.
+    let dimless = |v: &Value| matches!(v, Quantity { base, .. } if base == "1");
+    let magnitude = |v: &Value| -> Option<f64> {
+        match v {
+            Quantity { value, .. } => Some(*value),
+            other => other.numeric(),
+        }
+    };
+    let plain = |a: f64, b: f64| -> Value {
+        match op {
+            ArithOp::Add => Value::Float(a + b),
+            ArithOp::Sub => Value::Float(a - b),
+            ArithOp::Mul => Value::Float(a * b),
+            ArithOp::Div if b == 0.0 => Value::Null,
+            ArithOp::Div => Value::Float(a / b),
+            _ => Value::Null,
+        }
+    };
+    let dimless_rule = || -> Option<Value> {
+        match (dimless(left), dimless(right)) {
+            // both of dimension one: a product or quotient is a bare
+            // number; a sum keeps the unit (below)
+            (true, true) => match op {
+                ArithOp::Mul | ArithOp::Div => Some(plain(magnitude(left)?, magnitude(right)?)),
+                _ => None,
+            },
+            // a bare number beside it: plain arithmetic in the base
+            (true, false) if !typed(right) => Some(plain(magnitude(left)?, right.numeric()?)),
+            (false, true) if !typed(left) => Some(plain(left.numeric()?, magnitude(right)?)),
+            // a dimensioned partner: the number scales it in a
+            // product, divides it in a quotient; a sum is the refusal
+            // below, a quotient by it the compound
+            (true, false) => match op {
+                ArithOp::Mul => Some(rescale(right, magnitude(left)?)),
+                _ => None,
+            },
+            (false, true) => match op {
+                ArithOp::Mul => Some(rescale(left, magnitude(right)?)),
+                ArithOp::Div => {
+                    let b = magnitude(right)?;
+                    Some(if b == 0.0 {
+                        Value::Null
+                    } else {
+                        rescale(left, 1.0 / b)
+                    })
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    };
+    if let Some(v) = dimless_rule() {
+        return Some(v);
+    }
     match op {
         ArithOp::Mul => {
             return match (typed(left), typed(right)) {

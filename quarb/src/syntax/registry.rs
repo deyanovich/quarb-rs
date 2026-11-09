@@ -214,6 +214,10 @@ pub const SPECS: &[FnSpec] = &[
     scalar("lower", "the text in lower case"),
     scalar("title", "the text with each word capitalized"),
     scalar("trim", "the text without leading and trailing whitespace"),
+    scalar(
+        "slug",
+        "the text as a slug: lowercased, every run of characters that are neither letters nor digits replaced by the separator ('_' by default, slug(\"-\") for anchors and file names), the ends trimmed; letters of any script stay; a list item by item; null where nothing is left",
+    ),
     scalar("ltrim", "the text without leading whitespace"),
     scalar("rtrim", "the text without trailing whitespace"),
     scalar("alpha", "the letters of the text"),
@@ -639,7 +643,11 @@ pub const SPECS: &[FnSpec] = &[
     ),
     scalar(
         "clean",
-        "a scraped table's text columns cleaned into values: cells trimmed, footnote marks dropped, the null words null (--null=list; the dashes, n/a, N/A, NA by default), a percent a ratio (12 % → 0.12), a scale suffix applied (330.5 k → 330500; M, G, bn), numbers read under --locale=\"tag\"; every text column, or the columns named (clean(:a; :b)); a text or a list of texts likewise",
+        "a scraped table's text columns cleaned into values: cells trimmed, footnote marks dropped, the null words null (--null=list; the dashes, n/a, N/A, NA by default), a percent the quantity (12 % → 12_%, the percent unit), a scale suffix applied (330.5 k → 330500; M, G, bn), numbers read under --locale=\"tag\"; every text column, or the columns named (clean(:a; :b)); a text or a list of texts likewise",
+    ),
+    scalar(
+        "correlate",
+        "the foreign-key join: the topic's rows with the argument table's columns appended where the topic's key (--on=:col, or its own index) matches the argument's index as = matches; the topic's order and index kept, an unmatched row keeping nulls (--inner drops it), a clashing title landing as title_2; a label repeated in the argument's index refuses unless --first-wins or --last-wins take one row or --many every one",
     ),
     reducing("avg", "mean, alias"),
     reducing("median", "the median"),

@@ -782,16 +782,19 @@ pub(crate) fn apply_command_in<H: Host>(
                             Value::Null
                         }
                         Ok(opts) => match host.node_table(&c.ext, &opts) {
-                            Ok(t) if !call.args.iter().any(|a| {
-                                matches!(a, Arg::Opt { name, .. }
-                                    if !matches!(name.as_str(), "--null" | "--locale"))
+                            Ok(t) if !call.args.iter().any(|a| match a {
+                                Arg::Opt { name, .. } => !is_read_option(name),
+                                Arg::Lit(_) | Arg::Expr(_) => true,
+                                _ => false,
                             }) =>
                             {
                                 Value::table(t)
                             }
-                            Ok(t) => stdlib::apply_scalar(call, Value::table(t), &|e| {
-                                host.scale_of(e)
-                            })
+                            Ok(t) => stdlib::apply_scalar(
+                                &without_read_options(call),
+                                Value::table(t),
+                                &|e| host.scale_of(e),
+                            )
                             .into_iter()
                             .next()
                             .unwrap_or(Value::Null),
@@ -1613,13 +1616,17 @@ pub(crate) fn agg_as_func_command<H: Host>(
         // the table options (-i, -c, --header, -a) apply as on a
         // table; a bare `| #` keeps the table as read, its row-header
         // index with it
-        let has_table_options = call
-            .args
-            .iter()
-            .any(|a| matches!(a, Arg::Opt { name, .. } if !matches!(name.as_str(), "--null" | "--locale")));
+        // (the header list, the width and a computed header ride as
+        // the call's literal or expression, not as named options)
+        let has_table_options = call.args.iter().any(|a| match a {
+            Arg::Opt { name, .. } => !is_read_option(name),
+            Arg::Lit(_) | Arg::Expr(_) => true,
+            _ => false,
+        });
+        let table_call = without_read_options(call);
         c.topic = Some(match read {
             Ok(t) if !has_table_options => Value::table(t),
-            Ok(t) => stdlib::apply_scalar(call, Value::table(t), &|e| host.scale_of(e))
+            Ok(t) => stdlib::apply_scalar(&table_call, Value::table(t), &|e| host.scale_of(e))
                 .into_iter()
                 .next()
                 .unwrap_or(Value::Null),
@@ -3392,6 +3399,12 @@ pub(crate) fn func_command<H: Host>(
                         .args
                         .iter()
                         .map(|a| match a {
+                            // `correlate(t; --on=:col)`: the key is a
+                            // column name, not read on the topic (its
+                            // table argument still evaluates)
+                            Arg::Opt { name, .. } if call.name == "correlate" && name == "--on" => {
+                                a.clone()
+                            }
                             Arg::Expr(e) => Arg::Lit(operand_scalar(
                                 host,
                                 &c.ext,
@@ -4694,6 +4707,31 @@ pub(crate) fn session_settings(call: &FnCall) -> Vec<(String, Value)> {
 /// vocabulary, `--locale=de` names the number convention, `-i`
 /// given (even empty) turns the row-header index rule off so the
 /// option decides; `--width` is refused, a node having its rows.
+/// The options a document table applied as it was read, taken off
+/// the call before the table command runs on the result: `--null`,
+/// `--locale`, and the title rules (a second title pass would find
+/// the units gone and say so).
+fn without_read_options(call: &FnCall) -> FnCall {
+    FnCall {
+        args: call
+            .args
+            .iter()
+            .filter(|a| !matches!(a, Arg::Opt { name, .. } if is_read_option(name)))
+            .cloned()
+            .collect(),
+        ..call.clone()
+    }
+}
+
+/// Whether a `#` option is applied as a document table is read.
+fn is_read_option(name: &str) -> bool {
+    let (base, _) = crate::syntax::parser::split_option_scope(name);
+    matches!(
+        base,
+        "--null" | "--locale" | "--autounits" | "--autounit" | "--slugs" | "--units" | "--unit"
+    )
+}
+
 fn table_read_options(
     call: &crate::syntax::ast::FnCall,
 ) -> Result<crate::graph::tabula::ReadOptions, String> {
@@ -4749,8 +4787,39 @@ fn table_read_options(
                 );
             }
             "--index" | "-i" => opts.th_index = false,
+            // `--autounits` every column, `--autounit=:col…` the named
+            "--autounits" => opts.autounits = Some(Vec::new()),
+            "--autounit" => {
+                let names: Vec<String> = match value {
+                    Some(Operand::Lit(Value::List(items))) => items
+                        .iter()
+                        .map(|v| match v {
+                            Value::Projection { key, .. } => key.to_string(),
+                            other => other.to_string(),
+                        })
+                        .collect(),
+                    Some(Operand::Lit(Value::Projection { key, .. })) => vec![key.to_string()],
+                    Some(Operand::Lit(Value::Str(s))) => vec![s.clone()],
+                    _ => Vec::new(),
+                };
+                let have = opts.autounits.get_or_insert_with(Vec::new);
+                if have.is_empty() && !names.is_empty() {
+                    *have = names;
+                } else {
+                    have.extend(names);
+                }
+            }
+            "--slugs" => {
+                opts.slugs = Some(match value {
+                    Some(Operand::Lit(Value::Str(sep))) if !sep.is_empty() => sep.clone(),
+                    _ => "_".to_string(),
+                });
+            }
             _ => {}
         }
     }
+    // the column-scoped options and the word dictionary (the
+    // header-units round)
+    opts.scopes = stdlib::read_scopes(call)?;
     Ok(opts)
 }

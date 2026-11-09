@@ -30,6 +30,14 @@ pub fn table_css() -> String {
     quarb::TABLE_CSS.to_string()
 }
 
+/// The stylesheet of every rich form (the grid, the drawings, the
+/// diagnostics block): what [`table_css`] names, under the rendering
+/// rule's name (`quarb::rich::css`).
+#[wasm_bindgen(js_name = richCss)]
+pub fn rich_css() -> String {
+    quarb::rich::css().to_string()
+}
+
 #[wasm_bindgen]
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
@@ -206,6 +214,32 @@ fn numeric_ref_with(line: &str, suffix: char) -> Option<usize> {
         .ok()
 }
 
+/// Whether a frozen reference `&N#` stands inside a longer line —
+/// `&3# | count`, `(&3#)` — where it has no meaning: the frozen
+/// footprint replays only as the whole line. Every other `#` is the
+/// query's (`| #`, `#(--null=…)`, a `#` comment).
+fn embedded_frozen_ref(line: &str) -> bool {
+    let b = line.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'&' {
+            let mut j = i + 1;
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > i + 1 && j < b.len() && b[j] == b'#' {
+                let before_ok = i == 0 || !b[i - 1].is_ascii_alphanumeric();
+                let after_ok = j + 1 >= b.len() || !b[j + 1].is_ascii_alphanumeric();
+                if before_ok && after_ok {
+                    return true;
+                }
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
 /// One diagnostic as the page reads it: `{severity, code, site,
 /// message}`, the severity word in lower case.
 fn diag_json(d: &quarb::Diagnostic) -> serde_json::Value {
@@ -371,9 +405,39 @@ impl QuaiSession {
     /// lists); anything else degrades to prose lines. History refs
     /// (`&N`) resolve as in a normal line.
     pub fn render(&self, line: &str, kind: &str) -> Result<String, JsError> {
+        // the HTML export is the rich form (the grid, a drawing) with
+        // the stylesheet and the diagnostics, as the panel shows it;
+        // the text lines in a `<pre>` where there is none
+        if kind == "html" {
+            return self
+                .session
+                .export_rich(line)
+                .map_err(|e| JsError::new(&format!("{e:#}")));
+        }
         self.session
             .export(line, kind)
             .map_err(|e| JsError::new(&format!("{e:#}")))
+    }
+
+    /// The session's `--pretty` setting from the host: `off`,
+    /// `structures` or `always` — what `session(--pretty=…)` sets from
+    /// a line. The extension opens at `structures`, the playground
+    /// at `off` (its button runs the command).
+    #[wasm_bindgen(js_name = setPretty)]
+    pub fn set_pretty(&self, word: &str) -> Result<(), JsError> {
+        let mode = quarb::PrettyMode::parse(word).ok_or_else(|| {
+            JsError::new(&format!(
+                "setPretty({word:?}): the setting is off, structures or always"
+            ))
+        })?;
+        self.session.set_pretty(mode);
+        Ok(())
+    }
+
+    /// The session's `--pretty` setting as its word.
+    #[wasm_bindgen(getter)]
+    pub fn pretty(&self) -> String {
+        self.session.pretty_mode().word().to_string()
     }
 
     /// The `&N` a fresh line will claim.
@@ -460,7 +524,7 @@ impl QuaiSession {
                 None,
             );
         }
-        match self.session.eval_table(t) {
+        match self.session.eval_rich(t) {
             Ok((cells, html)) => {
                 let refs = self.session.refs();
                 let lines = cells.iter().map(|c| c.display()).collect();
@@ -501,13 +565,15 @@ impl QuaiSession {
             };
         }
 
-        // A standalone `&N#` — replay the frozen footprint.
+        // A standalone `&N#` — replay the frozen footprint (its rich
+        // form under the session's setting, as any line's).
         if let Some(n) = numeric_ref_with(line, '#') {
             return match self.session.frozen(n).cloned() {
                 Some(cells) => {
                     let lines = cells.iter().map(|c| c.display()).collect();
+                    let html = self.session.rich_of(&cells);
                     self.session.record_frozen(cells);
-                    envelope(&label, lines, None, None)
+                    envelope_html(&label, lines, None, None, Vec::new(), html)
                 }
                 None => envelope(
                     "",
@@ -520,24 +586,33 @@ impl QuaiSession {
             };
         }
 
-        // `&N!` live, ordinary query, or a misplaced `#`.
+        // `&N!` live, ordinary query, or a misplaced frozen reference.
+        // A `#` elsewhere is the query's own — the table constructor
+        // `| #`, `#(--null=…)`, a line comment — never the suffix
+        // (the extension could reach no table before, 2026-11-09).
         let (query, fresh) = if let Some(n) = numeric_ref_with(line, '!') {
             (format!("&{n}"), true)
-        } else if line.contains('#') {
+        } else if embedded_frozen_ref(line) {
             return envelope(
                 "",
                 vec![],
                 None,
-                Some("'#' is the frozen-history suffix, valid only as a standalone '&N#'".into()),
+                Some("'&N#' recalls a frozen result, valid only as a standalone line".into()),
             );
         } else {
             (line.to_string(), false)
         };
 
+        // every line through the rendering rule (2026-11-09): the
+        // rich form beside the lines where the session's setting
+        // draws one
         let result = if fresh {
-            self.session.eval_fresh(&query).map(|cells| (cells, None))
+            self.session.eval_fresh(&query).map(|cells| {
+                let html = self.session.rich_of(&cells);
+                (cells, html)
+            })
         } else {
-            self.session.eval_table(&query)
+            self.session.eval_rich(&query)
         };
         match result {
             Ok((cells, html)) => {
@@ -553,5 +628,55 @@ impl QuaiSession {
             }
             Err(e) => error_envelope("", &e),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_envelope_carries_the_rich_form_under_the_setting() {
+        let csv = "Port,Draught (m)\nPiraeus,18.5\nKoper,14\n";
+        let mut s = QuaiSession::new("csv", csv, 1_753_500_000_000.0).unwrap();
+        // the playground's default: off
+        assert_eq!(s.pretty(), "off");
+        let r: serde_json::Value = serde_json::from_str(&s.run("/row @| #")).unwrap();
+        assert!(r["html"].is_null(), "{r}");
+        // the panel's default: structures
+        s.set_pretty("structures").unwrap();
+        let r: serde_json::Value = serde_json::from_str(&s.run("/row @| #")).unwrap();
+        let html = r["html"].as_str().expect("a table value renders");
+        assert!(html.starts_with("<table class=\"quarb-table\">"), "{html}");
+        assert!(r["lines"][0].as_str().unwrap().starts_with("#(@("), "{r}");
+        // the frozen replay keeps the form; a line sets the setting
+        let label = r["label"].as_str().unwrap().to_string();
+        let r: serde_json::Value = serde_json::from_str(&s.run(&format!("{label}#"))).unwrap();
+        assert!(r["html"].as_str().is_some(), "{r}");
+        s.run("session(--pretty=off)");
+        assert_eq!(s.pretty(), "off");
+        let r: serde_json::Value = serde_json::from_str(&s.run("/row @| #")).unwrap();
+        assert!(r["html"].is_null(), "{r}");
+        // the export: the document form
+        s.set_pretty("structures").unwrap();
+        let doc = s.render("/row @| #", "html").unwrap();
+        assert!(
+            doc.starts_with("<style>") && doc.contains("quarb-table"),
+            "{doc}"
+        );
+        assert!(rich_css().contains(".quarb-table th .type"));
+    }
+
+    #[test]
+    fn a_hash_in_a_query_is_the_querys_own() {
+        assert!(!embedded_frozen_ref("//table[1] | #"));
+        assert!(!embedded_frozen_ref("//table[1] | #(--null=@(\"—\"))"));
+        assert!(!embedded_frozen_ref("= @(%(a = 1)) | # | dim"));
+        assert!(!embedded_frozen_ref("# a comment"));
+        assert!(!embedded_frozen_ref("&3"));
+        assert!(embedded_frozen_ref("&3# | count"));
+        assert!(embedded_frozen_ref("(&12#) | dim"));
+        assert!(embedded_frozen_ref("&3#"));
+        assert_eq!(numeric_ref_with("&3#", '#'), Some(3));
     }
 }

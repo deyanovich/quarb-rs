@@ -25,6 +25,8 @@ from . import (
     Quantity,
     closes_with_table as _closes_with_table,
     closes_with_drawing as _closes_with_drawing,
+    diagnostics_html as _diagnostics_html_ext,
+    rich_css as _rich_css_ext,
     take_copy as _take_copy,
     mount as _mount,
     open as _open,
@@ -101,7 +103,7 @@ class QuarbResult:
             "<pre style=\"margin:0\">" + _escape(repr(self) if not self.diagnostics else (
                 self.text if self.text is not None else "\n".join(str(v) for v in self.values))) + "</pre>"
         )
-        return f"<style>{TABLE_CSS}</style>\n{body}{_diagnostics_html(self.diagnostics)}"
+        return f"<style>{_rich_css()}</style>\n{body}{_diagnostics_html(self.diagnostics)}"
 
     @property
     def df(self):
@@ -164,33 +166,19 @@ def _copy_html(text: str, diagnostics) -> str:
 
 
 def _diagnostics_html(diagnostics) -> str:
-    """The diagnostics under an answer: warnings in yellow, the
-    infos and debug notes behind a ⓘ button (a ``<details>``)."""
-    ds = [d for d in diagnostics if d["severity"] != "error"]
-    if not ds:
-        return ""
-    def line(d, color):
-        return (
-            f"<div style=\"font:13px/1.4 ui-monospace,monospace;padding:3px 9px;"
-            f"border-radius:5px;white-space:pre-wrap;{color}\">"
-            f"<b>{_escape(d['code'])}</b> <span style=\"opacity:.7\">({_escape(d['site'])})</span> "
-            f"{_escape(d['message'])}</div>"
-        )
-    warnings = "".join(
-        line(d, "background:#fff6d6;border-left:3px solid #c99a00;margin-top:4px")
-        for d in ds if d["severity"] == "warning"
-    )
-    infos = [d for d in ds if d["severity"] in ("info", "debug")]
-    details = ""
-    if infos:
-        details = (
-            "<details style=\"margin-top:4px\"><summary style=\"cursor:pointer;opacity:.7;"
-            "font:12px ui-sans-serif,sans-serif;width:fit-content;padding:0 6px;"
-            f"border:1px solid #ccc;border-radius:10px\">ⓘ {len(infos)}</summary>"
-            + "".join(line(d, "opacity:.8") for d in infos)
-            + "</details>"
-        )
-    return warnings + details
+    """The diagnostics under an answer, from the engine's one renderer
+    (``quarb.diagnostics_html``): warnings as lines, the infos and
+    debug notes behind a ⓘ ``<details>``; shown down to the info level
+    in a notebook, where the stylesheet carries the block's rules."""
+    tuples = [
+        (d["severity"], d["code"], d["site"], d["message"]) for d in diagnostics
+    ]
+    return _diagnostics_html_ext(tuples, "info")
+
+
+def _rich_css() -> str:
+    """The stylesheet of every rich form (``quarb.rich_css``)."""
+    return _rich_css_ext()
 
 
 _DIAG_LINE = re.compile(r"^(error|warning|info|debug) ([A-Z_]+) \((.*?)\): (.*)$")
@@ -230,21 +218,22 @@ def _result(doc: Document, query: str) -> QuarbResult:
             "message": f"copied {_human_size(size)} as {rendering}",
         })
         return result
-    if _closes_with_table(query):
-        rows, text, html = doc.table(query)
-        records = [r for r in rows if isinstance(r, dict)]
-        return QuarbResult(rows, records, html=html, text=text, diagnostics=_diags_of(doc))
-    if _closes_with_drawing(query):
-        # a drawing (``@| tree``, ``@| histogram``): the text as the
-        # terminal prints it, the HTML form the notebook renders
-        values, html = doc.values_html(query)
-        text = "\n".join(str(v) for v in values)
-        return QuarbResult(values, [], html=html, text=text, diagnostics=_diags_of(doc))
-    values = doc.values(query)
+    # the rendering rule (2026-11-09), one implementation in the
+    # engine: the values, the text form a ``@| pretty`` closing draws,
+    # and the rich HTML form the session's ``--pretty`` setting allows
+    # (a table value as its grid, a record stream under ``@| pretty``
+    # as the grid, a drawing as its HTML); None keeps the text
+    values, text, html = doc.run_rich(query)
     diags = _diags_of(doc)
+    if text is not None:
+        records = [r for r in values if isinstance(r, dict)]
+        return QuarbResult(values, records, html=html, text=text, diagnostics=diags)
+    if html is not None and _closes_with_drawing(query):
+        text = "\n".join(str(v) for v in values)
+        return QuarbResult(values, [], html=html, text=text, diagnostics=diags)
     if values and isinstance(values[0], dict):
-        return QuarbResult(values, values, diagnostics=diags)
-    return QuarbResult(values, [], diagnostics=diags)
+        return QuarbResult(values, values, html=html, diagnostics=diags)
+    return QuarbResult(values, [], html=html, diagnostics=diags)
 
 
 def _lines_result(lines: list[str]) -> QuarbResult:

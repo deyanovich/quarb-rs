@@ -158,6 +158,24 @@ pub trait Executor {
         Ok((self.run(query)?, None))
     }
 
+    /// Run a query and hand back its rich form beside the cells
+    /// (the rendering rule, 2026-11-09; [`quarb::rich`]): under the
+    /// session's `--pretty` setting a table value is its grid, a
+    /// record stream closed by `@| pretty` the grid, a drawing its
+    /// HTML, and under `always` a bare record or a list of scalars a
+    /// grid too; `None` keeps the text. The default knows no setting
+    /// and renders nothing (a daemon prints text); the local executor
+    /// overrides it.
+    fn run_rich(&self, query: &str) -> anyhow::Result<(Vec<Cell>, Option<String>)> {
+        Ok((self.run(query)?, None))
+    }
+
+    /// The HTML a drawing the last `run` closed in left beside its
+    /// text (`@| tree`, `@| histogram`); `None` by default.
+    fn drawing_html(&self) -> Option<String> {
+        None
+    }
+
     /// The static plan of a query, priced by the standing arbor —
     /// each step's estimate from the opened adapters (a parsed
     /// arbor counts its nodes, a store asks its statistics); under

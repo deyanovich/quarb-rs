@@ -376,6 +376,16 @@ pub(crate) fn value_eq(a: &Value, b: &Value, scale: UnitScale) -> bool {
     // coercing via its unital reading (unit text like `5km`; a bare
     // number as the partner's base). Base mismatch: not equal.
     if matches!(a, Value::Quantity { .. }) || matches!(b, Value::Quantity { .. }) {
+        // a quantity never equals a bare number, dimension one included
+        // (`12_% = 0.12` is false, as `30_km = 30` is; ruling
+        // 2026-11-09); they order in the base
+        if matches!(
+            (a, b),
+            (Value::Quantity { .. }, Value::Int(_) | Value::Float(_))
+                | (Value::Int(_) | Value::Float(_), Value::Quantity { .. })
+        ) {
+            return false;
+        }
         return match crate::value::quantital_pair_with(a, b, scale) {
             Some((x, y)) => x == y,
             None => false,

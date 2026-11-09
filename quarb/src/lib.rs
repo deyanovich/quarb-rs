@@ -43,6 +43,7 @@ pub mod diagnostic;
 pub mod error;
 mod graph;
 mod pipeline;
+pub mod rich;
 mod stdlib;
 mod syntax;
 pub use graph::reflect::QueryArbor;
@@ -98,7 +99,8 @@ pub use syntax::parser::{Defs, parse_scope_path, parse_value_expr};
 /// that never pins gets the old wall-clock behavior.
 pub use value::ambient::{
     SentenceBonds, fetched, fetched_opt, invocation_instant, now_secs, record_refusal,
-    sentence_bonds, set_invocation_instant, set_sentence_bonds, take_refusal_diagnostic,
+    retract_diagnostics, sentence_bonds, set_invocation_instant, set_sentence_bonds,
+    take_refusal_diagnostic,
 };
 pub use value::{ColumnType, Foreign, ForeignValue, NodeRef, Table, TableBuilder, Typing, Value};
 

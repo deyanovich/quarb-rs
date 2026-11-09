@@ -1743,6 +1743,226 @@ root-anchored sequence of hops, each an axis followed by a name:
     a list of texts the same way (\texttt{clean\_text}). The column
     names ride unevaluated, as \texttt{autocast}'s do. Tests:
     \texttt{qua/tests/document\_tables.rs}. \\
+\texttt{\#(--autounits)}, \texttt{\#(--autounit=:col…)}, \texttt{\#(--slugs[=sep])}; the same on \texttt{clean}; \texttt{?autounits}, \texttt{?slugs} on a target; \texttt{quarb::autounits::title\_plan}
+  & \live the title rules (the header-units round, ruling
+    2026-11-09): a unit at the end of a column title — \texttt{(u)},
+    \texttt{[u]}, \texttt{, u}, or the last word, against the run's
+    unit table with the suffix convention's stop list and deciding-cell
+    guard — is the column's unit; the title loses it and the column
+    is declared in it (\texttt{Draught, m} → \texttt{:Draught<\_m>}),
+    a \texttt{\%} title reads the cells as ratios (12 → 0.12, the
+    point shifted on the text), a \texttt{, at} title is no instant.
+    \texttt{--autounits} reads every title, \texttt{--autounit=:col…}
+    the named ones (a name the table lacks refuses); \texttt{--slugs}
+    slugs the titles — lowercased, every run of characters that are
+    neither letters nor digits the separator (\texttt{\_}, or
+    \texttt{--slugs="-"}), the ends trimmed, letters of any script
+    kept — after the unit comes off when both are on; two titles
+    landing on one name refuse (\texttt{'Quay, m' and 'Quay (m)' would
+    both become 'Quay'}). One info line per table (code
+    \texttt{AUTOUNITS}, site the table's): the conversions, then
+    \texttt{slugs:} the renames, then what was skipped. The rules
+    live once, in \texttt{autounits::title\_plan} /
+    \texttt{TitlePlan} (the new header, the declared units, the ratio
+    respelling), called by the document-table build
+    (\texttt{tabula::build}, the options on \texttt{ReadOptions}),
+    by \texttt{stdlib::title\_pass} for a table in hand (\texttt{\#}
+    and \texttt{clean}, after the null/locale pass, before the index),
+    and by the mount wrapper \texttt{AutoUnits} (one meaning
+    everywhere: \texttt{?autounits} reads titles as well as suffixes,
+    \texttt{?autounit=\_m} takes \texttt{Draught (m)}; \texttt{?slugs}
+    the names). The aggregate path strips the read options off the
+    call before the table command runs on the result
+    (\texttt{without\_read\_options}), so the rules apply once.
+    Notation: \texttt{--slugs[=sep]} is the bracketed optional value
+    (\texttt{OptSpec::bare}: bare a switch, valued it carries it).
+    Tests: \texttt{qua/tests/document\_tables.rs},
+    \texttt{qua/tests/autounits.rs}, the module tests of
+    \texttt{autounits.rs} and \texttt{signature.rs}. \\
+\texttt{12\_\%}, \texttt{<\_\%>}, \texttt{convert(\%)}; the dimension-one rule
+  & \live the percent unit (ruling 2026-11-09): a built-in unit of
+    dimension one with factor 1/100 of the ratio, declared table-wide
+    on quanto's table beside the packs (\texttt{quantity::with\_percent};
+    the sign a name character, so \texttt{12\_\%} lexes, \texttt{12 \%}
+    reads as unit text, a \texttt{<\_\%>} trait and \texttt{-c=:col<\_\%>}
+    cast). \texttt{12\_\%} holds 0.12 (base \texttt{1}) and prints as
+    written; \texttt{| type} says quantity; a \texttt{\%} title under
+    \texttt{--autounits} declares the column \texttt{<\_\%>} with its cells
+    minted (\texttt{Share, \%} → \texttt{Share in \%}; the interim ratio
+    reading is gone), \texttt{clean} makes \texttt{12\_\%} of ``12 \%''.
+    THE DIMENSION-ONE RULE (\texttt{arith::quantital\_arith},
+    \texttt{dimless\_rule}), for every unit of dimension one — the
+    radian, the steradian, the percent, a declared one: such a
+    quantity computes with a bare number and with a dimensioned
+    quantity as the number it is (\texttt{12\_\% * 50} → 6,
+    \texttt{1 - 12\_\%} → 0.88, \texttt{2\_rad * 3} → 6, \texttt{12\_\% *
+    50\_EUR} → \texttt{6\_EUR}: the partner's unit, its magnitude scaled;
+    a quotient by it the same); two of one dimension-one unit add to
+    that unit (\texttt{12\_\% + 3\_\%} → \texttt{15\_\%}); a product or
+    quotient of two is a bare number. Ordering against a bare number
+    in the base (\texttt{12\_\% > 0.1}); equality never
+    (\texttt{value\_eq}: a quantity and a bare number are not equal,
+    dimension one included — before this round the ratio pairing
+    equated them). \texttt{convert(\%)} / \texttt{convert(rad)} dress a
+    bare number again (the number the base magnitude: \texttt{0.12 |
+    convert(\%)} → \texttt{12\_\%}); \texttt{unit(\%)} puts a number in
+    the unit (\texttt{12 | unit(\%)}), \texttt{magnitude} reads it back.
+    Tests: \texttt{qua/tests/percent.rs}, and the \texttt{\%} cases of
+    \texttt{qua/tests/document\_tables.rs} and
+    \texttt{qua/tests/autounits.rs}. \\
+\texttt{correlate(t; --on=:col?; --inner? --first-wins? --last-wins? --many?)}
+  & \live the foreign-key join (ruling 2026-11-09;
+    \texttt{stdlib::correlate}): the topic's key — the column
+    \texttt{--on} names, its own index when omitted — matched as
+    \texttt{=} matches (a number by magnitude whatever its spelling, a
+    quantity in its base, text as itself; null matches nothing) against
+    the argument table's one-level index (\texttt{\#(-i=:col)}); the
+    answer the topic's rows in the topic's order with its index kept
+    and the argument's data columns appended in the argument's order,
+    their declarations with them, the argument's index not repeated.
+    An unmatched row keeps nulls; \texttt{--inner} drops it. A title
+    the topic already carries lands as \texttt{title\_2}
+    (\texttt{\_3}, …), told. A label repeated in the argument's index
+    refuses by default (\texttt{'LJU' twice (rows 3 and 7)});
+    \texttt{--first-wins} / \texttt{--last-wins} take one row of it,
+    \texttt{--many} every row, the topic's row and index repeated.
+    One info line (\texttt{CORRELATE}, site the topic's name or ``the
+    table''): the counts (\texttt{12 rows, 10 matched, 2 unmatched kept
+    with nulls}), \texttt{--many}'s row count, the repeats taken, the
+    renames. Refusals: a missing \texttt{--on} column, an unindexed or
+    non-table argument, a composite key (``one key column for now''),
+    two of the three repeat options. Tests:
+    \texttt{qua/tests/correlate.rs}. \\
+\texttt{Throughput, metric tonnes per year}; \texttt{--units=\%(word = \_u)}, \texttt{--unit:col=\_u}, \texttt{--null:col}, \texttt{--locale:col}; \texttt{?units=}; \texttt{quarb::value::unit\_words}
+  & \live the word road of the header rule (the header-units round,
+    ruling 2026-11-09): a title's tail that is no symbol reads as
+    WORDS through one exact dictionary in the engine
+    (\texttt{unit\_words}: English and Russian forms, singular and
+    plural, the GOST designations beside; the power words
+    \texttt{square}/\texttt{cubic}/\texttt{кв.}/\texttt{куб.} and a
+    digit exponent \texttt{ft3}; the scale words \texttt{thousand},
+    \texttt{million}/\texttt{mn}/\texttt{млн}, \texttt{billion}/\texttt{bn},
+    \texttt{trillion} and a sign's glued letter \texttt{\$m}; the
+    connective \texttt{per}/\texttt{/}/\texttt{в}; the fillers
+    \texttt{of}, \texttt{in}). The tail grammar \texttt{[scale [of]]
+    phrase \{per phrase\} [scale]} gives a unit expression and a
+    cell factor: \texttt{metric tonnes per year} → \texttt{t/a},
+    \texttt{[millions of cubic feet per second]} → \texttt{ft\^{}3/s}
+    ×1e6, \texttt{EUR million} → EUR ×1e6, \texttt{тыс. тонн в год} →
+    \texttt{t/a} ×1000. THE SCALE RULE: always a cell factor, never a
+    prefix change (\texttt{| scale} re-prefixes on demand); told
+    ``cells ×1e6''. The tails tried longest first: a bracket, the
+    text after the first comma, the last k words of a comma-less
+    title (\texttt{Area in square kilometres} → \texttt{km\^{}2}); the
+    symbol road keeps a table symbol's own spelling (\texttt{кг}),
+    a dictionary word takes the word road (\texttt{year} → \texttt{a}).
+    The engine declares \texttt{a}/\texttt{yr} (365.25 d) and the short
+    ton \texttt{ton} beside \texttt{\%}; ``tons'' alone is the short
+    ton, told ``(short tons; write tonnes for t)''; ``pounds'' alone is
+    ambiguous and skipped with the pointer ``write £ (sterling) or lb
+    (the mass)''; a tail that nearly reads is skipped and told
+    (\texttt{'yer' is no unit}). The reading
+    \texttt{Reading::Scaled(unit, factor)} carries the factor through
+    the document build (\texttt{TitlePlan::factors}), the in-hand pass
+    and the mount wrapper. The same dictionary serves
+    \texttt{convert(tonnes)}, \texttt{12\_tonnes} (= \texttt{12\_t}, printed
+    as written), unit text in cells (\texttt{5 metric tonnes} → \texttt{5\_t},
+    which \texttt{clean} lifts) — the resolver reads the strict table,
+    then the words, then an opaque unit, so a currency sign names its
+    currency (\texttt{12\_€} = \texttt{12\_EUR}). THE OVERRIDE:
+    \texttt{--units=\%(pounds = \_lb; tons = \_t)} maps words before the
+    dictionary for every title, \texttt{--unit:col=\%(…)} for one
+    column, \texttt{--unit:col=\_lb} declares the column in the unit
+    whatever its title says (a unit-word tail dropped, told
+    ``(declared)''); a dictionary alone implies the reading of those
+    titles; \texttt{?units=pounds:\_lb,tons:\_t} on the mount. COLUMN
+    SCOPES (the user's (A)): \texttt{--OPTION:col=value} with the scope
+    glued to the option's name through a colon (a bare name or a quoted
+    title), one name token in the lexer, split by the readers
+    (\texttt{split\_option\_scope}); \texttt{--null:col}, \texttt{--locale:col}
+    and \texttt{--unit:col} on \texttt{\#} and \texttt{clean}; the
+    unscoped option the default; an unknown column and a scope on any
+    other option refuse (``'Nope' names no column'', ``'--index' takes
+    no column scope''). \texttt{ReadOptions::scopes} (\texttt{ReadScopes})
+    carries them to the document build; \texttt{stdlib::read\_scopes}
+    and \texttt{apply\_scopes} serve the table in hand. Also here: the
+    written magnitude of a COMPUTED quantity rounds to 15 significant
+    digits (\texttt{round\_significant} in \texttt{unscale\_by}, a scaled
+    quantity, a compound; ruling 2026-11-09): \texttt{4.9\_cm}, \texttt{14\_\%};
+    literals and bare floats untouched. Tests:
+    \texttt{qua/tests/word\_units.rs}, the module tests of
+    \texttt{unit\_words.rs}, \texttt{autounits.rs}, \texttt{quantity.rs}. \\
+\texttt{::mass @| sp:describe}, \texttt{np:mean}, \texttt{pd:…} over quantities; \texttt{quarb\_pyvalue::dress}
+  & \live the unit dressing of a library call (the user's rule,
+    2026-11-09, after lang's finding on 0.57.0 that \texttt{sp:describe}
+    over grams answered base kilograms as bare numbers): a sample of
+    quantities of one dimension — the stream a Python library command
+    receives, a list or a one-column table — computes on the
+    magnitudes in the FIRST value's written unit, and the answer wears
+    the unit again by the field's (or the command's) name: the moments
+    that carry it (\texttt{mean}, \texttt{min}, \texttt{max}, \texttt{median},
+    \texttt{std}, \texttt{sem}, the quantiles, a sum) in the unit, a
+    \texttt{variance}/\texttt{var} in the unit squared (\texttt{g\^{}2}),
+    the counts and the shape statistics (\texttt{nobs}, \texttt{skewness},
+    \texttt{kurtosis}, a test statistic, a p-value) bare. Two dimensions
+    mixed, or quantities beside bare numbers, refuse by name
+    (``quantities of unlike dimensions (kg and m) in one sample;
+    convert first''). One place for every Python library: the glue
+    (\texttt{PyGlue::call}) and the reflective road
+    (\texttt{Reflective::call}) lift the sample through
+    \texttt{dress::lift} before Python sees it and dress the answer
+    through \texttt{Dress::apply}; a sample of bare numbers crosses
+    untouched. Tests: the scipy crate's
+    \texttt{a\_quantity\_sample\_answers\_in\_its\_written\_unit}. \\
+\texttt{quarb::rich}; \texttt{Session::eval\_rich}; \texttt{QuaiSession.setPretty}; \texttt{Document.run\_rich}
+  & \live the rendering rule (the user's ruling, 2026-11-09): one
+    renderer for every browser host of what a result looks like as
+    HTML, and one rule for WHEN — the session's \texttt{--pretty}
+    setting. \texttt{rich::html\_of(values, closing\_grid, drawing,
+    mode)}: under \texttt{off} nothing (the text alone); under
+    \texttt{structures} a TABLE value as its grid drawn from the table
+    itself (\texttt{rich::table\_grid}: the index levels first, marked
+    \texttt{class="index"}, the header a title with the type word
+    beneath — the declared unit or the inferred word — cells through
+    the pretty float; one grid per table, stacked in thread order), a
+    record stream closed by \texttt{@| pretty} as the grid (the
+    \texttt{run\_table} road), a drawing (\texttt{@| tree},
+    \texttt{@| histogram}) as its HTML; under \texttt{always} a bare
+    record as a two-column key/value grid and a list of scalars as
+    one row across. The literal stays in the lines; a table inside a
+    cell is its literal text. \texttt{rich::css()} is the one
+    stylesheet (\texttt{TABLE\_CSS} with the \texttt{.index}/\texttt{.type}
+    rules and the diagnostics block's), \texttt{rich::diagnostics\_html}
+    the block under an answer (warnings as lines, infos behind a
+    \texttt{<details>}), \texttt{rich::document} the three together for an
+    export. The one-cell bug: \texttt{table\_rows\_of} expands a TABLE
+    value among the rendered values into its rows'
+    records, so \texttt{//table[1] | \# | clean @| pretty} draws the
+    rows in both forms. The hosts differ in nothing but the setting
+    they open with: quarb-session's \texttt{Executor::run\_rich} /
+    \texttt{Session::eval\_rich} run every line through the rule
+    (\texttt{set\_pretty}, \texttt{pretty\_mode}, \texttt{rich\_of} for a
+    frozen replay, \texttt{export\_rich}); quai-wasm's \texttt{run},
+    \texttt{run\_cell} and \texttt{\&N\#} fill the envelope's \texttt{html}
+    from it, \texttt{setPretty(word)}/\texttt{pretty} set and read the
+    setting, \texttt{richCss()} is the stylesheet, \texttt{render(line,
+    "html")} the document form; the extension's worker opens at
+    \texttt{structures}, the playground at \texttt{off} with a ``grid''
+    button that runs \texttt{session(--pretty=…)} as a line would; the
+    Python \texttt{Document} carries a session memory opening at
+    \texttt{structures} (so \texttt{session(--pretty=…)} works in a
+    notebook), \texttt{run\_rich} answers values, text and HTML,
+    \texttt{quarb.rich\_css()} and \texttt{quarb.diagnostics\_html()} serve
+    \texttt{\_repr\_html\_}. Tests: \texttt{quarb-session/tests/rich.rs},
+    the module tests of \texttt{rich.rs}, the quai-wasm envelope test,
+    the extension's and the demo's verify scripts. \\
+\texttt{| slug}, \texttt{slug("-")}
+  & \live the text as a slug (the header-units round, 2026-11-09):
+    the same slug the \texttt{--slugs} option makes of a title —
+    lowercased, non-alphanumeric runs the separator (\texttt{\_} by
+    default, the argument otherwise), the ends trimmed; a list item by
+    item; null where nothing is left (\texttt{autounits::slug\_text}).
+    Tests: \texttt{qua/tests/document\_tables.rs}. \\
 \texttt{?root=PATH}, \texttt{qua --root PATH}; \texttt{quarb::rooted::Rooted}
   & \live a root on a mount (ruling 2026-11-01; spec: Mounts, the
     root option): the subtree at PATH mounted as the tree, on any

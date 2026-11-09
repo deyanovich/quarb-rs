@@ -175,20 +175,28 @@ def _samples(x, other=None, nan_policy=None):
     if x and isinstance(x[0], dict):
         groups = {}
         for i, r in enumerate(x):
-            label, val, null = None, None, None
+            label, val, null, dropped = None, None, None, False
             for k, v in r.items():
                 n = _num(v)
                 if n is not None and val is None:
                     val = n
                 elif v is None and val is None:
+                    # a hole: under --nan-policy=omit the row is dropped
+                    # (a NaN in the group would propagate through a test
+                    # that takes no policy, f_oneway among them); else
+                    # the refusal names it
                     if nan_policy == "omit":
-                        val = float("nan")
+                        dropped = True
                     else:
                         null = k
                 elif isinstance(v, str) and label is None:
                     label = v
             if val is None and null is not None:
                 raise Hole(f"row {label or i}: field '{null}' is null (a hole); --nan-policy=omit drops it")
+            if val is None and dropped:
+                if label is not None:
+                    groups.setdefault(label, [])
+                continue
             if label is None or val is None:
                 raise Hole(f"row {i}: a sample row is one label and one value")
             groups.setdefault(label, []).append(val)
@@ -835,6 +843,99 @@ mod tests {
                 Value::Str("p".into()),
                 Value::Str("q".into())
             ])
+        );
+    }
+
+    #[test]
+    fn a_quantity_sample_answers_in_its_written_unit() {
+        if Scipy.available().is_err() {
+            return;
+        }
+        // the dressing rule (2026-11-09): the magnitudes in the first
+        // value's written unit, the moments dressed, the variance
+        // squared, the shape statistics and the count bare
+        let grams = |n: f64| Value::Quantity {
+            value: n / 1000.0,
+            base: "kg".into(),
+            written: Some((n, "g".into())),
+        };
+        let sample = Value::list(vec![grams(3750.0), grams(3800.0), grams(5200.0)]);
+        let r = agg("describe", sample, vec![("digits", Value::Int(3))]).unwrap();
+        assert_eq!(field(&r, "nobs"), Value::Int(3));
+        assert_eq!(field(&r, "mean").to_string(), "4250_g");
+        assert_eq!(field(&r, "min").to_string(), "3750_g");
+        assert_eq!(field(&r, "max").to_string(), "5200_g");
+        assert_eq!(field(&r, "variance").to_string(), "678000_g^2");
+        assert!(matches!(field(&r, "skewness"), Value::Float(_)));
+        // two dimensions, or quantities beside bare numbers, refuse
+        let mixed = Value::list(vec![
+            grams(1.0),
+            Value::Quantity {
+                value: 2.0,
+                base: "m".into(),
+                written: Some((2.0, "m".into())),
+            },
+        ]);
+        let e = agg("describe", mixed, vec![]).unwrap_err();
+        assert!(
+            e.message().contains("unlike dimensions (kg and m)"),
+            "{}",
+            e.message()
+        );
+        let e = agg(
+            "describe",
+            Value::list(vec![grams(1.0), Value::Int(2)]),
+            vec![],
+        )
+        .unwrap_err();
+        assert!(
+            e.message().contains("beside bare numbers"),
+            "{}",
+            e.message()
+        );
+    }
+
+    #[test]
+    fn a_k_sample_test_drops_a_holed_row_under_omit() {
+        if Scipy.available().is_err() {
+            return;
+        }
+        // lang's finding (2026-11-09, pre-existing): `f_oneway(--nan-policy=
+        // omit)` answered null/null over a sample with a hole — the hole
+        // rode into the group as a NaN; now the row is dropped, as the
+        // one-sample road drops it
+        let rows = Value::list(vec![
+            rec(&[("g", Value::Str("a".into())), ("v", Value::Int(1))]),
+            rec(&[("g", Value::Str("a".into())), ("v", Value::Int(2))]),
+            rec(&[("g", Value::Str("a".into())), ("v", Value::Null)]),
+            rec(&[("g", Value::Str("b".into())), ("v", Value::Int(5))]),
+            rec(&[("g", Value::Str("b".into())), ("v", Value::Int(6))]),
+            rec(&[("g", Value::Str("b".into())), ("v", Value::Int(7))]),
+        ]);
+        let r = agg(
+            "f_oneway",
+            rows.clone(),
+            vec![
+                ("digits", Value::Int(3)),
+                ("nan_policy", Value::Str("omit".into())),
+            ],
+        )
+        .unwrap();
+        assert_eq!(field(&r, "statistic"), Value::Float(29.2));
+        assert_eq!(field(&r, "pvalue"), Value::Float(0.0124));
+        let r = agg(
+            "kruskal",
+            rows.clone(),
+            vec![("nan_policy", Value::Str("omit".into()))],
+        )
+        .unwrap();
+        assert!(matches!(field(&r, "statistic"), Value::Float(_)));
+        // without the policy the hole refuses by name, as before
+        let e = agg("f_oneway", rows, vec![]).unwrap_err();
+        assert!(
+            e.message().contains("field 'v' is null (a hole)"),
+            "{}",
+            e.message()
         );
     }
 }

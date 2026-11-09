@@ -225,7 +225,9 @@ fn an_undeclared_name_is_an_opaque_unit_through_the_underscore() {
     // never scaled: no prefix is stripped from an opaque name
     assert_eq!(one("= 1_kEUR | dimension"), "kEUR");
     // a currency symbol is a name
-    assert_eq!(one("= 12_€ | dimension"), "€");
+    // (a currency sign names its currency through the dictionary: the
+    // base is the code, so `12_€ = 12_EUR`; the header-units round)
+    assert_eq!(one("= 12_€ | dimension"), "EUR");
     // the common currencies are built in: spaced, glued, underscored,
     // and through their prefix aliases
     assert_eq!(one("= '12EUR' | quantity"), "12_EUR");
@@ -749,7 +751,7 @@ fn a_documents_imported_units_reach_the_table_through_the_mount() {
     );
     assert_eq!(
         String::from_utf8_lossy(&out.stdout).trim(),
-        "4.739085601566586_BTU"
+        "4.73908560156659_BTU"
     );
     // ... and a unit the document does not define still refuses,
     // naming the nearest.
