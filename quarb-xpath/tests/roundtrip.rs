@@ -149,3 +149,60 @@ fn index_predicates() {
     // //p[1] would be one p per chapter)
     assert_eq!(via_xpath("//p[1]"), vec!["/EXAMPLE/chapter[1]/p[1]"]);
 }
+
+/// `text()` is the element's immediate text nodes: `:::texts`, the
+/// list of its text runs (ruling 2026-11-11). A terminal `text()`
+/// spreads the lists into one answer per run; a compared `text()`
+/// holds when any run satisfies the comparison.
+#[test]
+fn text_is_the_immediate_text_runs() {
+    let tr = |x: &str| quarb_xpath::translate(x).unwrap();
+    assert_eq!(tr("//p/text()").query, "//p:::texts | ...");
+    assert_eq!(
+        tr("//title/text() | //chapter/@id").query,
+        "//title:::texts || //chapter::id | ..."
+    );
+    assert_eq!(tr("count(//p/text())").query, "//p:::texts | ... @| count");
+    assert_eq!(
+        tr("//chapter[title/text() = 'Chapter 2']/@id").query,
+        "//chapter[/title:::texts = \"Chapter 2\"]::id"
+    );
+    assert!(
+        tr("//p/text()")
+            .notes
+            .iter()
+            .any(|n| n.contains("':::texts' lists the element's immediate text runs"))
+    );
+    // a function reads the first text node in XPath: noted
+    let t = tr("//p[contains(text(), 'chapter')]");
+    assert_eq!(t.query, "//p[:::texts *= \"chapter\"]");
+    assert!(
+        t.notes
+            .iter()
+            .any(|n| n.contains("XPath reads the first text node"))
+    );
+
+    assert_eq!(via_xpath("//head/title/text()"), ["Welcome to Gnome"]);
+    assert_eq!(
+        via_xpath("//chapter[title/text() = 'Chapter 2']/@id"),
+        ["chapter2"]
+    );
+    assert_eq!(via_xpath("count(//title/text())"), ["4"]);
+
+    // mixed content: the runs, not the descendant text
+    let mixed = XmlAdapter::parse(
+        r#"<doc><p id="a">Hello <b>world</b> again</p><p id="b"><b>only</b></p></doc>"#,
+    )
+    .unwrap();
+    let run = |x: &str| match quarb::run(&tr(x).query, &mixed).unwrap() {
+        quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+        quarb::QueryResult::Nodes(_) => panic!("expected values"),
+    };
+    assert_eq!(run("//p/text()"), ["Hello", "again"]);
+    assert_eq!(run("//p[text() = 'again']/@id"), ["a"]);
+    assert_eq!(
+        run("//p[contains(text(), 'world')]/@id"),
+        Vec::<String>::new()
+    );
+    assert_eq!(run("count(//p/text())"), ["2"]);
+}

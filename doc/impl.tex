@@ -1471,7 +1471,7 @@ root-anchored sequence of hops, each an axis followed by a name:
     and \texttt{\$\$0} the driver of a join condition (2026-10-18;
     \texttt{\_} retired)
     — wide crosstabs, groupwise transforms; and the correlation
-    keeps its \emph{witness}, so \texttt{\$*k} in pipeline commands
+    keeps its \emph{witness}, so \texttt{\$\$k} in pipeline commands
     projects the joined side into output (\texttt{SELECT a.x, b.y});
     the witness travels into every path a command's operand or pipe
     hop navigates, so a nested step predicate
@@ -1482,11 +1482,15 @@ root-anchored sequence of hops, each an axis followed by a name:
   & \live correlation, \emph{driver-first} (2026-07-25): the first
     expression drives (SQL's \texttt{FROM}); each joined
     expression carries its ON clause in its final step's brackets,
-    reaching the driver as \texttt{\$\$…} and earlier entries as
-    \texttt{\$*k}; \texttt{<=>?}\ marks the expression it precedes
+    reaching the driver as \texttt{\$\$0}, earlier entries as
+    \texttt{\$\$k} and its own candidate bare or as
+    \texttt{\$\$\_} (the star spellings \texttt{\$*} and
+    \texttt{\$*k} are retired, 2026-11-11: a node is
+    \texttt{\$\$}, a value \texttt{\$}); \texttt{<=>?}\ marks
+    the expression it precedes
     nullable (\texttt{LEFT JOIN}); one tuple binds the whole
     predicate set, searched depth-first with per-entry pruning,
-    and \texttt{\$*N} may navigate from its context node
+    and \texttt{\$\$k} may navigate from its context node
     (\texttt{\$\$1/field::}), so joins work where keys are
     children, e.g. JSON. Misplaced correlated references are
     parse errors, never silent nulls \\

@@ -22,7 +22,9 @@
 //! - Attributes are properties: `::pages`, `::href`. The default
 //!   projection (`::`) and `::text` are the element's text
 //!   content; `:::tag`, `:::id`, `:::local-name`, `:::ns-prefix`,
-//!   `:::n-attrs`, and any `:::attr` expose metadata.
+//!   `:::n-attrs`, and any `:::attr` expose metadata; `:::texts`
+//!   is the list of the element's immediate text runs (XPath's
+//!   `text()`).
 //! - An attribute holding an ID reference resolves: `::ref-->`
 //!   follows a bare IDREF value (`book="b1"`) or a fragment
 //!   (`href="#b1"`) to the element with that `id` or `xml:id`.
@@ -37,6 +39,18 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Decoder, Reader};
 use std::collections::HashMap;
 
+/// The text with its white space collapsed to single spaces and
+/// trimmed; `None` when nothing is left.
+fn collapsed(text: &str) -> Option<String> {
+    let mut words = text.split_whitespace();
+    let mut out = words.next()?.to_string();
+    for w in words {
+        out.push(' ');
+        out.push_str(w);
+    }
+    Some(out)
+}
+
 struct Node {
     /// The tag name as written, in the document's name table;
     /// `None` for the document root.
@@ -46,6 +60,10 @@ struct Node {
     /// The element's text content (all descendant text and CDATA,
     /// concatenated in document order).
     text: String,
+    /// Where this element's text starts within its parent's: the
+    /// parent's own text runs are what its children's texts leave
+    /// (`:::texts`).
+    at: u32,
     parent: Option<NodeId>,
     children: Vec<NodeId>,
 }
@@ -106,6 +124,7 @@ impl XmlAdapter {
             tag: None,
             attrs: Vec::new(),
             text: String::new(),
+            at: 0,
             parent: None,
             children: Vec::new(),
         }];
@@ -257,10 +276,13 @@ fn intern(
         attrs.push((names.intern(&key), value));
     }
     let parent = *stack.last().expect("stack holds the root");
+    // (the parent's text stands still while this element is open)
+    let at = u32::try_from(nodes[parent].text.len()).unwrap_or(u32::MAX);
     nodes.push(Node {
         tag: Some(tag),
         attrs,
         text: String::new(),
+        at,
         parent: Some(NodeId(parent as u64)),
         children: Vec::new(),
     });
@@ -367,15 +389,34 @@ impl AstAdapter for XmlAdapter {
     /// `:::tag`, `:::local-name`, `:::ns-prefix`, and `:::n-attrs`
     /// — facts about the element, never its data: attributes are
     /// properties (`::pages`), text is the bare projection.
+    /// `:::texts` is the structural reading of the text beside the
+    /// bare projection's (ruling 2026-11-11): XPath's `text()`, the
+    /// list of the element's immediate text runs, no child
+    /// element's text in it; each run with its white space
+    /// collapsed and trimmed, null where there is none.
     /// The `:::` keys this adapter answers (`:meta` lists the ones
     /// a node answers).
     fn metadata_catalogue(&self) -> &'static [&'static str] {
-        &["tag", "local-name", "ns-prefix", "n-attrs"]
+        &["tag", "local-name", "ns-prefix", "n-attrs", "texts"]
     }
 
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         let n = &self.nodes[node.0 as usize];
         match key {
+            "texts" => {
+                n.tag?;
+                // the element's text less its children's, in order
+                let mut runs = Vec::new();
+                let mut from = 0;
+                for c in &n.children {
+                    let c = &self.nodes[c.0 as usize];
+                    let at = (c.at as usize).min(n.text.len());
+                    runs.extend(collapsed(n.text.get(from..at).unwrap_or("")));
+                    from = (at + c.text.len()).min(n.text.len());
+                }
+                runs.extend(collapsed(n.text.get(from..).unwrap_or("")));
+                (!runs.is_empty()).then(|| Value::list(runs.into_iter().map(Value::Str).collect()))
+            }
             "tag" => n.tag.map(|t| Value::Str(self.names.get(t).to_string())),
             "local-name" => n
                 .tag
@@ -858,12 +899,23 @@ impl AstAdapter for XmlStream {
     }
 
     fn metadata_catalogue(&self) -> &'static [&'static str] {
-        &["tag", "local-name", "ns-prefix", "n-attrs"]
+        &["tag", "local-name", "ns-prefix", "n-attrs", "texts"]
     }
 
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
         match Self::unpack(node) {
             Some((i, local)) => self.with_child(i, |a| a.metadata(local, key)).flatten(),
+            // the document element's own text is what stands between
+            // its children
+            None if key == "texts" && node == self.anchor => {
+                let runs: Vec<Value> = self
+                    .gaps
+                    .iter()
+                    .filter_map(|g| collapsed(g))
+                    .map(Value::Str)
+                    .collect();
+                (!runs.is_empty()).then(|| Value::list(runs))
+            }
             None => self.prefix.metadata(node, key),
         }
     }
@@ -951,7 +1003,7 @@ mod stream_tests {
             w.locator(wn)
         );
         assert_eq!(s.locator(sn), w.locator(wn), "locator");
-        for k in ["tag", "local-name", "ns-prefix", "n-attrs"] {
+        for k in ["tag", "local-name", "ns-prefix", "n-attrs", "texts"] {
             assert_eq!(
                 s.metadata(sn, k),
                 w.metadata(wn, k),

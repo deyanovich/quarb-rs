@@ -11909,12 +11909,11 @@ impl Parser<'_> {
                 return self.driver();
             }
             Some(Token::Dollar) => {
-                // Correlation context reference: $* or $*N, optionally
-                // projected.
                 self.pos += 1;
                 // `$$N` — the join's N-th bound node: the driver's
-                // doubled sigil with the position (`$*N` is the
-                // heritage spelling). Any other `$$…` is the same
+                // doubled sigil with the position (`$*N` and the
+                // candidate's `$*` are retired: a node is `$$`, a
+                // value `$`). Any other `$$…` is the same
                 // capsa-scope operand one scope out (the invoking
                 // capsa of the enclosing subcontext); each extra `$`
                 // steps out one more level.
@@ -11963,20 +11962,16 @@ impl Parser<'_> {
                             let digits = text[1..].to_string();
                             self.pos += 1;
                             if digits.is_empty() {
-                                // `$*` — the join's bound nodes, legal
-                                // inside a join condition only (ruling
-                                // 2026-11-06): the enclosing correlation
-                                // is lexically decidable, so the miss is
-                                // a parse error rather than a silent null.
-                                if self.correlation_depth == 0 && !self.in_def_body {
-                                    return Err(QuarbError::parse(
-                                        "'$*' reads the join's bound nodes and stands inside a join \
-                                         condition only; outside one there is no join to read — \
-                                         '$_' is the topic, '$$_' the position, '@@_' the context's \
-                                         positions",
-                                    ));
-                                }
-                                None
+                                // `$*`, the join's candidate, is retired
+                                // (ruling 2026-11-11): the one single-sigil
+                                // spelling that named a node. A condition
+                                // reads its candidate bare, or as the
+                                // position.
+                                return Err(QuarbError::parse(
+                                    "'$*' is retired: a join condition reads its candidate bare \
+                                     ('::limit') or as the position ('$$_::limit'); '$$0' is the \
+                                     driver, '$$N' a bound node",
+                                ));
                             } else {
                                 return Err(QuarbError::parse(format!(
                                     "'$*{digits}' is retired: the join's N-th node is '$${digits}'"
@@ -14946,17 +14941,65 @@ fn max_ctx_command(s: &Command) -> usize {
 /// quarq literal's body is not walked (its names resolve where it is
 /// applied); a record push or the fields push makes names the parser
 /// cannot know, and turns the check off.
+///
+/// The positions are counted per side (ruling 2026-11-11: `$$.2`
+/// with one mark is refused exactly as `$.2` with one value is).
+/// Each count is an upper bound: a dot after a pipe files whichever
+/// face the topic has, which the parser cannot know, so it counts
+/// toward both. A side stands unchecked where its count is not the
+/// parser's to know: a push that may run more than once (a repeated
+/// group, a quantified push, `map`), and on the node side a query
+/// that moves references as values, since a reference filed again
+/// is a mark no push form shows (see [`makes_reference`]).
 #[derive(Default)]
 struct PushNames {
     pushed: Vec<String>,
     /// Every push that files on the value side, named or not (a
     /// mark files a node and takes no value position).
     values: usize,
+    /// A value push stands where it may run more than once.
+    values_unknown: bool,
     recalled: Vec<String>,
     /// The positions recalled (`$.N`, `$.-N`, `$.`, the fold's
     /// `{.N}`): each must stand within the value regulae the query
     /// files (ruling 2026-11-04: a position past the capsa refuses).
     positions: Vec<RegRef>,
+    /// Every push that may file a node: a path mark, a dot after a
+    /// pipe, a push whose whole body is one reference (`.t($$_)`).
+    marks: usize,
+    /// The node side's count is not the parser's to know.
+    marks_unknown: bool,
+    /// The mark positions read (`$$.N`, `$$.-N`, `$$.`), spelled as
+    /// the value side's are.
+    mark_positions: Vec<RegRef>,
+    /// The names a reference may stand under (the marks, and the
+    /// pushes of one reference): a recall of one reads a reference.
+    mark_names: Vec<String>,
+    /// The names read as marks (`$$.name`, `((@name))`).
+    mark_reads: Vec<String>,
+    /// The names a push files a value under, as far as the parser
+    /// can tell (a body with no reference in it), and the names a
+    /// push may file a node under (a mark, a dot after a pipe, a
+    /// body the parser cannot see through): a name of the first
+    /// kind alone, read as a mark, holds no node (ruling
+    /// 2026-11-11).
+    value_names: Vec<String>,
+    node_names: Vec<String>,
+    /// How many references have stood as values so far.
+    makers: usize,
+    /// A reference has stood as a value by this point of the walk:
+    /// a push after it may file that reference, or a list of them.
+    reference_moved: bool,
+    /// ... anywhere in the query, and a push stands in a quarq's
+    /// body, which runs where it is applied: no order to go by.
+    any_reference: bool,
+    quarq_files: bool,
+    /// Inside a push's body; inside a construct that may repeat.
+    in_push: usize,
+    in_repeat: usize,
+    /// The body of the push being walked when it is one reference:
+    /// counted as that push's mark, not as a reference moved.
+    whole: Option<*const Operand>,
     dynamic: bool,
     /// Inside a quarq literal's body: its pushes count (they land in
     /// the applying thread), its recalls do not (they resolve where
@@ -14977,11 +15020,68 @@ impl PushNames {
         if let Some(n) = name {
             self.pushed.push(n.clone());
         }
+        self.value();
+    }
+    /// One more value regula.
+    fn value(&mut self) {
         self.values += 1;
+        if self.in_repeat > 0 {
+            self.values_unknown = true;
+        }
     }
     fn mark(&mut self, name: &Option<String>) {
         if let Some(n) = name {
             self.pushed.push(n.clone());
+        }
+        self.node();
+    }
+    /// One more regula that may hold a node.
+    fn node(&mut self) {
+        self.marks += 1;
+        if self.in_repeat > 0 {
+            self.marks_unknown = true;
+        }
+    }
+    /// A push files a value the parser cannot see through: where a
+    /// reference has stood as a value before it, it may be filing
+    /// that reference, or a list of them.
+    fn files(&mut self) {
+        if self.reference_moved {
+            self.marks_unknown = true;
+        }
+        if self.in_quarq {
+            self.quarq_files = true;
+        }
+    }
+    /// A reference stands as a value here.
+    fn reference(&mut self) {
+        self.makers += 1;
+        self.any_reference = true;
+        self.reference_moved = true;
+        if self.in_push > 0 {
+            self.marks_unknown = true;
+        }
+    }
+    /// The names a push with a body filed, now that its body is
+    /// walked: values, unless the body is one reference (`one`), a
+    /// reference stands in it or stood as a value before it (the
+    /// topic or a recall may carry it in), or the push is a quarq's,
+    /// run who knows where.
+    fn kind_of(&mut self, names: Vec<String>, one: bool, makers: usize, moved: bool) {
+        if one || moved || self.makers != makers || self.in_quarq {
+            self.node_names.extend(names);
+        } else {
+            self.value_names.extend(names);
+        }
+    }
+    /// A push with a body: one reference is that push's mark, and
+    /// anything else is a value the walk reads for references.
+    fn body(&mut self, expr: &Operand) {
+        if one_reference(expr, &self.mark_names) {
+            self.node();
+            self.whole = Some(expr as *const Operand);
+        } else {
+            self.files();
         }
     }
     fn recall(&mut self, r: &RegRef) {
@@ -14996,81 +15096,150 @@ impl PushNames {
     }
 }
 
-impl visit::Visitor for PushNames {
+/// Whether the operand is a bare node read off the cursor (`$$_`
+/// with no path and no projection).
+fn bare_position(inner: &Operand) -> bool {
+    matches!(
+        inner,
+        Operand::Rel {
+            steps,
+            projection: None,
+            anchor: Anchor::Current,
+        } if steps.is_empty()
+    )
+}
+
+/// Whether the operand reads as exactly one reference: a node read
+/// bare (`$$_`, `$$.name`, `$$.N`, `$$0`, a bound node, an edge's
+/// end), or the recall of a name a reference stands under.
+fn one_reference(o: &Operand, marks: &[String]) -> bool {
+    match o {
+        Operand::Rel {
+            steps,
+            projection: None,
+            anchor,
+        } if steps.is_empty() => matches!(
+            anchor,
+            Anchor::Mark(_)
+                | Anchor::MarkIndex(_)
+                | Anchor::MarkTop
+                | Anchor::MarkBack(_)
+                | Anchor::EdgeEnd(_)
+        ),
+        Operand::Position(i) | Operand::Invoking(i) | Operand::Driver(i) => bare_position(i),
+        Operand::Ctx {
+            index: Some(_),
+            steps,
+            projection: None,
+        } => steps.is_empty(),
+        Operand::Recall(RegRef::Named(n)) => marks.contains(n),
+        _ => false,
+    }
+}
+
+/// Whether the operand makes a reference a value, or may: the forms
+/// of [`one_reference`]; the plural node reads (`((@))`, `((@name))`,
+/// `@@_`, a peer's regulae); the cursor record, the context table and
+/// the reference face of the context matrix; and what comes from
+/// outside the query (the session memory, a parameter, a hole).
+/// With the graph commands that answer in references (see
+/// [`answers_references`]) these are every place a reference is
+/// made besides a mark: a query with none of them holds exactly
+/// the references its marks file.
+fn makes_reference(o: &Operand, marks: &[String]) -> bool {
+    one_reference(o, marks)
+        || match o {
+            Operand::Rel {
+                steps,
+                projection: None,
+                anchor,
+            } if steps.is_empty() => {
+                matches!(anchor, Anchor::MarksAll | Anchor::MarksNamed(_))
+            }
+            Operand::Positions { projection: None }
+            | Operand::Cursor
+            | Operand::CtxTable
+            | Operand::Matrix { node: true, .. }
+            | Operand::PeerReg { .. }
+            | Operand::Recall(RegRef::Session(_) | RegRef::SessionRecord)
+            | Operand::Param(_)
+            | Operand::Hole(_) => true,
+            _ => false,
+        }
+}
+
+/// Whether a command may answer in references: the edge and node
+/// tables and the graph library's routes; every namespaced command
+/// is taken for one, since a library is not the parser's to know.
+fn answers_references(name: &str) -> bool {
+    name.contains(':') || matches!(name, "nodes" | "edges" | "route")
+}
+
+/// The names a reference may stand under (see [`PushNames`]): the
+/// named marks, the named dots after a pipe, and the named pushes of
+/// one reference, a recall of such a name being one itself.
+#[derive(Default)]
+struct MarkNames {
+    names: Vec<String>,
+    /// (the push's name, the name its body recalls)
+    by_recall: Vec<(String, String)>,
+}
+
+impl MarkNames {
+    fn of(q: &Query) -> Vec<String> {
+        let mut v = MarkNames::default();
+        visit::Visitor::query(&mut v, q);
+        loop {
+            let more: Vec<String> = v
+                .by_recall
+                .iter()
+                .filter(|(n, r)| v.names.contains(r) && !v.names.contains(n))
+                .map(|(n, _)| n.clone())
+                .collect();
+            if more.is_empty() {
+                return v.names;
+            }
+            v.names.extend(more);
+        }
+    }
+    fn body(&mut self, name: &Option<String>, expr: &Operand) {
+        let Some(n) = name else { return };
+        match expr {
+            Operand::Recall(RegRef::Named(r)) => self.by_recall.push((n.clone(), r.clone())),
+            e if one_reference(e, &[]) => self.names.push(n.clone()),
+            _ => {}
+        }
+    }
+    fn quarq_body(&mut self, q: &crate::value::Quarq) {
+        for c in q.body.iter() {
+            visit::Visitor::command(self, c);
+        }
+    }
+}
+
+impl visit::Visitor for MarkNames {
     fn command(&mut self, c: &Command) {
         match c {
-            Command::Push(name)
-            | Command::ExprPush { name, .. }
-            | Command::Subcontext { name, .. }
-            | Command::Attach { name, .. } => self.push(name),
-            // the aggregate push recalls its partition's regulae first
-            Command::AggPush { name, regs, .. } => {
-                regs.iter().for_each(|r| self.recall(r));
-                self.push(name);
-            }
-            // a record push files its fields under their names, known
-            // where the key is written or the value names itself; a
-            // spread or an expansion files names the parser cannot know
-            Command::RecordPush {
-                name: Some(name), ..
-            } => self.push(&Some(name.clone())),
-            Command::RecordPush { call, .. } => {
-                let mut i = 0;
-                while i < call.args.len() {
-                    match &call.args[i] {
-                        Arg::Lit(Value::Str(name)) | Arg::Key(Value::Str(name)) => {
-                            self.pushed.push(name.clone());
-                            self.values += 1;
-                            i += 2;
-                        }
-                        Arg::Key(_) => {
-                            self.values += 1;
-                            i += 2;
-                        }
-                        Arg::Expr(e) => {
-                            match crate::syntax::ast::auto_field_name(e) {
-                                Some(n) => self.pushed.push(n.to_string()),
-                                None => self.dynamic = true,
-                            }
-                            self.values += 1;
-                            i += 1;
-                        }
-                        Arg::Opt { .. } => i += 1,
-                        _ => {
-                            self.dynamic = true;
-                            i += 1;
-                        }
-                    }
-                }
-            }
-            // the fields push files the topic's fields: names the parser
-            // cannot know, so both checks stand down
-            Command::FieldsPush => self.dynamic = true,
-            Command::Recall(r)
-            | Command::AggRecall(r)
-            | Command::Splice(r)
-            | Command::SpliceAs { reg: r, .. } => self.recall(r),
-            Command::Fold { regs, .. } => regs.iter().for_each(|r| self.recall(r)),
+            Command::Push(Some(n)) => self.names.push(n.clone()),
+            Command::ExprPush { name, expr } => self.body(name, expr),
             _ => {}
         }
         visit::walk_command(self, c);
     }
     fn elem(&mut self, e: &PathElem) {
         match e {
-            PathElem::Push { name, .. } => self.push(name),
-            PathElem::Mark(name) => self.mark(name),
+            PathElem::Mark(Some(n)) => self.names.push(n.clone()),
+            PathElem::Push {
+                name,
+                body: PushBody::Expr(expr),
+            } => self.body(name, expr),
             _ => {}
         }
         visit::walk_elem(self, e);
     }
     fn operand(&mut self, o: &Operand) {
-        match o {
-            // (an attached read `X:.name` reads what another thread
-            // attached at the node, in this query or before it: not
-            // a recall of the capsa, so not checked)
-            Operand::Recall(r) | Operand::Apply { reg: r, .. } => self.recall(r),
-            Operand::Lit(Value::Quarq(q)) => self.quarq_body(q),
-            _ => {}
+        if let Operand::Lit(Value::Quarq(q)) = o {
+            self.quarq_body(q);
         }
         visit::walk_operand(self, o);
     }
@@ -15084,25 +15253,250 @@ impl visit::Visitor for PushNames {
     }
 }
 
+impl visit::Visitor for PushNames {
+    fn command(&mut self, c: &Command) {
+        // a push's body is walked as one; a quantified push and
+        // `map` run their command more than once
+        let body = matches!(
+            c,
+            Command::ExprPush { .. }
+                | Command::Subcontext { .. }
+                | Command::Attach { .. }
+                | Command::AggPush { .. }
+                | Command::RecordPush { .. }
+        );
+        let repeats = matches!(c, Command::Repeat { .. } | Command::Map(_));
+        let whole = self.whole;
+        // what this push files, and what stood before its body
+        let (named, makers, moved) = (self.pushed.len(), self.makers, self.reference_moved);
+        match c {
+            // a dot after a pipe files whichever face the topic has
+            Command::Push(name) => {
+                self.push(name);
+                self.node();
+                self.files();
+                self.node_names.extend(name.clone());
+            }
+            Command::ExprPush { name, expr } => {
+                self.push(name);
+                self.body(expr);
+            }
+            Command::Subcontext { name, .. } | Command::Attach { name, .. } => {
+                self.push(name);
+                self.files();
+            }
+            // the aggregate push recalls its partition's regulae first
+            Command::AggPush { name, regs, .. } => {
+                regs.iter().for_each(|r| self.recall(r));
+                self.push(name);
+                self.files();
+            }
+            // `collapse` gathers the folded threads' marks into lists:
+            // more references than marks
+            Command::Agg(call) if call.name == "collapse" => self.marks_unknown = true,
+            Command::Func(call) | Command::Agg(call) if answers_references(&call.name) => {
+                self.reference()
+            }
+            // what the session or a caller hands in may be a reference
+            Command::Param { .. } | Command::Hole { .. } => self.reference(),
+            // a record push files its fields under their names, known
+            // where the key is written or the value names itself; a
+            // spread or an expansion files names the parser cannot know
+            Command::RecordPush {
+                name: Some(name), ..
+            } => {
+                self.push(&Some(name.clone()));
+                self.files();
+            }
+            Command::RecordPush { call, .. } => {
+                self.files();
+                let mut i = 0;
+                while i < call.args.len() {
+                    match &call.args[i] {
+                        Arg::Lit(Value::Str(name)) | Arg::Key(Value::Str(name)) => {
+                            self.pushed.push(name.clone());
+                            self.value();
+                            i += 2;
+                        }
+                        Arg::Key(_) => {
+                            self.value();
+                            i += 2;
+                        }
+                        Arg::Expr(e) => {
+                            match crate::syntax::ast::auto_field_name(e) {
+                                Some(n) => self.pushed.push(n.to_string()),
+                                None => self.dynamic = true,
+                            }
+                            self.value();
+                            i += 1;
+                        }
+                        Arg::Opt { .. } => i += 1,
+                        _ => {
+                            self.dynamic = true;
+                            i += 1;
+                        }
+                    }
+                }
+            }
+            // the fields push files the topic's fields: names the parser
+            // cannot know, so both checks stand down
+            Command::FieldsPush => self.dynamic = true,
+            Command::Recall(r) | Command::AggRecall(r) => {
+                self.recall(r);
+                if matches!(r, RegRef::Named(n) if self.mark_names.contains(n))
+                    || matches!(r, RegRef::Session(_) | RegRef::SessionRecord)
+                {
+                    self.reference();
+                }
+            }
+            // a spliced quarq files what its body files
+            Command::Splice(r) | Command::SpliceAs { reg: r, .. } => {
+                self.recall(r);
+                self.files();
+            }
+            Command::Fold { regs, .. } => regs.iter().for_each(|r| self.recall(r)),
+            _ => {}
+        }
+        let own: Vec<String> = if body {
+            self.pushed[named..].to_vec()
+        } else {
+            Vec::new()
+        };
+        let one = self.whole != whole;
+        self.in_push += usize::from(body);
+        self.in_repeat += usize::from(repeats);
+        visit::walk_command(self, c);
+        self.in_push -= usize::from(body);
+        self.in_repeat -= usize::from(repeats);
+        self.whole = whole;
+        self.kind_of(own, one, makers, moved);
+    }
+    fn elem(&mut self, e: &PathElem) {
+        let whole = self.whole;
+        // a group that may be walked more than once files its pushes
+        // and marks once per round
+        let repeats = matches!(
+            e,
+            PathElem::Group(g) if g.quant.budget.is_some() || g.quant.max.is_none_or(|m| m > 1)
+        );
+        let body = matches!(e, PathElem::Push { .. });
+        let (named, makers, moved) = (self.pushed.len(), self.makers, self.reference_moved);
+        match e {
+            PathElem::Push { name, body } => {
+                self.push(name);
+                match body {
+                    PushBody::Expr(expr) => self.body(expr),
+                    PushBody::Query(_) => self.files(),
+                }
+            }
+            PathElem::Mark(name) => {
+                self.mark(name);
+                self.node_names.extend(name.clone());
+            }
+            // what a caller hands in may be a reference
+            PathElem::Param(_) | PathElem::Hole(_) => self.reference(),
+            _ => {}
+        }
+        let own: Vec<String> = if body {
+            self.pushed[named..].to_vec()
+        } else {
+            Vec::new()
+        };
+        let one = self.whole != whole;
+        self.in_push += usize::from(body);
+        self.in_repeat += usize::from(repeats);
+        visit::walk_elem(self, e);
+        self.in_push -= usize::from(body);
+        self.in_repeat -= usize::from(repeats);
+        self.whole = whole;
+        self.kind_of(own, one, makers, moved);
+    }
+    fn operand(&mut self, o: &Operand) {
+        match o {
+            // (an attached read `X:.name` reads what another thread
+            // attached at the node, in this query or before it: not
+            // a recall of the capsa, so not checked)
+            Operand::Recall(r) => self.recall(r),
+            // an applied quarq files what its body files
+            Operand::Apply { reg: r, .. } => {
+                self.recall(r);
+                self.files();
+            }
+            Operand::Lit(Value::Quarq(q)) => self.quarq_body(q),
+            _ => {}
+        }
+        if !self.whole.is_some_and(|w| std::ptr::eq(w, o)) && makes_reference(o, &self.mark_names) {
+            self.reference();
+        }
+        visit::walk_operand(self, o);
+    }
+    fn anchor(&mut self, a: &Anchor) {
+        // the mark positions read, as `recall` takes the value side's
+        // (a quarq's body reads them where it is applied)
+        if !self.in_quarq {
+            match a {
+                Anchor::MarkTop => self.mark_positions.push(RegRef::Top),
+                Anchor::MarkIndex(n) => self.mark_positions.push(RegRef::Index(*n)),
+                Anchor::MarkBack(n) => self.mark_positions.push(RegRef::Back(*n)),
+                // a name read as a mark is a name recalled: a push
+                // of the query must make it, as for `$.name` (spec:
+                // The Capsa, the recall of a name no push made, which
+                // never said the value side alone). A mark set on
+                // other threads and missing on this one is still a
+                // miss that answers nothing: that is the run's.
+                Anchor::Mark(n) | Anchor::MarksNamed(n) => {
+                    self.recalled.push(n.clone());
+                    self.mark_reads.push(n.clone());
+                }
+                _ => {}
+            }
+        }
+        visit::walk_anchor(self, a);
+    }
+    fn call(&mut self, c: &FnCall) {
+        for a in &c.args {
+            if let Arg::Lit(Value::Quarq(q)) = a {
+                self.quarq_body(q);
+            }
+        }
+        visit::walk_call(self, c);
+    }
+}
+
 /// The refusal for a recalled name no push made, if any.
 fn refuse_unmade_names(q: &Query) -> Result<()> {
-    let mut v = PushNames::default();
+    let mut v = PushNames {
+        mark_names: MarkNames::of(q),
+        ..PushNames::default()
+    };
     v.query(q);
     if v.dynamic {
         return Ok(());
     }
-    for r in &v.positions {
-        let past = match r {
-            RegRef::Top => v.values == 0,
-            RegRef::Index(n) | RegRef::Back(n) => *n > v.values,
-            _ => false,
-        };
-        if past {
+    let past = |r: &RegRef, filed: usize| match r {
+        RegRef::Top => filed == 0,
+        RegRef::Index(n) | RegRef::Back(n) => *n > filed,
+        _ => false,
+    };
+    if !v.values_unknown {
+        if let Some(r) = v.positions.iter().find(|r| past(r, v.values)) {
             return Err(QuarbError::parse(format!(
                 "no regula at position '{}'; the query pushes {} value{}",
                 crate::syntax::unparse::fold_selector(std::slice::from_ref(r)),
                 v.values,
                 if v.values == 1 { "" } else { "s" }
+            )));
+        }
+    }
+    // the node side, the same way (ruling 2026-11-11), where the
+    // marks are the parser's to count
+    if !v.marks_unknown && !(v.quarq_files && v.any_reference) {
+        if let Some(r) = v.mark_positions.iter().find(|r| past(r, v.marks)) {
+            return Err(QuarbError::parse(format!(
+                "no mark at position '{}'; the query marks {} node{}",
+                crate::syntax::unparse::fold_selector(std::slice::from_ref(r)),
+                v.marks,
+                if v.marks == 1 { "" } else { "s" }
             )));
         }
     }
@@ -15123,6 +15517,15 @@ fn refuse_unmade_names(q: &Query) -> Result<()> {
             return Err(QuarbError::parse(format!(
                 "no push '.{}' before this point; {exist}",
                 crate::syntax::ast::display_name(name)
+            )));
+        }
+    }
+    // a name every push of which files a value holds no node: read
+    // as a mark it answered nothing (ruling 2026-11-11: an error)
+    for name in &v.mark_reads {
+        if v.value_names.contains(name) && !v.node_names.contains(name) {
+            return Err(QuarbError::parse(crate::syntax::ast::value_read_as_mark(
+                name,
             )));
         }
     }

@@ -13,12 +13,13 @@
 //! and child text, `and`/`or`/`not`, existence, indexes → `[n]` /
 //! `[last()]`, ranges → `position()`), the leaf anchor →
 //! `[not(*)]`, unions (`|`), terminal projections (`::a` → `/@a`,
-//! `::text` → `/text()`), and the `count` / `sum` aggregates as
-//! function wrappers.
+//! `:::texts` → `/text()`, the bare `::` → `/text()` with a note),
+//! and the `count` / `sum` aggregates as function wrappers.
 //!
 //! Notes carry the standing divergences (Quarb's `//` is proper
-//! descendants where XPath's is descendant-or-self; `::text`
-//! concatenates where `text()` selects immediate text nodes).
+//! descendants where XPath's is descendant-or-self; the bare `::`
+//! concatenates the descendant text where `text()` selects the
+//! immediate text nodes, which `:::texts` lists).
 
 use crate::{Translation, XPathError};
 use quarb::reflect::QueryArbor;
@@ -37,6 +38,7 @@ pub fn export(quarb: &str) -> Result<Translation, XPathError> {
     let mut ex = Exporter {
         arbor,
         notes: Vec::new(),
+        texts: false,
     };
     let query = ex.query()?;
     Ok(Translation {
@@ -62,6 +64,9 @@ fn has_group(arbor: &QueryArbor) -> bool {
 struct Exporter {
     arbor: QueryArbor,
     notes: Vec<String>,
+    /// A branch ends in `:::texts`: a spread after it is `text()`'s
+    /// own shape.
+    texts: bool,
 }
 
 impl Exporter {
@@ -107,7 +112,19 @@ impl Exporter {
         let mut out = paths.join(" | ");
 
         if let Some(pipe) = self.kid(q, "pipeline") {
-            let commands = self.arbor.children(pipe);
+            let mut commands = self.arbor.children(pipe);
+            // the spread after `:::texts` is what `text()` already
+            // answers: one node per text run
+            if self.texts
+                && commands
+                    .first()
+                    .is_some_and(|&c| self.kind(c) == "spread" && self.prop(c, "outer").is_none())
+            {
+                commands.remove(0);
+            }
+            if commands.is_empty() {
+                return Ok(out);
+            }
             if commands.len() != 1 {
                 return Err(XPathError::Unsupported(
                     "a multi-step pipeline (XPath 1.0 has no pipeline)".into(),
@@ -160,6 +177,18 @@ impl Exporter {
                     Ok("/text()".to_string())
                 }
             },
+            // `:::texts`, the element's immediate text runs, is
+            // `text()` (ruling 2026-11-11)
+            "adapter" if self.prop_s(p, "key") == "texts" => {
+                self.texts = true;
+                let note = "text(): ':::texts' lists the element's immediate text runs with \
+                            white space collapsed and trimmed; XPath keeps its text nodes as \
+                            written, the white-space-only ones included";
+                if !self.notes.iter().any(|n| n == note) {
+                    self.notes.push(note.to_string());
+                }
+                Ok("/text()".to_string())
+            }
             other => Err(XPathError::Unsupported(format!(
                 "the {other} metadata projection"
             ))),

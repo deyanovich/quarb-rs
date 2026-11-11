@@ -61,9 +61,10 @@ const CORPUS: &[&str] = &[
     // subcontexts, named and bare
     "/users/* | .total(/orders/*/amt:: @| sum) | .(//y @| count)",
     // correlation (driver-first): the ON clause references the
-    // driver as `_::…`, earlier entries as `$*k`, the candidate
-    // itself as `$*`; a second entry exercises the indexed ref
-    "//user <=> //order[::uid = $$0::id && ::amt > $*::limit] <=> //note[::oid = $$1::id]",
+    // driver as `$$0::…`, earlier entries as `$$k`, the candidate
+    // itself bare or as `$$_`; a second entry exercises the
+    // indexed ref
+    "//user <=> //order[::uid = $$0::id && ::amt > $$_::limit] <=> //note[::oid = $$1::id]",
     // match captures
     "/row | [::name == (/^(\\w+), (\\w+)/)] | %(k = $1; j = $2)",
     // window spans: closed, open-start, open-end; keyed; shift
@@ -153,7 +154,7 @@ const CORPUS: &[&str] = &[
     // marks, positional/recency/plural anchors — in branch and
     // in operand position
     "/a . /b .m | $$.1/c | $$./d | ((@))/e | ((@m))/f",
-    "/a . /*[$$.2::x > 1][$$.::y = ((@))::z][((@m))::w]",
+    "/a .m /b . /*[$$.2::x > 1][$$.::y = ((@))::z][((@m))::w]",
     // the record-field colon and the named-captures record
     // (rulings #47/#48): a field of the topic, of a register, of %+
     "/row | [::name == (/^(?<surname>[^,]+)/)] | %+:surname | [:n > 1] | .r | $.r:a:b | %+",

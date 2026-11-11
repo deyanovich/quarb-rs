@@ -20,8 +20,9 @@
 //! system: per-capsa `| f` transforms, `@| f` whole-context
 //! aggregation, `| .` push and `| $.` recall of breadcrumbs, and
 //! `| .(expr)` subcontexts for grouped aggregation. It also does
-//! correlation: `E1 <=> E2[…$*1…]` joins two contexts, a predicate
-//! referencing a prior expression's context via `$*N`. It also
+//! correlation: `E1 <=> E2[…$$0…]` joins two contexts, a predicate
+//! referencing the driver as `$$0` and a prior expression's bound
+//! node as `$$N`. It also
 //! resolves cross-references: `::prop-->` maps a reference to its
 //! target node (a JSON adapter follows a `$ref` JSON Pointer), the
 //! reverse resolution `<--` (who refers here) and the value match

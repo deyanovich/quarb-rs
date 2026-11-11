@@ -130,6 +130,18 @@ impl PartialEq for Anchor {
 
 impl Eq for Anchor {}
 
+/// The refusal of a mark read (`$$.name`, `((@name))`) of a name
+/// that holds a value (ruling 2026-11-11): the parser's where every
+/// push of the name files a value, the run's where the latest
+/// regula under the name turns out to hold one.
+pub(crate) fn value_read_as_mark(name: &str) -> String {
+    let shown = display_name(name);
+    format!(
+        "'.{shown}' holds a value, not a node: read it as '$.{shown}'; '$$.{shown}' reads a \
+         mark ('/path .{shown}', or '| .{shown}' on a node)"
+    )
+}
+
 /// One `||` branch: navigation and an optional projection.
 #[derive(Debug, Clone)]
 pub struct Branch {

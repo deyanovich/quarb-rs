@@ -468,23 +468,44 @@ fn two_quantities_multiply_and_divide_into_a_compound_unit() {
 }
 
 #[test]
-fn the_join_candidate_stands_inside_a_join_condition_only() {
+fn the_join_candidate_is_read_bare_or_as_the_position() {
+    // `$*` is retired (ruling 2026-11-11): a node is `$$`, a value `$`
     let d = fixture("join-candidate");
-    let e = refused(&d, &["/books/* | $*", "books.json"]);
+    for q in [
+        "/books/* | $*",
+        "/books/* <=> /books/*[::shelf = $$0::shelf && $*::year > 0] @| count",
+    ] {
+        let e = refused(&d, &[q, "books.json"]);
+        assert!(
+            e.contains(
+                "'$*' is retired: a join condition reads its candidate bare ('::limit') \
+                 or as the position ('$$_::limit')"
+            ),
+            "{q}: {e}"
+        );
+    }
+    // the reserved star spellings went with it: none is a spelling
+    // of the language, and each refusal names what exists
+    let e = refused(&d, &["/books/* | @@*", "books.json"]);
     assert!(
-        e.contains("'$*' reads the join's bound nodes and stands inside a join condition only"),
+        e.contains("'@@*' is retired: the context's positions are '@@_'"),
         "{e}"
     );
-    assert_eq!(
-        ok(
-            &d,
-            &[
-                "/books/* <=> /books/*[::shelf = $$0::shelf && $*::year > 0] @| count",
-                "books.json"
-            ]
-        ),
-        "3"
-    );
+    let e = refused(&d, &["/books/* | $*[1]", "books.json"]);
+    assert!(e.contains("'$*' is retired"), "{e}");
+    for q in ["/books/* | $$*", "/books/* | $$*[1]"] {
+        let e = refused(&d, &[q, "books.json"]);
+        assert!(
+            e.contains("'$$_' is the position") && e.contains("'$$N' a bound node"),
+            "{q}: {e}"
+        );
+    }
+    for q in [
+        "/books/* <=> /books/*[::shelf = $$0::shelf && ::year > 0] @| count",
+        "/books/* <=> /books/*[::shelf = $$0::shelf && $$_::year > 0] @| count",
+    ] {
+        assert_eq!(ok(&d, &[q, "books.json"]), "3", "{q}");
+    }
 }
 
 #[test]

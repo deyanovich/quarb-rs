@@ -96,7 +96,7 @@ def test_kernel_cross_cell_defs(kernel, tmp_path_factory):
     streams = [o for o in out if o["msg_type"] == "stream"]
     assert streams and "&gregorian" in streams[0]["content"]["text"]
     # A later cell resolves the name.
-    convert = '/crew/* | rec(::name, "g", (::born | &gregorian))'
+    convert = '/crew/* | %(name = ::name; g = (::born | &gregorian))'
     status, out = run_cell(kernel, convert)
     assert status == "ok"
     result = [o for o in out if o["msg_type"] == "execute_result"]

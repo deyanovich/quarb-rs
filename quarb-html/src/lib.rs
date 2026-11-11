@@ -15,7 +15,11 @@
 //! - Attributes are properties: `::href`, `::class`, `::id`. The
 //!   default projection (`::`) is the element's text content;
 //!   `:::tag`, `:::classes`, `:::attrs`, and `:::n-attrs`
-//!   expose adapter metadata.
+//!   expose adapter metadata. The text has two more readings:
+//!   the block anatomy `:::lemma` / `:::grammata` /
+//!   `:::hypograph` (the text before the first nested block, what
+//!   lies between, the text after the last), and `:::texts`, the
+//!   list of the element's immediate text runs (XPath's `text()`).
 //! - An anchor's fragment `href` resolves: `::href-->` follows
 //!   `#section` to the element with `id="section"`.
 
@@ -45,6 +49,81 @@ struct Node {
 enum Piece {
     Text(String),
     Child(usize),
+}
+
+/// Whether an element is a block by its name: HTML's flow content
+/// that is not phrasing content (the standard's content models),
+/// and the parts of a table. Every other element is inline, the
+/// unknown and the custom ones included; no style is ever read
+/// (ruling 2026-11-11).
+fn is_block(tag: &str) -> bool {
+    matches!(
+        tag,
+        "address"
+            | "article"
+            | "aside"
+            | "blockquote"
+            | "body"
+            | "caption"
+            | "center"
+            | "col"
+            | "colgroup"
+            | "dd"
+            | "details"
+            | "dialog"
+            | "dir"
+            | "div"
+            | "dl"
+            | "dt"
+            | "fieldset"
+            | "figcaption"
+            | "figure"
+            | "footer"
+            | "form"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "head"
+            | "header"
+            | "hgroup"
+            | "hr"
+            | "html"
+            | "legend"
+            | "li"
+            | "main"
+            | "menu"
+            | "nav"
+            | "ol"
+            | "p"
+            | "pre"
+            | "search"
+            | "section"
+            | "summary"
+            | "table"
+            | "tbody"
+            | "td"
+            | "tfoot"
+            | "th"
+            | "thead"
+            | "title"
+            | "tr"
+            | "ul"
+    )
+}
+
+/// The text with its white space collapsed to single spaces and
+/// trimmed; `None` when nothing is left.
+fn collapsed(text: &str) -> Option<String> {
+    let mut words = text.split_whitespace();
+    let mut out = words.next()?.to_string();
+    for w in words {
+        out.push(' ');
+        out.push_str(w);
+    }
+    Some(out)
 }
 
 impl Node {
@@ -269,6 +348,82 @@ impl HtmlAdapter {
             }
             out
         })
+    }
+
+    /// The text of the pieces `range` of `node` for the block
+    /// anatomy: its own text as written and each element child's
+    /// subtree text, with a block's edges and a line break as white
+    /// space, so two blocks written without a space between them
+    /// read as two words (`<li>a</li><li>b</li>` is "a b"; the bare
+    /// projection concatenates as written). An explicit stack, as
+    /// `text_of` keeps one.
+    fn pieces_text(&self, node: NodeId, range: std::ops::Range<usize>) -> String {
+        let mut out = String::new();
+        // (element, next piece, one past its last piece to read)
+        let mut stack: Vec<(usize, usize, usize)> = vec![(node.0 as usize, range.start, range.end)];
+        while let Some(top) = stack.last_mut() {
+            let (cur, at, end) = *top;
+            let n = &self.nodes[cur];
+            if at >= end {
+                stack.pop();
+                // (leaving a nested block)
+                if !stack.is_empty() && n.tag.is_some_and(|t| is_block(self.names.get(t))) {
+                    out.push(' ');
+                }
+                continue;
+            }
+            top.1 += 1;
+            match &n.pieces[at] {
+                Piece::Text(t) => out.push_str(t),
+                Piece::Child(k) => {
+                    let c = n.children[*k];
+                    let tag = self.nodes[c.0 as usize].tag.map(|t| self.names.get(t));
+                    if tag == Some("br") {
+                        out.push(' ');
+                        continue;
+                    }
+                    if tag.is_some_and(is_block) {
+                        out.push(' ');
+                    }
+                    stack.push((c.0 as usize, 0, self.nodes[c.0 as usize].pieces.len()));
+                }
+            }
+        }
+        out
+    }
+
+    /// The first and the last piece of `node` that is a nested
+    /// block: an element child that is a block by its name (see
+    /// [`is_block`]). `None` for a leaf, an element with no nested
+    /// block.
+    fn block_span(&self, node: NodeId) -> Option<(usize, usize)> {
+        let n = &self.nodes[node.0 as usize];
+        let block = |piece: &Piece| match piece {
+            Piece::Child(k) => self.nodes[n.children[*k].0 as usize]
+                .tag
+                .is_some_and(|t| is_block(self.names.get(t))),
+            Piece::Text(_) => false,
+        };
+        let first = n.pieces.iter().position(block)?;
+        let last = n.pieces.iter().rposition(block)?;
+        Some((first, last))
+    }
+
+    /// The element's immediate text runs (XPath's `text()`): each
+    /// stretch of its own text between its element children, white
+    /// space collapsed and trimmed, the empty ones dropped.
+    fn text_runs(&self, node: NodeId) -> Vec<String> {
+        let n = &self.nodes[node.0 as usize];
+        let mut runs = Vec::new();
+        let mut run = String::new();
+        for piece in &n.pieces {
+            match piece {
+                Piece::Text(t) => run.push_str(t),
+                Piece::Child(_) => runs.extend(collapsed(&std::mem::take(&mut run))),
+            }
+        }
+        runs.extend(collapsed(&run));
+        runs
     }
 
     /// Parse `html` and build the adapter.
@@ -537,10 +692,33 @@ impl AstAdapter for HtmlAdapter {
     /// (`::href`), text is the bare projection. `attrs` is what
     /// makes a renamed attribute discoverable: enumerate the names,
     /// probe the values by shape.
+    ///
+    /// The element's text has two more readings beside the bare
+    /// projection, which is all the descendant text (rulings
+    /// 2026-11-11). The block anatomy partitions it: `:::lemma` is
+    /// the text before the first nested block, `:::hypograph` the
+    /// text after the last, `:::grammata` what lies between, the
+    /// nested blocks and any text among them; a leaf, an element
+    /// with no nested block, has no lemma and no hypograph, and its
+    /// whole text is its grammata. So an item that holds a nested
+    /// list answers its own line as `:::lemma`. `:::texts` is the
+    /// structural reading, XPath's `text()`: the list of the
+    /// element's immediate text runs, no child element's text in
+    /// it, inline ones included. All four collapse white space and
+    /// trim, and are null where there is no such text.
     /// The `:::` keys this adapter answers (`:meta` lists the ones
     /// a node answers).
     fn metadata_catalogue(&self) -> &'static [&'static str] {
-        &["tag", "classes", "attrs", "n-attrs"]
+        &[
+            "tag",
+            "classes",
+            "attrs",
+            "n-attrs",
+            "lemma",
+            "grammata",
+            "hypograph",
+            "texts",
+        ]
     }
 
     fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
@@ -566,6 +744,27 @@ impl AstAdapter for HtmlAdapter {
                 ))
             }
             "n-attrs" => Some(Value::Int(n.attrs.len() as i64)),
+            // the block anatomy and the immediate text: an element's
+            "lemma" | "grammata" | "hypograph" | "texts" if n.tag.is_none() => None,
+            "lemma" => {
+                let (first, _) = self.block_span(node)?;
+                collapsed(&self.pieces_text(node, 0..first)).map(Value::Str)
+            }
+            "hypograph" => {
+                let (_, last) = self.block_span(node)?;
+                collapsed(&self.pieces_text(node, last + 1..n.pieces.len())).map(Value::Str)
+            }
+            "grammata" => {
+                let between = match self.block_span(node) {
+                    Some((first, last)) => first..last + 1,
+                    None => 0..n.pieces.len(),
+                };
+                collapsed(&self.pieces_text(node, between)).map(Value::Str)
+            }
+            "texts" => {
+                let runs = self.text_runs(node);
+                (!runs.is_empty()).then(|| Value::list(runs.into_iter().map(Value::Str).collect()))
+            }
             _ => None,
         }
     }

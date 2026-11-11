@@ -503,7 +503,7 @@ fn rounded_pipes_registers_anchors_canonicalize() {
         canon("/row | [::name == (/^(\\w+), (\\w+)/)] | %(k = $1; j = $2)")
     );
     assert_eq!(canon("/a .s /b | ((*s))::x"), canon("/a .s /b | ((@s))::x"));
-    assert_eq!(canon("$$.m/address"), "$$.m/address");
+    assert_eq!(canon("/a .m | $$.m/address"), "/a .m | $$.m/address");
     // the single-paren anchor is retired: single parens are the value
     // side, and the refusal points at the double form
     let e = quarb::expand("/a .m /b[::x = (m)::y]", &quarb::Defs::default())

@@ -2388,9 +2388,13 @@ fn marks() {
     // The context-typed push: bare .name in a SCALAR context
     // still feeds the register, not the marks.
     assert_eq!(vals("//*.rs @| count | .n | $.n", &t), vec![Value::Int(3)]);
-    // An unset mark yields nothing (predicate false), not an
-    // error.
-    assert_eq!(run("/a/*[$$.nope:name = \"a\"]", &t), Vec::<u64>::new());
+    // A mark no push of the query makes is refused when the query
+    // is parsed, as the value recall of such a name is.
+    let e = parse(&lex("/a/*[$$.nope:name = \"a\"]").unwrap()).unwrap_err();
+    assert!(
+        e.to_string().contains("no push '.nope' before this point"),
+        "{e}"
+    );
     // Marks seed sub-navigation: an anchored operand's NESTED
     // predicate still sees the thread's marks...
     assert_eq!(

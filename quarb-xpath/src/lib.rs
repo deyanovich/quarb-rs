@@ -33,9 +33,13 @@
 //!   list. The two agree when all matches share one parent. On the
 //!   child axis (`name[n]`) and the explicit descendant axis
 //!   (`descendant::name[n]`) the translation is exact.
-//! - Quarb's `::text` is the concatenated descendant text, while
-//!   XPath's `text()` selects immediate text-node children. The two
-//!   agree on leaf elements.
+//! - `text()` selects the element's immediate text nodes, and is
+//!   translated to `:::texts`, the list of the element's immediate
+//!   text runs (a terminal `text()` spread into one answer per run,
+//!   a compared one read by the list's set reading). The runs are
+//!   collapsed and trimmed and the white-space-only ones dropped,
+//!   where XPath keeps its text nodes as written; and a function
+//!   over `text()` reads the first node in XPath, any run here.
 
 mod export;
 pub use export::export;
@@ -66,6 +70,7 @@ pub fn translate(xpath: &str) -> Result<Translation, XPathError> {
         tokens,
         pos: 0,
         notes: Vec::new(),
+        texts: false,
     };
     let query = parser.top()?;
     if parser.pos < parser.tokens.len() {
@@ -316,6 +321,9 @@ struct Parser {
     tokens: Vec<(Tok, usize)>,
     pos: usize,
     notes: Vec<String>,
+    /// A path of the union being read ends in `text()`: its
+    /// `:::texts` lists are spread where the union ends.
+    texts: bool,
 }
 
 impl Parser {
@@ -368,7 +376,7 @@ impl Parser {
                     // `sum` needs values; project the node set if the
                     // path did not already end in a projection.
                     let projected = if projected {
-                        inner
+                        self.spread(inner)
                     } else {
                         format!("{inner}::")
                     };
@@ -386,7 +394,40 @@ impl Parser {
             self.pos += 1;
             parts.push(self.path()?.0);
         }
-        Ok(parts.join(" || "))
+        let union = parts.join(" || ");
+        Ok(self.spread(union))
+    }
+
+    /// XPath's `text()` answers one node per immediate text node,
+    /// and `:::texts` one list per element: the spread makes it one
+    /// answer per run (a value that is no list passes through it,
+    /// an element with no text of its own answers nothing).
+    fn spread(&mut self, query: String) -> String {
+        if std::mem::take(&mut self.texts) {
+            format!("{query} | ...")
+        } else {
+            query
+        }
+    }
+
+    fn note_texts(&mut self) {
+        let note = "text(): ':::texts' lists the element's immediate text runs with white \
+                    space collapsed and trimmed; XPath keeps its text nodes as written, the \
+                    white-space-only ones included";
+        if !self.notes.iter().any(|n| n == note) {
+            self.notes.push(note.into());
+        }
+    }
+
+    /// A function over `text()` reads the first text node in XPath;
+    /// the list's set reading holds when any run satisfies it.
+    fn note_first_text(&mut self, subject: &str, function: &str) {
+        if subject.ends_with(":::texts") {
+            self.notes.push(format!(
+                "{function}(text(), …): XPath reads the first text node; ':::texts' holds \
+                 when any of the element's runs satisfies it"
+            ));
+        }
     }
 
     /// An absolute location path. The flag reports whether the path
@@ -540,12 +581,12 @@ impl Parser {
             Some(Tok::Name(n, true)) if n == "text" => {
                 self.expect(Tok::LParen, "'('")?;
                 self.expect(Tok::RParen, "')'")?;
-                self.notes.push(
-                    "text(): Quarb's bare :: is the concatenated descendant text; \
-                     XPath text() selects immediate text nodes (equal on leaf elements)"
-                        .into(),
-                );
-                return Ok(StepOut::Projection("::".into()));
+                // the element's immediate text nodes: the adapter's
+                // `:::texts`, spread into one answer per run where
+                // the query ends (see `translate`)
+                self.texts = true;
+                self.note_texts();
+                return Ok(StepOut::Projection(":::texts".into()));
             }
             Some(Tok::Name(n, true)) if n == "node" => {
                 return Err(XPathError::Unsupported(
@@ -745,6 +786,7 @@ impl Parser {
                     needle
                 };
                 self.expect(Tok::RParen, "')' to close contains")?;
+                self.note_first_text(&hay, "contains");
                 Ok((format!("{hay} *= {needle}"), false))
             }
             Some(Tok::Name(f, true)) if f == "starts-with" => {
@@ -769,6 +811,7 @@ impl Parser {
                     ));
                 }
                 self.expect_nothing_weird(&prefix)?;
+                self.note_first_text(&subject, "starts-with");
                 Ok((
                     format!("{subject} == (/^{}/)", regex_escape(&prefix)),
                     false,
@@ -834,7 +877,10 @@ impl Parser {
                     self.pos += 1;
                     self.expect(Tok::LParen, "'('")?;
                     self.expect(Tok::RParen, "')'")?;
-                    out.push_str("::");
+                    // a comparison holds when any text node satisfies
+                    // it, which is the set reading of the list
+                    self.note_texts();
+                    out.push_str(":::texts");
                     return Ok((out, false));
                 }
                 Some(Tok::Name(n, false)) => {
@@ -967,7 +1013,7 @@ mod tests {
     fn attributes_and_text() {
         assert_eq!(t("//chapter/@id"), "//chapter::id");
         assert_eq!(t("/EXAMPLE/attribute::prop1"), "/EXAMPLE::prop1");
-        assert_eq!(t("//title/text()"), "//title::");
+        assert_eq!(t("//title/text()"), "//title:::texts | ...");
     }
 
     #[test]
@@ -990,7 +1036,7 @@ mod tests {
         );
         assert_eq!(t("//chapter[.//image]"), "//chapter[//image]");
         assert_eq!(t("//p[.='...']"), "//p[:: = \"...\"]");
-        assert_eq!(t("//chapter[text()='x']"), "//chapter[:: = \"x\"]");
+        assert_eq!(t("//chapter[text()='x']"), "//chapter[:::texts = \"x\"]");
         assert_eq!(
             t("//chapter[@id='a' or @id='b']"),
             "//chapter[::id = \"a\" || ::id = \"b\"]"
@@ -1039,7 +1085,7 @@ mod tests {
     #[test]
     fn qualified_names_quote() {
         assert_eq!(t("//dc:title"), "//'dc:title'");
-        assert_eq!(t("//dc:title/text()"), "//'dc:title'::");
+        assert_eq!(t("//dc:title/text()"), "//'dc:title':::texts | ...");
     }
 
     #[test]

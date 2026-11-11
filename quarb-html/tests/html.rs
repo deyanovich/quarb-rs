@@ -288,3 +288,101 @@ fn sibling_reach() {
         vec!["/html/body/main/p"]
     );
 }
+
+const ANATOMY: &str = r##"<html><body>
+<ul id="u">
+  <li id="a">The <em>oracle</em> at Delphi<ul><li>Pythia</li><li>tripod</li></ul>and a tail</li>
+  <li id="b">Plain <b>leaf</b> item</li>
+  <li id="c"><ul><li>only nested</li></ul></li>
+  <li id="d">Intro<p>first</p>between<p>second</p></li>
+  <li id="e">line one<br>line two</li>
+  <li id="f">  </li>
+</ul>
+</body></html>"##;
+
+fn anatomy(query: &str) -> Vec<String> {
+    let adapter = HtmlAdapter::parse(ANATOMY);
+    match quarb::run(query, &adapter).unwrap() {
+        quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.display_form()).collect(),
+        quarb::QueryResult::Nodes(_) => panic!("expected values"),
+    }
+}
+
+/// The block anatomy (rulings 2026-11-11): an element with nested
+/// blocks answers `:::lemma`, its text before the first of them,
+/// `:::hypograph`, its text after the last, and `:::grammata`, what
+/// lies between; the three partition its text. A leaf, an element
+/// with no nested block, has no lemma and no hypograph, and its
+/// whole text is its grammata. Block or inline is told by the
+/// element's name; an inline child keeps its text in the run.
+#[test]
+fn the_block_anatomy_partitions_an_element_s_text() {
+    let fact = |id: &str, key: &str| {
+        anatomy(&format!("//li[::id = \"{id}\"]:::{key}"))
+            .pop()
+            .unwrap()
+    };
+    // an item holding a nested list: its own line is the lemma
+    assert_eq!(fact("a", "lemma"), "The oracle at Delphi");
+    assert_eq!(fact("a", "grammata"), "Pythia tripod");
+    assert_eq!(fact("a", "hypograph"), "and a tail");
+    // a leaf, inline children or not: all of it is the grammata
+    assert_eq!(fact("b", "lemma"), "null");
+    assert_eq!(fact("b", "grammata"), "Plain leaf item");
+    assert_eq!(fact("b", "hypograph"), "null");
+    // no text before or after the nested block: null, not ""
+    assert_eq!(fact("c", "lemma"), "null");
+    assert_eq!(fact("c", "grammata"), "only nested");
+    assert_eq!(fact("c", "hypograph"), "null");
+    // text between two nested blocks belongs to the grammata, and
+    // two blocks written with no space between read as two words
+    assert_eq!(fact("d", "lemma"), "Intro");
+    assert_eq!(fact("d", "grammata"), "first between second");
+    assert_eq!(fact("d", "hypograph"), "null");
+    // a line break is no block and reads as a space
+    assert_eq!(fact("e", "grammata"), "line one line two");
+    // no text at all
+    assert_eq!(fact("f", "grammata"), "null");
+    // the query the facts were asked for: one line per item that
+    // has items of its own
+    assert_eq!(
+        anatomy("//ul[::id = \"u\"]/li[:::lemma]:::lemma"),
+        ["The oracle at Delphi", "Intro"]
+    );
+    // the bare projection is unchanged: all the descendant text
+    assert_eq!(
+        anatomy("//li[::id = \"a\"]::"),
+        ["The oracle at DelphiPythiatripodand a tail"]
+    );
+}
+
+/// `:::texts` is the structural reading, XPath's `text()`: the list
+/// of the element's immediate text runs, no child element's text in
+/// it, inline ones included; each run collapsed and trimmed, the
+/// empty ones dropped, null when none.
+#[test]
+fn the_immediate_text_runs() {
+    let texts = |id: &str| {
+        anatomy(&format!("//li[::id = \"{id}\"]:::texts"))
+            .pop()
+            .unwrap()
+    };
+    assert_eq!(texts("a"), "@(\"The\"; \"at Delphi\"; \"and a tail\")");
+    assert_eq!(texts("b"), "@(\"Plain\"; \"item\")");
+    assert_eq!(texts("c"), "null");
+    assert_eq!(texts("d"), "@(\"Intro\"; \"between\")");
+    assert_eq!(texts("e"), "@(\"line one\"; \"line two\")");
+    assert_eq!(texts("f"), "null");
+    // a comparison holds when any run satisfies it (the set reading
+    // of a list), and the spread answers one run at a time
+    assert_eq!(anatomy("//li[:::texts = \"at Delphi\"]::id"), ["a"]);
+    assert_eq!(
+        anatomy("//li[::id = \"a\"]:::texts | ..."),
+        ["The", "at Delphi", "and a tail"]
+    );
+    // the facts a node answers are listed
+    assert_eq!(
+        anatomy("//li[::id = \"a\"] | :meta"),
+        ["@(:::tag; :::attrs; :::n-attrs; :::lemma; :::grammata; :::hypograph; :::texts)"]
+    );
+}

@@ -2258,6 +2258,15 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 tokens.push(Token::Topics);
                 i += 2;
             }
+            // `@@*` was reserved for the context trace and is retired
+            // with the other star spellings (ruling 2026-11-11): said
+            // by name, where the two signs would else read as a pipe
+            '@' if at(i + 1) == Some('@') && at(i + 2) == Some('*') => {
+                return Err(QuarbError::lex(
+                    "'@@*' is retired: the context's positions are '@@_' ('@@_::prop' maps \
+                     over them), the context's topics '@_'",
+                ));
+            }
             // `@@.` — the node references view: the two signs glued
             // and the dot right after. `| @ @| f` (the row reading,
             // then the aggregation pipe) keeps its space and its two

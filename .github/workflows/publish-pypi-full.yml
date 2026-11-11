@@ -38,7 +38,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.10", "3.11", "3.12", "3.13"]
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
         # Linux on the 22.04 runners (glibc 2.35): the wheel is tagged
         # manylinux_2_35, the oldest glibc the binary runs on, since the
         # host build cannot be audited (it links the host's libpython).
@@ -47,8 +47,8 @@ jobs:
           - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
           - { os: macos-15, target: aarch64-apple-darwin }
           - { os: macos-latest, target: x86_64-apple-darwin }
-          # Python 3.14 and windows-msvc are tried in
-          # build-experimental below until a release proves them.
+          # windows-msvc is tried in build-experimental below until
+          # a release proves it (Python 3.14 was proven by 0.59.0).
     steps:
       - uses: actions/checkout@v4
 
@@ -143,15 +143,16 @@ jobs:
         with:
           packages-dir: dist
 
-  # The wheels no release has proven yet, first tried with 0.59.0:
-  # Python 3.14 on the four platforms above (the interpreter the
-  # engine's own test run links, so the Linux build is known), and
-  # windows-msvc, where the mt: door compiles out (apotheca's file
-  # locking is unix-only) and --edit's output capture is unix-gated,
-  # but the full CLI has never been built. Each leg stands alone: a
+  # The wheels no release has proven yet: windows-msvc. With 0.59.0
+  # its five legs failed on one crate, apotheca (unix-only file
+  # locking), which the CLI's manifest took on every target; it
+  # takes it on unix only now, as the mt: door always did, so the
+  # tree on Windows no longer holds it. The crates after it and the
+  # link have still never been built there. Each leg stands alone: a
   # failed build holds neither the others nor the publish above, and
   # what did build goes up after the proven set, as more files of the
-  # same release. A leg that a release proves moves into build-wheels.
+  # same release. A leg that a release proves moves into build-wheels
+  # (the four Python 3.14 legs did, after 0.59.0).
   build-experimental:
     name: Try a wheel (${{ matrix.target }}, py${{ matrix.python }})
     runs-on: ${{ matrix.os }}
@@ -160,10 +161,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { python: "3.14", os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, interpreter: python3.14 }
-          - { python: "3.14", os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, interpreter: python3.14 }
-          - { python: "3.14", os: macos-15, target: aarch64-apple-darwin, interpreter: python3.14 }
-          - { python: "3.14", os: macos-latest, target: x86_64-apple-darwin, interpreter: python3.14 }
           # On Windows the interpreter setup-python selected is
           # `python` on the PATH; there is no python3.x executable.
           - { python: "3.10", os: windows-latest, target: x86_64-pc-windows-msvc, interpreter: python }

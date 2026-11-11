@@ -1289,7 +1289,9 @@ fn operand_in(o: &Operand) -> String {
         } => {
             let mut out = match index {
                 Some(k) => format!("$${k}"),
-                None => "$*".to_string(),
+                // (the candidate: `$*` is retired, and the parser
+                // builds the position for it)
+                None => "$$_".to_string(),
             };
             for e in steps {
                 out.push_str(&elem(e));
@@ -2041,7 +2043,7 @@ mod tests {
             "//x | .:v(::a) | (<-link:.v @| sum)",
             "//x | .:v(::a){3} | :.v",
             "//x | .:v | :%.",
-            "//x | .:v(/y @| count) | $$.M:.v",
+            "//x .M | .:v(/y @| count) | $$.M:.v",
             "/a | \\/*:%.",
             "/a | \\/*:%.:v",
             "/a | <-link:.v:%provenance:text",

@@ -181,6 +181,20 @@ pub(crate) fn ref_nodes(v: &Value) -> Vec<NodeId> {
     }
 }
 
+/// The nodes of the regula `name` points at, read as a mark. A
+/// regula that holds a value has no node side: the read refuses the
+/// run (ruling 2026-11-11), where it answered nothing. A thread on
+/// which the name is not filed at all is still a miss.
+fn mark_nodes(name: &str, value: &Value) -> Vec<NodeId> {
+    let nodes = ref_nodes(value);
+    let reference = matches!(value, Value::Node(_))
+        || matches!(value, Value::List(items) if !items.is_empty() && nodes.len() == items.len());
+    if !reference {
+        crate::value::ambient::record_refusal(crate::syntax::ast::value_read_as_mark(name));
+    }
+    nodes
+}
+
 /// The references a register holds, in filing order: the node side
 /// of the capsa (`$$.N`, `((.N))`, `(@)`).
 pub(crate) fn references(register: &[Reg]) -> impl Iterator<Item = NodeId> + '_ {
@@ -299,7 +313,7 @@ pub(crate) fn anchor_nodes(
             .iter()
             .rev()
             .find(|r| r.name.as_deref() == Some(m))
-            .map(|r| ref_nodes(&r.value))
+            .map(|r| mark_nodes(m, &r.value))
             .unwrap_or_default(),
         Anchor::MarkIndex(n) => references(register).nth(n - 1).into_iter().collect(),
         Anchor::MarkTop => references(register).last().into_iter().collect(),
@@ -311,11 +325,18 @@ pub(crate) fn anchor_nodes(
             .into_iter()
             .collect(),
         Anchor::MarksAll => references(register).collect(),
-        Anchor::MarksNamed(m) => register
-            .iter()
-            .filter(|r| r.name.as_deref() == Some(m))
-            .flat_map(|r| ref_nodes(&r.value))
-            .collect(),
+        Anchor::MarksNamed(m) => {
+            // the name's latest regula decides whether it is a mark
+            // at all; the shadowed ones under it are read as they are
+            if let Some(latest) = register.iter().rev().find(|r| r.name.as_deref() == Some(m)) {
+                mark_nodes(m, &latest.value);
+            }
+            register
+                .iter()
+                .filter(|r| r.name.as_deref() == Some(m))
+                .flat_map(|r| ref_nodes(&r.value))
+                .collect()
+        }
         // `$-:source` / `$-:target` — an end of the arrived-by edge
         // (spec: Edge facts), in the declaration's orientation;
         // nothing where no edge has been walked.

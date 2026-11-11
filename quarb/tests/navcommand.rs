@@ -46,14 +46,14 @@ fn mark_anchors_round_trip() {
         // single-paren spellings parse as deprecated aliases)
         "/a . /b | $$.1/c",
         "/a . /b | $$./c",
-        "/a .m /b | $$.2:name",
+        "/a .m /b . | $$.2:name",
         // the plural: bare re-seed, with steps, named
         "/a | . | ^/b | . | ((@))",
         "/a | . | ((@))/kids/*",
         "/a .s /b | ((@s))::x",
         // anchors in operand position
         "/a . /*[$$.1/x]",
-        "/e/*[$$.::depth > 2]",
+        "/e . /*[$$.::depth > 2]",
     ] {
         assert_eq!(canon(q), q, "not a fixpoint: {q}");
     }

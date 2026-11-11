@@ -211,8 +211,18 @@ fn marks_are_regulae() {
         "2"
     );
     // One name pool: a value pushed under the name after the mark
-    // re-points it, and the node side finds nothing.
-    assert_eq!(ok(&d, "/a/* | .n(::k) | .n(7) | $$.n::k @| count"), "0");
+    // re-points it, and the name has no node side to read any more
+    // (ruling 2026-11-11: an error, where it answered nothing). The
+    // run refuses it where the parser cannot tell which push is the
+    // latest, the parser where the name only ever holds a value.
+    assert!(
+        err(&d, "/a/* | .n | .n(7) | $$.n::k @| count")
+            .contains("refused: '.n' holds a value, not a node: read it as '$.n'")
+    );
+    assert!(
+        err(&d, "/a/* | .n(::k) | .n(7) | $$.n::k @| count")
+            .contains("parse error: '.n' holds a value, not a node: read it as '$.n'")
+    );
     // the recall re-seats every thread on its mark and folds none:
     // a0's two children and a1's one make three threads
     assert_eq!(ok(&d, "/a/* | .M($$_) | /b/* | $$.M::k"), "1\n1\n2");

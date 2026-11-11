@@ -1035,7 +1035,7 @@ impl Exporter {
             {
                 return Err(SqlError::Unsupported(
                     "a projection on the joined expression (project the witness \
-                     in the pipeline: '$*1::col')"
+                     in the pipeline: '$$1::col')"
                         .into(),
                 ));
             }
@@ -1504,12 +1504,12 @@ impl Exporter {
                 })
             }
             "context" => {
-                // `$*1::col` — the joined expression's witness, in
+                // `$$1::col` — the joined expression's witness, in
                 // pipeline position: the joined table's column.
                 // Anything else is outside the verified-safe set.
                 let p = self
                     .kid(o, "projection")
-                    .ok_or_else(|| SqlError::Unsupported("a bare '$*' reference".into()))?;
+                    .ok_or_else(|| SqlError::Unsupported("a bare '$$N' reference".into()))?;
                 let col = self.projection_col(p)?;
                 let col = self.sql_ident(&col, "column name")?;
                 if matches!(self.prop(o, "index"), Some(Value::Int(0))) {
@@ -1530,19 +1530,19 @@ impl Exporter {
                 }
                 if self.in_on {
                     return Err(SqlError::Unsupported(
-                        "a '$*' reference inside the ON (the driver is '$$0')".into(),
+                        "a '$$N' reference inside the ON (the driver is '$$0')".into(),
                     ));
                 }
                 let Some(join) = self.join_sql.clone() else {
                     return Err(SqlError::Unsupported(
-                        "a '$*' reference outside a correlation join".into(),
+                        "a '$$N' reference outside a correlation join".into(),
                     ));
                 };
                 match self.prop(o, "index") {
                     Some(Value::Int(1)) => Ok(format!("{join}.{col}")),
-                    None => Err(SqlError::Unsupported("a bare '$*' reference".into())),
+                    None => Err(SqlError::Unsupported("a bare '$$N' reference".into())),
                     Some(v) => Err(SqlError::Unsupported(format!(
-                        "pushdown: $*{v} beyond a two-branch correlation"
+                        "pushdown: $${v} beyond a two-branch correlation"
                     ))),
                 }
             }

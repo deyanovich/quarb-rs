@@ -5,7 +5,7 @@
 //! correlation operator (`<=>`) joins *across* them:
 //!
 //! ```text
-//! //measurements/row <=> //stations/row[::location = $*1::location]
+//! //measurements/row <=> //stations/row[::location = $$0::location]
 //! ```
 //!
 //! The mounts may be heterogeneous (a CSV beside a JSON beside an

@@ -103,3 +103,31 @@ fn differential_against_xmllint() {
         );
     }
 }
+
+/// `:::texts`, the element's immediate text runs, is `text()`
+/// (ruling 2026-11-11); the spread after it is the shape `text()`
+/// already has. The bare projection still exports to `text()` with
+/// its note: it is all the descendant text.
+#[test]
+fn the_text_runs_export_as_text() {
+    assert_eq!(x("//book/title:::texts | ..."), "//book/title/text()");
+    assert_eq!(x("//book/title:::texts"), "//book/title/text()");
+    assert_eq!(
+        x("//book/title:::texts | ... @| count"),
+        "count(//book/title/text())"
+    );
+    assert_eq!(
+        x("//book[/title:::texts = \"Emma\"]::id"),
+        "//book[title/text() = \"Emma\"]/@id"
+    );
+    let t = export("//book/title:::texts | ...").unwrap();
+    assert!(
+        t.notes
+            .iter()
+            .any(|n| n.contains("':::texts' lists the element's immediate text runs"))
+    );
+    // the other facts have no XPath
+    assert!(export("//book:::tag").is_err());
+    // and a spread after anything else is still a pipeline
+    assert!(export("//book::id | ...").is_err());
+}

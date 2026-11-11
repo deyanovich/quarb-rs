@@ -161,3 +161,36 @@ fn a_very_deep_document_walks_without_recursion() {
     // n - 1 inner ones (the deepest has no child).
     assert_eq!(count("/a//a/.. @| count"), (n - 1).to_string());
 }
+
+/// `:::texts` (ruling 2026-11-11): the element's immediate text
+/// runs, XPath's `text()`: what its children's texts leave of its
+/// own, in order; CDATA and entities are text; each run collapsed
+/// and trimmed, the empty ones dropped, null when none. The bare
+/// projection is unchanged.
+#[test]
+fn the_immediate_text_runs() {
+    let doc = r#"<doc><p id="a">The <em>oracle</em> at Delphi</p><p id="b">leaf</p><p id="c"><x/><y>only</y></p><p id="d"> one <x/> two <![CDATA[ three ]]> &amp; <y>z</y> four </p></doc>"#;
+    let adapter = XmlAdapter::parse(doc).unwrap();
+    let run = |q: &str| match quarb::run(q, &adapter).unwrap() {
+        quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.display_form()).collect::<Vec<_>>(),
+        quarb::QueryResult::Nodes(_) => panic!("expected values"),
+    };
+    assert_eq!(
+        run("//p:::texts"),
+        [
+            "@(\"The\"; \"at Delphi\")",
+            "@(\"leaf\")",
+            "null",
+            "@(\"one\"; \"two three &\"; \"four\")"
+        ]
+    );
+    assert_eq!(run("//em:::texts"), ["@(\"oracle\")"]);
+    assert_eq!(run("/doc:::texts"), ["null"]);
+    assert_eq!(run("//p[:::texts = \"four\"]::id"), ["d"]);
+    assert_eq!(run("//p[::id = \"a\"]:::texts | ..."), ["The", "at Delphi"]);
+    assert_eq!(run("//p[::id = \"a\"]::"), ["The oracle at Delphi"]);
+    assert_eq!(
+        run("//p[::id = \"a\"] | :meta"),
+        ["@(:::tag; :::local-name; :::n-attrs; :::texts)"]
+    );
+}
