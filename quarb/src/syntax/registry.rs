@@ -248,17 +248,17 @@ pub const SPECS: &[FnSpec] = &[
         with_null(
             both(
                 "ngrams",
-                "the word n-grams of the text: ngrams(N); as an aggregate, the \
-             adjacent N-windows of the stream, full windows only",
+                "the word n-grams of the text: ngrams(N); after the aggregation \
+             pipe, the adjacent N-windows of the stream, full windows only",
             ),
             OnNull::Nothing,
         ),
         Check::Command,
     ),
-    scalar("levenshtein", "the edit distance to the argument"),
+    scalar("levenshtein", "the edit distance to the operand"),
     scalar(
         "jaro_winkler",
-        "the Jaro–Winkler similarity to the argument, 0 to 1",
+        "the Jaro–Winkler similarity to the operand, 0 to 1",
     ),
     with_null(
         scalar(
@@ -304,7 +304,7 @@ pub const SPECS: &[FnSpec] = &[
         OnNull::Nothing,
     ),
     with_null(
-        scalar("default", "the argument where the topic is null"),
+        scalar("default", "the operand where the topic is null"),
         OnNull::Keep,
     ),
     with_check(
@@ -357,7 +357,7 @@ pub const SPECS: &[FnSpec] = &[
     scalar("log10", "the base-10 logarithm"),
     scalar("exp", "e to the power of the number"),
     scalar("sqrt", "the square root"),
-    scalar("pow", "the number to the power of the argument"),
+    scalar("pow", "the number to the power of the operand"),
     scalar(
         "loglik",
         "the log-likelihood keyness of a count against a reference",
@@ -534,6 +534,10 @@ pub const SPECS: &[FnSpec] = &[
         "the instant floored to a multiple of a fixed-length duration from the epoch",
     ),
     scalar("isoformat", "the instant in ISO 8601"),
+    scalar(
+        "offset",
+        "the offset the instant is written at, as text; with (O), the instant declared or displayed at O",
+    ),
     scalar("year", "the instant's year"),
     scalar("month", "the instant's month"),
     scalar("day", "the instant's day of the month"),
@@ -647,7 +651,7 @@ pub const SPECS: &[FnSpec] = &[
     ),
     scalar(
         "correlate",
-        "the foreign-key join: the topic's rows with the argument table's columns appended where the topic's key (--on=:col, or its own index) matches the argument's index as = matches; the topic's order and index kept, an unmatched row keeping nulls (--inner drops it), a clashing title landing as title_2; a label repeated in the argument's index refuses unless --first-wins or --last-wins take one row or --many every one",
+        "the foreign-key join: the topic's rows with the operand table's columns appended where the topic's key (--on=:col, or its own index) matches the operand's index as = matches; the topic's order and index kept, an unmatched row keeping nulls (--inner drops it), a clashing title landing as title_2; a label repeated in the argument's index refuses unless --first-wins or --last-wins take one row or --many every one",
     ),
     reducing("avg", "mean, alias"),
     reducing("median", "the median"),
@@ -655,7 +659,7 @@ pub const SPECS: &[FnSpec] = &[
     with_check(
         reducing(
             "std",
-            "the standard deviation (sample with the word sample)",
+            "the standard deviation (std(--sample) divides by n−1)",
         ),
         Check::Stat,
     ),
@@ -770,7 +774,7 @@ pub const SPECS: &[FnSpec] = &[
     assoc("recall", true, "recall of a prediction against a truth"),
     assoc("f1", true, "the F1 score of a prediction against a truth"),
     // Whole-context commands.
-    context("ungroup", "the groups' members as the context again"),
+    context("ungroup", "the windows' members as the context again"),
     with_check(
         context(
             "window",
@@ -802,7 +806,7 @@ pub const SPECS: &[FnSpec] = &[
     with_check(
         on_node(context(
             "edges",
-            "the edges among the context's nodes as a table, the induced subgraph: from, to, label, directed and the edge's properties; operand the collecting hop, edges(->road), edges(<-road), edges(--road), edges(~*), bare edges = edges(->*); --weight=UNIT (-w) adds the weight of the unit's dimension",
+            "the edges among the context's nodes as a table, the induced subgraph: source, target, label, directed and the edge's properties; operand the collecting hop, edges(->road), edges(<-road), edges(--road), edges(~*), bare edges = edges(->*); --weight=UNIT (-w) adds the weight of the unit's dimension",
         )),
         Check::Command,
     ),
@@ -830,7 +834,7 @@ pub const SPECS: &[FnSpec] = &[
     with_check(
         context(
             "threads",
-            "the context's thread tree drawn as text, the lineage the run records when the query holds the command: every step of the expanded query a level printed as its text, a thread's line its cursor after the step as ($$_; $_), the forks children box-drawn as tree draws, alike threads merging marked (N merged) / ⤴ merged, every @| stage a paragraph of its own with its answers as children; --depth=n (-d=n) the steps drawn within a paragraph; --capsa (-c) every leaf's capsa after its cursor",
+            "the context's thread tree drawn as text, the lineage the run records when the query holds the command: every step of the expanded query a level printed as its text, a thread's line its cursor after the step as ($$_; $_), the forks children box-drawn as tree draws, alike threads merging marked (N merged) / ⤴ merged, every aggregation pipe or fold a paragraph of its own with its answers as children; --depth=n (-d=n) the steps drawn within a paragraph; --capsa (-c) every leaf's capsa after its cursor",
         ),
         Check::Command,
     ),
@@ -954,6 +958,23 @@ pub fn names_of_layer(layer: Layer) -> impl Iterator<Item = &'static str> {
 
 pub fn known_keyed(name: &str) -> bool {
     spec(name).is_some_and(|s| s.agg == Some(Agg::Keyed))
+}
+
+/// Whether an argument of the command names a column of the topic
+/// table rather than a value to read on the capsa: every operand of
+/// `autocast`, `melt` and `clean`, and `correlate`'s `--on`. The
+/// pipe and a parenthesised pipe tail both resolve a scalar command's
+/// expression arguments, and both ask this, so a command behaves the
+/// same in either position. (Each had a list of its own; `(T |
+/// melt(:a))` read `:a` on the enclosing topic.)
+pub fn names_columns(command: &str, arg: &crate::syntax::ast::Arg) -> bool {
+    match command {
+        "autocast" | "melt" | "clean" => true,
+        "correlate" => {
+            matches!(arg, crate::syntax::ast::Arg::Opt { name, .. } if name == "--on")
+        }
+        _ => false,
+    }
 }
 
 /// Whether `name` is a per-capsa scalar command (for `|`).

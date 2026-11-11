@@ -118,7 +118,7 @@ const CORPUS: &[&str] = &[
     "/movie .m <-ACTED_IN[::born > $$.m::released] | %(::name; $$.m::title)",
     // the branch-position mark anchor, inside a subcontext body
     "/movie .m /cast | .n($$.m/tags @| count) | %.",
-    // the value match, equality and regex arms (2026-07-11)
+    // the switch, equality and regex arms (2026-07-11)
     "/c/* | (::kind ?= \"a\" ? 1 : (/^b/) ? 2 : 0)",
     // the shell as an environment command (2026-11-02; the backtick and
     // sh(cmd) are retired; reflects as a cmd with its lib)
@@ -177,10 +177,25 @@ const CORPUS: &[&str] = &[
     "= #(--header=@(:zip<text>; :amount<float>)) | map(<int>; --to=:amount) | %(price<float> = :amount)",
     "= @(%(k = 1; v = 2)) | #(-i=:k) | .t | $.t[[1; 3]]:v | %(1 = $_; 2013-01-01 = 2)",
     "= 1 | ,a | $,a + 1 | %,",
+    // The kinds the corpus had left out (code review, 2026-11-10):
+    // chain and coalesce, the default and strict holes, desc, index,
+    // pairs, pattern and its star, project, range, table, through.
+    "/a[10 <= ::n <= 20] | ::x ?? ::y",
+    r#"/row | "${::name:-anon} ${::age:?no age}""#,
+    "/rows/* @| sort_by(-::name; ::year)",
+    "= @(1; 2; 3)[1]",
+    "= %(@(a; b) = @(1; 2))",
+    r#"/u[::tag == *"beta"*]"#,
+    "= %(a = 1; b = 2):%(B = :b; :*)",
+    "= @(1..3; 9)",
+    "= #(%(1; 2); %(3; 4))",
+    "/a | .r(::owner) | $.r::name",
 ];
 
-/// kind → sorted property keys, as locked. `param` is reserved
-/// (never emitted: reflection sees expanded queries).
+/// kind → sorted property keys, as locked: every kind the reflector
+/// emits (the corpus was completed on 2026-11-10 with chain,
+/// coalesce, default, desc, index, pairs, pattern, project, range,
+/// star, strict, table and through, emitted before and never locked).
 const VOCABULARY: &[(&str, &[&str])] = &[
     ("agg", &["form", "lib", "name"]),
     ("agg-expr", &["form"]),
@@ -218,7 +233,9 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     ("capture", &["form", "group"]),
     // v1 additive growth: captures, field (2026-08-27, rulings #47/#48).
     ("captures", &["form"]),
+    ("chain", &["form", "ops"]),
     ("cmd", &["form", "lib", "name"]),
+    ("coalesce", &["form"]),
     ("compare", &["form", "op"]),
     // v1 additive growth: cond (2026-07-11, the conditional).
     // v2 additive growth: concat (2026-10-20, draft 163: `++`,
@@ -226,6 +243,8 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     ("concat", &["form", "item", "overwrite"]),
     ("cond", &["form"]),
     ("context", &["form", "index"]),
+    ("default", &["form"]),
+    ("desc", &["form"]),
     // v1 additive growth: edge (2026-07-09, the $- accessor).
     ("edge", &["form"]),
     // v1 additive growth: edges (2026-07-11, the @- plural).
@@ -238,6 +257,7 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     ("filter", &["form"]),
     // v1 additive growth: group (2026-07-08, path patterns).
     ("group", &["form", "max", "min", "reach"]),
+    ("index", &["form"]),
     // v1 additive growth: interp (2026-07-07, interpolation).
     ("interp", &["form"]),
     // the invoking position `_` (2026-10-18; the node was spelled
@@ -274,6 +294,7 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     ("option", &["form", "name", "value"]),
     ("or", &["form"]),
     ("ordinal", &["form"]),
+    ("pairs", &["form"]),
     ("parens", &["form"]),
     // v1 additive growth: anchored key (2026-07-11, ^-operands);
     // mark key same day (the (name) anchor); the mark-array
@@ -295,6 +316,7 @@ const VOCABULARY: &[(&str, &[&str])] = &[
             "node-id",
         ],
     ),
+    ("pattern", &["form"]),
     // v1 additive growth: peer-reg (2026-09-07, the node read
     // `X:.r`; since 2026-10-31 the attached regula, the node operand
     // its child or absent for the current node).
@@ -305,12 +327,14 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     ("position", &["form"]),
     ("positions", &["form"]),
     ("predicate", &["form", "from", "kind", "to", "value"]),
+    ("project", &["form", "shape"]),
     ("projection", &["form", "key", "kind", "type"]),
     ("push", &["form", "name"]),
     // v2 additive growth: quarq (2026-10-23, draft 166: the `q(…)`
     // literal; its body's commands are its children).
     ("quarq", &["form", "source"]),
     ("query", &["form", "outer", "role"]),
+    ("range", &["form"]),
     ("recall", &["form", "ref"]),
     ("record-push", &["enriched", "form", "name"]),
     // v2 additive growth: record-with as an operand (2026-10-20,
@@ -332,6 +356,7 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     // v1 additive growth: spread (2026-07-11, | ... core syntax);
     // outer key added same day (| ...?, the OPTIONAL MATCH round).
     ("spread", &["form", "outer"]),
+    ("star", &["form"]),
     (
         "step",
         &[
@@ -346,16 +371,24 @@ const VOCABULARY: &[(&str, &[&str])] = &[
             "target",
         ],
     ),
+    ("strict", &["form", "message"]),
     ("subcontext", &["form", "name"]),
+    ("table", &["form"]),
+    ("through", &["form", "key"]),
     ("topic", &["form"]),
     ("topics", &["form"]),
     ("trait", &["alts", "form"]),
     // v1 additive growth: value-meta (2026-09-06, a value's `:key`
     // provenance projection).
     ("value-meta", &["form", "key", "shape"]),
-    // v1 additive growth: when (2026-07-11, the value match's arm).
+    // v1 additive growth: when (2026-07-11, the switch's arm).
     ("when", &["form", "regex"]),
 ];
+
+/// The kinds the vocabulary reserves and the reflector never emits:
+/// `param`, a fragment parameter (a reflected query is expanded, so
+/// no parameter is left in it).
+const RESERVED: &[&str] = &["param"];
 
 fn corpus_inventory() -> Vec<(String, Vec<String>)> {
     let mut union: Vec<(String, Vec<String>)> = Vec::new();
@@ -479,4 +512,21 @@ fn root_carries_the_version() {
         arbor.metadata(arbor.root(), "query"),
         Some(Value::Str("/x".to_string()))
     );
+}
+
+/// A reserved kind stays out of the lock table and out of every
+/// reflection of the corpus: it is named by the vocabulary alone.
+#[test]
+fn reserved_kinds_are_never_emitted() {
+    let emitted = corpus_inventory();
+    for kind in RESERVED {
+        assert!(
+            VOCABULARY.iter().all(|(k, _)| k != kind),
+            "`{kind}` is reserved and stands in the lock table"
+        );
+        assert!(
+            emitted.iter().all(|(k, _)| k != kind),
+            "`{kind}` is reserved and the corpus emits it"
+        );
+    }
 }

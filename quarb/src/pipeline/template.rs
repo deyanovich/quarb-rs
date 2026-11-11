@@ -34,11 +34,28 @@ pub(crate) fn fill_template<H: Host>(
             .iter()
             .map(|h| reach(host, ext, h, trace, scope))
             .collect(),
-        holes: &q.holes,
+        taken: vec![false; q.holes.len()],
         refusal: None,
     };
     let mut body: Vec<Command> = (*q.body).clone();
     filler.commands(&mut body);
+    // An expansion the fill did not reach is refused by name (the
+    // review of 2026-11-10, pipeline F9). The fill walks commands,
+    // operands, path elements and arguments; an expansion written
+    // elsewhere (an index, a table's row, a fold's command) was left
+    // in the quarq, which then refused where it was applied, as
+    // "outside a quarq template", of a query that wrote it inside
+    // one.
+    if filler.refusal.is_none()
+        && let Some(i) = filler.taken.iter().position(|t| !t)
+        && let Some(hole) = q.holes.get(i)
+    {
+        filler.refusal = Some(format!(
+            "expansion '${{{}}}' in a template stands where the template is not filled: an \
+             expansion fills a command, an operand, a path element or an argument",
+            hole.text
+        ));
+    }
     if let Some(why) = filler.refusal {
         record_refusal(why);
         return Value::Null;
@@ -93,7 +110,9 @@ fn reach<H: Host>(
             projection: None,
             anchor,
         } => {
-            let threads = host.rel_threads(ext, steps, anchor, None, trace, scope);
+            let threads = crate::pipeline::run::out_of_row_reach(|| {
+                host.rel_threads(ext, steps, anchor, None, trace, scope)
+            });
             let forms: Vec<Form> = threads
                 .iter()
                 .filter_map(|(x, _, _)| host.node_form(x))
@@ -148,13 +167,14 @@ fn forms_of_values<H: Host>(host: &H, values: &[Value]) -> Option<Vec<Form>> {
     any.then_some(out)
 }
 
-struct Filler<'a> {
+struct Filler {
     filled: Vec<Filled>,
-    holes: &'a [Hole],
+    /// Which holes the fill reached, by their place in the list.
+    taken: Vec<bool>,
     refusal: Option<String>,
 }
 
-impl Filler<'_> {
+impl Filler {
     fn refuse(&mut self, hole: &Hole, why: String) {
         if self.refusal.is_none() {
             self.refusal = Some(format!(
@@ -171,6 +191,9 @@ impl Filler<'_> {
     }
 
     fn take_at(&mut self, index: usize) -> Filled {
+        if let Some(t) = self.taken.get_mut(index) {
+            *t = true;
+        }
         match self.filled.get_mut(index) {
             Some(f) => std::mem::replace(f, Filled::Values(Vec::new())),
             None => Filled::Values(Vec::new()),
@@ -584,7 +607,8 @@ impl Filler<'_> {
             | Operand::Position(i)
             | Operand::Driver(i)
             | Operand::Typed { inner: i, .. }
-            | Operand::InUnit { inner: i, .. } => self.operand(i),
+            | Operand::InUnit { inner: i, .. }
+            | Operand::InOffset { inner: i, .. } => self.operand(i),
             Operand::Through { base, projection } => {
                 self.operand(base);
                 self.projection(projection);

@@ -39,12 +39,12 @@ pub struct Candidate {
 /// The candidate's kind, for icons/sorting on the consumer side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
-    /// A `|` scalar command.
-    Function,
-    /// An `@|` aggregate (plain or keyed).
-    Aggregate,
-    /// A register spelling (`$.`, `@.`, `%.`, …).
-    Register,
+    /// A command after `|`.
+    Command,
+    /// A command after `@|`, the context pipe (plain or keyed).
+    ContextCommand,
+    /// A capsa accessor (`$.`, `@.`, `%.`, …).
+    Accessor,
     /// A child hop name from the mounted arbor.
     Child,
     /// A property/annotation key (`::…`), aliased or core.
@@ -136,21 +136,26 @@ pub fn complete(text: &str, cursor: usize) -> Vec<Candidate> {
     let mut out = Vec::new();
     match context(text, start) {
         Cx::AggPipe => {
-            push_all(&mut out, &stdlib::aggregate_names(), Kind::Aggregate, word);
-            push_all(&mut out, &stdlib::keyed_names(), Kind::Aggregate, word);
+            push_all(
+                &mut out,
+                &stdlib::aggregate_names(),
+                Kind::ContextCommand,
+                word,
+            );
+            push_all(&mut out, &stdlib::keyed_names(), Kind::ContextCommand, word);
         }
         Cx::Pipe => {
-            push_all(&mut out, &stdlib::scalar_names(), Kind::Function, word);
+            push_all(&mut out, &stdlib::scalar_names(), Kind::Command, word);
             // Keyed and reducing aggregates also ride the plain
             // pipe (per capsa on a group's members).
-            push_all(&mut out, &stdlib::keyed_names(), Kind::Aggregate, word);
+            push_all(&mut out, &stdlib::keyed_names(), Kind::ContextCommand, word);
         }
         Cx::Register => {
             // The `$` is already typed; offer the full spellings.
             for r in REGISTERS {
                 out.push(Candidate {
                     text: (*r).to_string(),
-                    kind: Kind::Register,
+                    kind: Kind::Accessor,
                     doc: None,
                 });
             }

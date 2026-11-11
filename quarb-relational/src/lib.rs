@@ -1471,6 +1471,32 @@ impl AstAdapter for RelationalModel {
         self.find_target(target, to, &value)
     }
 
+    /// A table declares its surface (ruling 2026-11-10): its columns
+    /// are the properties of its rows, and the labels that leave or
+    /// reach them are those of its declared keys and of the keys of
+    /// other tables that point at it. Answered for a row: the table
+    /// node has no columns of its own.
+    fn surface(&self, node: NodeId) -> Option<quarb::Surface> {
+        let (t, Some(_)) = self.entry(node)? else {
+            return None;
+        };
+        let spec = &self.tables[t].spec;
+        let mut labels = spec.fk_labels();
+        for other in &self.tables {
+            let theirs = other.spec.fk_labels();
+            for (i, (_, target, _)) in other.spec.fks.iter().enumerate() {
+                if *target == spec.name && !labels.contains(&theirs[i]) {
+                    labels.push(theirs[i].clone());
+                }
+            }
+        }
+        Some(quarb::Surface {
+            container: format!("/{}", spec.name),
+            properties: Some(spec.columns.clone()),
+            labels: Some(labels),
+        })
+    }
+
     /// Each declared FK column with a non-null value is an outgoing
     /// crosslink, labeled by the column name without its `_id`
     /// suffix ([`TableSpec::fk_labels`]).

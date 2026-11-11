@@ -47,12 +47,8 @@ jobs:
           - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
           - { os: macos-15, target: aarch64-apple-darwin }
           - { os: macos-latest, target: x86_64-apple-darwin }
-          # windows-msvc parked: the tree is not Windows-portable
-          # yet (apotheca uses unix-only file locking; qua's
-          # --edit tempfile path calls libc::dup2). Restore the
-          # entry once both are cfg-gated:
-          #   - os: windows-latest
-          #     target: x86_64-pc-windows-msvc
+          # Python 3.14 and windows-msvc are tried in
+          # build-experimental below until a release proves them.
     steps:
       - uses: actions/checkout@v4
 
@@ -139,10 +135,103 @@ jobs:
       - name: Collect dist files
         run: |
           mkdir dist
-          find artifacts -type f \( -name "*.whl" -o -name "*.tar.gz" \) -exec cp {} dist/ \;
+          find artifacts -type f -not -path "artifacts/experimental-*" \( -name "*.whl" -o -name "*.tar.gz" \) -exec cp {} dist/ \;
           ls -la dist/
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
+
+  # The wheels no release has proven yet, first tried with 0.59.0:
+  # Python 3.14 on the four platforms above (the interpreter the
+  # engine's own test run links, so the Linux build is known), and
+  # windows-msvc, where the mt: door compiles out (apotheca's file
+  # locking is unix-only) and --edit's output capture is unix-gated,
+  # but the full CLI has never been built. Each leg stands alone: a
+  # failed build holds neither the others nor the publish above, and
+  # what did build goes up after the proven set, as more files of the
+  # same release. A leg that a release proves moves into build-wheels.
+  build-experimental:
+    name: Try a wheel (${{ matrix.target }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { python: "3.14", os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, interpreter: python3.14 }
+          - { python: "3.14", os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, interpreter: python3.14 }
+          - { python: "3.14", os: macos-15, target: aarch64-apple-darwin, interpreter: python3.14 }
+          - { python: "3.14", os: macos-latest, target: x86_64-apple-darwin, interpreter: python3.14 }
+          # On Windows the interpreter setup-python selected is
+          # `python` on the PATH; there is no python3.x executable.
+          - { python: "3.10", os: windows-latest, target: x86_64-pc-windows-msvc, interpreter: python }
+          - { python: "3.11", os: windows-latest, target: x86_64-pc-windows-msvc, interpreter: python }
+          - { python: "3.12", os: windows-latest, target: x86_64-pc-windows-msvc, interpreter: python }
+          - { python: "3.13", os: windows-latest, target: x86_64-pc-windows-msvc, interpreter: python }
+          - { python: "3.14", os: windows-latest, target: x86_64-pc-windows-msvc, interpreter: python }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: >-
+            --release
+            --strip
+            --manifest-path qua/Cargo.toml
+            --interpreter ${{ matrix.interpreter }}
+            --skip-auditwheel
+            --out dist
+          manylinux: 2_35
+          container: off
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: experimental-${{ matrix.target }}-py${{ matrix.python }}
+          path: dist/*.whl
+
+  publish-experimental:
+    name: Publish the experimental wheels
+    needs: [publish, build-experimental]
+    # after the proven set is out, whatever the tries came to
+    if: ${{ !cancelled() && needs.publish.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - name: Download the experimental wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: experimental-*
+          path: artifacts
+
+      - name: Collect dist files
+        id: collect
+        run: |
+          mkdir -p artifacts dist
+          find artifacts -type f -name "*.whl" -exec cp {} dist/ \;
+          ls -la dist/
+          echo "count=$(find dist -type f -name '*.whl' | wc -l)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish to PyPI
+        if: ${{ steps.collect.outputs.count != '0' }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          # a wheel that finished early may be up already
+          skip-existing: true

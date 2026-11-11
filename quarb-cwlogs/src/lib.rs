@@ -633,10 +633,11 @@ impl AstAdapter for CwlAdapter {
             let groups = self.groups.borrow();
             let e = &groups[g].1[i];
             let envelope = match name {
+                // the service's epoch stamp, a point of the timeline
                 "timestamp" => Some(Value::Instant {
                     secs: e.secs,
                     nanos: e.nanos,
-                    offset_min: None,
+                    offset_min: Some(0),
                     calendar: Default::default(),
                 }),
                 "logStream" => e.stream.clone().map(Value::Str),
@@ -707,7 +708,7 @@ impl AstAdapter for CwlAdapter {
             "received" => e.received.map(|(secs, nanos)| Value::Instant {
                 secs,
                 nanos,
-                offset_min: None,
+                offset_min: Some(0),
                 calendar: Default::default(),
             }),
             "id" => e.id.clone().map(Value::Str),

@@ -499,6 +499,15 @@ impl AstAdapter for FirebaseAdapter {
         }
     }
 
+    /// The declared references are read off the node they leave,
+    /// and nothing here records what points at a node: the hop back
+    /// is refused rather than answered empty (spec: The adapter
+    /// contract). With no reference declared the source has no links
+    /// at all, and the empty answer is the true one.
+    fn backlinks_unsupported(&self, _node: NodeId, _label: Option<&str>) -> bool {
+        !self.refs.is_empty()
+    }
+
     /// Every declared field with a value is an outgoing crosslink,
     /// labeled by the field name without its `_id` suffix
     /// ([`quarb::adapter::reference_labels`]); a `field/*`

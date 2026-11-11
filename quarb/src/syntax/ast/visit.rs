@@ -159,6 +159,11 @@ pub fn walk_predicate<V: Visitor + ?Sized>(v: &mut V, p: &Predicate) {
 }
 
 pub fn walk_pred<V: Visitor + ?Sized>(v: &mut V, e: &PredExpr) {
+    // as deep as a flat `a || b || …` is long (see `eval_operand`)
+    stacker::maybe_grow(256 * 1024, 4 * 1024 * 1024, || walk_pred_in(v, e))
+}
+
+fn walk_pred_in<V: Visitor + ?Sized>(v: &mut V, e: &PredExpr) {
     match e {
         PredExpr::Or(a, b) | PredExpr::And(a, b) => {
             v.pred(a);
@@ -175,6 +180,12 @@ pub fn walk_pred<V: Visitor + ?Sized>(v: &mut V, e: &PredExpr) {
 }
 
 pub fn walk_operand<V: Visitor + ?Sized>(v: &mut V, o: &Operand) {
+    // as deep as a flat chain is long: the stack grows where it runs
+    // short (see `eval_operand`)
+    stacker::maybe_grow(256 * 1024, 4 * 1024 * 1024, || walk_operand_in(v, o))
+}
+
+fn walk_operand_in<V: Visitor + ?Sized>(v: &mut V, o: &Operand) {
     match o {
         Operand::Apply { base, .. } => v.operand(base),
         Operand::Rel { steps, anchor, .. } => {
@@ -219,7 +230,9 @@ pub fn walk_operand<V: Visitor + ?Sized>(v: &mut V, o: &Operand) {
         | Operand::Invoking(inner)
         | Operand::Position(inner)
         | Operand::Driver(inner) => v.operand(inner),
-        Operand::Typed { inner, .. } | Operand::InUnit { inner, .. } => v.operand(inner),
+        Operand::Typed { inner, .. }
+        | Operand::InUnit { inner, .. }
+        | Operand::InOffset { inner, .. } => v.operand(inner),
         Operand::LabelIndex { base, labels } => {
             v.operand(base);
             for l in labels {

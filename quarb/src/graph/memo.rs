@@ -83,6 +83,40 @@ pub(crate) fn backlinks_of(
     v
 }
 
+/// Whether a hop at `node` that walks links back is refused (spec:
+/// The adapter contract): the source has links there it cannot
+/// walk back, and an empty answer would read as "nothing points
+/// here". `op` is the operator as written (`<-`, `--`, `~`),
+/// `label` the one label the hop names, if it names exactly one.
+/// Records the refusal; the caller answers nothing.
+pub(crate) fn backward_refused(
+    adapter: &impl AstAdapter,
+    node: NodeId,
+    op: &str,
+    label: Option<&str>,
+) -> bool {
+    if !adapter.backlinks_unsupported(node, label) {
+        return false;
+    }
+    crate::value::ambient::record_refusal(format!(
+        "'{op}' walks links back, and this source does not support backlinks \
+         (a link is kept with the node it leaves): find the referrers in a \
+         scope instead — '<--(/scope/*::a)' — or declare the reference in \
+         a model ('ref /scope/*::a --> target;'), which walks what it \
+         declares both ways"
+    ));
+    true
+}
+
+/// The one label a link hop names (`<-owner`), `None` for a
+/// wildcard, a pattern or a label selection.
+pub(crate) fn named_label(step: &Step) -> Option<&str> {
+    match &step.matcher {
+        Matcher::Name(l) if step.labels.is_empty() => Some(l),
+        _ => None,
+    }
+}
+
 /// Whether a scope's nodes are the same wherever the step stands:
 /// its text mentions no register, mark, topic, driver, capture or
 /// fragment — nothing that looks outward. A conservative test on

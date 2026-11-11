@@ -136,6 +136,9 @@ pub(crate) fn apply_commands<H: Host>(
     // Execution Modes): a push returns a thread to navigation mode
     // while its topic stays, so the mode is not the topic's presence.
     let mut mode = mode;
+    // a run of commands reduces its own context: an enclosing fold's
+    // group is not these commands' group
+    let _own_ground = crate::pipeline::run::fresh_group();
     let mut i = 0;
     while i < commands.len() {
         if top {
@@ -163,8 +166,13 @@ pub(crate) fn apply_commands<H: Host>(
             }
         }
         // a trailing `session(…)` that sets answers nothing, as a push
-        // does (draft 166): no thread, so no line
-        if i + 1 == commands.len()
+        // does (draft 166): no thread, so no line. At the end of the
+        // query alone: a body that ends in one, a held quarq's or a
+        // pipe tail's, hands its threads back to what follows it (the
+        // review of 2026-11-10, pipeline F11b: `&$.f` over
+        // `q(session(--precision=2))` ended the thread)
+        if top
+            && i + 1 == commands.len()
             && let Command::Func(call) = &commands[i]
             && call.name == "session"
             && !session_settings(call).is_empty()
@@ -182,7 +190,7 @@ pub(crate) fn apply_commands<H: Host>(
 /// parser's table decides (`apply_commands`).
 pub(crate) fn start_mode<X: crate::thread::Attachment>(caps: &[Thread<X>]) -> PipeMode {
     if caps.iter().any(|c| c.topic.is_some()) {
-        PipeMode::Scalar
+        PipeMode::Value
     } else {
         PipeMode::Nav
     }
@@ -266,7 +274,10 @@ pub(crate) fn apply_command_in<H: Host>(
                 let len = items.len() as i64;
                 (0..len)
                     .map(|i| {
-                        let src = i - n;
+                        // saturating, as the context's shift is: the
+                        // least integer as the count overflowed here
+                        // (a panic in a debug build)
+                        let src = i.saturating_sub(n);
                         if src < 0 || src >= len { Value::Null } else { items[src as usize].clone() }
                     })
                     .collect()
@@ -703,7 +714,6 @@ pub(crate) fn apply_command_in<H: Host>(
                     members = rows
                         .into_iter()
                         .map(|v| Thread::<H::Ext> {
-                            window: None,
                             prov: c.prov.clone(),
                             register: c.register.clone(),
                             topic: Some(v),
@@ -875,7 +885,6 @@ pub(crate) fn apply_command_in<H: Host>(
                     })
                     .collect();
                 values.into_iter().zip(provs).map(move |(v, prov)| Thread::<H::Ext> {
-                    window: None,
                     prov,
                     register: c.register.clone(),
                     topic: Some(v),
@@ -906,7 +915,9 @@ pub(crate) fn apply_command_in<H: Host>(
                      context stood on no node",
                 ));
             }
-            host.navigate(branch, caps, trace, outer, peers)
+            crate::pipeline::run::out_of_row_reach(|| {
+                host.navigate(branch, caps, trace, outer, peers)
+            })
         }
         // Push the topic onto the register — or, in a node context
         // (no topic), MARK the node: `.name` is `.name($$_)`, a
@@ -925,6 +936,7 @@ pub(crate) fn apply_command_in<H: Host>(
                 c.register.push(Reg {
                     prov,
                     site: host.origin_at(&c.ext),
+                    placed: host.placed(&c.ext),
                     name: name.clone(),
                     value,
                 });
@@ -940,7 +952,7 @@ pub(crate) fn apply_command_in<H: Host>(
         // topic.
         Command::Expr(expr) => expr_command(
             expr,
-            matches!(mode, PipeMode::Scalar),
+            matches!(mode, PipeMode::Value),
             caps,
             host,
             trace,
@@ -962,6 +974,7 @@ pub(crate) fn apply_command_in<H: Host>(
                             c.register.push(Reg {
                                 prov: c.prov.part(&k),
                                 site: host.origin_at(&c.ext),
+                                placed: host.placed(&c.ext),
                                 name: Some(k),
                                 value: v,
                             });
@@ -970,7 +983,7 @@ pub(crate) fn apply_command_in<H: Host>(
                     // A topic that is not a record has no fields to
                     // file: refused by name, never a silent empty push.
                     other => record_refusal(format!(
-                        "the fields push '| .%' takes a record topic, not {}; a plain '| .' files any topic as one regula",
+                        "the fields push '| .%' takes a record topic, not {}; a plain '| .' pushes any topic as one regula",
                         match other {
                             Some(Value::Null) | None => "a node with no topic".to_string(),
                             Some(Value::Str(_)) => "text".to_string(),
@@ -1006,12 +1019,13 @@ pub(crate) fn apply_command_in<H: Host>(
                 return caps;
             }
             let mut seed = seed_capsa(&caps, host);
-            let scope = seed.scope(None, peers, outer);
+            let scope = seed.scope(Some(crate::pipeline::run::group_ordinal()), peers, outer);
             let (value, o) = capture(|| operand_value(host, &seed.ext, body, trace, scope));
             seed.ext = host.unplaced_ext();
             seed.register.push(Reg {
                 prov: Prov::leaf(o),
                 site: host.origin_at(&seed.ext),
+                placed: host.placed(&seed.ext),
                 name: name.clone(),
                 value,
             });
@@ -1030,7 +1044,8 @@ pub(crate) fn apply_command_in<H: Host>(
             }
             if regs.is_empty() {
                 let seed = seed_capsa(&caps, host);
-                let scope = seed.scope(None, peers, outer);
+                // the whole context is the one group
+                let scope = seed.scope(Some(1), peers, outer);
                 let (value, o) =
                     capture(|| operand_value(host, &seed.ext, body, trace, scope));
                 let prov = Prov::leaf(o);
@@ -1040,6 +1055,7 @@ pub(crate) fn apply_command_in<H: Host>(
                         c.register.push(Reg {
                             prov: prov.clone(),
                             site: host.origin_at(&c.ext),
+                            placed: host.placed(&c.ext),
                             name: name.clone(),
                             value: value.clone(),
                         });
@@ -1051,11 +1067,12 @@ pub(crate) fn apply_command_in<H: Host>(
                 return Vec::new();
             };
             let mut filed: Vec<Option<(Value, Prov)>> = vec![None; caps.len()];
-            for (_, members) in groups {
+            for (k, (_, members)) in groups.into_iter().enumerate() {
                 let seed_members: Vec<Thread<H::Ext>> =
                     members.iter().map(|&i| caps[i].clone()).collect();
                 let seed = seed_capsa(&seed_members, host);
-                let scope = seed.scope(None, peers, outer);
+                // the partition's ordinal in the selector's order
+                let scope = seed.scope(Some(k + 1), peers, outer);
                 let (value, o) =
                     capture(|| operand_value(host, &seed.ext, body, trace, scope));
                 let prov = Prov::leaf(o);
@@ -1070,6 +1087,7 @@ pub(crate) fn apply_command_in<H: Host>(
                     c.register.push(Reg {
                         prov,
                         site: host.origin_at(&c.ext),
+                        placed: host.placed(&c.ext),
                         name: name.clone(),
                         value,
                     });
@@ -1082,7 +1100,7 @@ pub(crate) fn apply_command_in<H: Host>(
         // the shared regulae its register.
         Command::AggRecord { call, enriched } => {
             let seed = seed_capsa(&caps, host);
-            let scope = seed.scope(None, peers, outer);
+            let scope = seed.scope(Some(crate::pipeline::run::group_ordinal()), peers, outer);
             let built = match record_fields_prov(&call.args, host, &seed.ext, trace, scope) {
                 Ok(f) => f,
                 Err(why) => {
@@ -1119,7 +1137,16 @@ pub(crate) fn apply_command_in<H: Host>(
         // and the one capsa out holds the expression's value.
         Command::AggExpr(expr) => {
             let seed = seed_capsa(&caps, host);
-            expr_command(expr, true, vec![seed], host, trace, outer, peers)
+            expr_command_at(
+                expr,
+                true,
+                Some(crate::pipeline::run::group_ordinal()),
+                vec![seed],
+                host,
+                trace,
+                outer,
+                peers,
+            )
         }
         // `@| %.` / `@| $.name` — a register accessor after the
         // aggregation pipe reads once: the regulae every capsa
@@ -1339,7 +1366,7 @@ pub(crate) fn apply_command_in<H: Host>(
             let Some(memory) = run_option(|o| o.session.clone()) else {
                 return refuse_all::<H>(
                     caps,
-                    "the session memory is not open in this run: '| ,name' files a value for a session (quai, the qua REPL, a .quai file); the capsa's push is '| .name'",
+                    "the session memory is not open in this run: '| ,name' pushes a value into the session memory (quai, the qua REPL, a .quai file); the capsa's push is '| .name'",
                 );
             };
             let topics: Vec<Value> = caps
@@ -1374,12 +1401,20 @@ pub(crate) fn apply_command_in<H: Host>(
             ));
             caps
         }
-        // `| &$.x!` / `| &$.x#` — the held quarq applied under the
-        // capsa windowed before the regula holding `x` (spec: Quarqs,
+        // `| &$.x!` / `| &$.x#` — the held quarq applied on the capsa
+        // as it stood before the regula holding `x` (spec: Quarqs,
         // the held quarq's appliers): the body's recalls and marks
-        // see what stood before the push; `!` keeps the applying
-        // cursor, `#` takes the topic and position recorded at the
-        // push; pushes the body makes land in the applying thread.
+        // see what stood before the push, and what the body pushes
+        // itself (ruling 2026-11-10); `!` keeps the applying cursor,
+        // `#` takes the topic and position recorded at the push;
+        // pushes the body makes land in the applying thread.
+        //
+        // The body's thread CARRIES that capsa as its register, so
+        // every command of the body reads it, whatever it rebuilds.
+        // (It was a mark on the thread, a visible prefix, which every
+        // command but an expression dropped: `q(abs | $_ * $.k)`
+        // read the applying capsa's `k`, `q(%.)` its whole register,
+        // and a body's own push stood past the prefix, unseen.)
         Command::SpliceAs { reg: r, shot } => caps
             .into_iter()
             .flat_map(|mut c| {
@@ -1392,9 +1427,34 @@ pub(crate) fn apply_command_in<H: Host>(
                     c.topic = Some(Value::Null);
                     return vec![c];
                 };
+                // A projector is the simplest quarq (spec: Quarqs), and
+                // the bare sigil reads one held: the two appliers read
+                // it too (the review of 2026-11-10, pipeline F16: both
+                // refused "the regula holds a projector"). It has no
+                // body to run and captures nothing, so `!` reads it on
+                // the applying cursor, as the bare sigil does, and `#`
+                // on the node the push stood at.
+                if c.register[index].value.holds_projector() {
+                    let held = c.register[index].value.clone();
+                    let ext = if *shot {
+                        if c.register[index].placed {
+                            host.ext_at(crate::NodeId::from(c.register[index].site.position))
+                        } else {
+                            host.unplaced_ext()
+                        }
+                    } else {
+                        c.ext.clone()
+                    };
+                    let read = {
+                        let scope = c.scope(None, None, outer);
+                        crate::pipeline::operand::apply_held(host, &ext, held, trace, scope)
+                    };
+                    c.topic = Some(read);
+                    return vec![c];
+                }
                 let Value::Quarq(q) = c.register[index].value.clone() else {
                     record_refusal(format!(
-                        "&{}{} applies a quarq, and the register holds {}",
+                        "&{}{} applies a quarq, and the regula holds {}",
                         crate::syntax::unparse::reg(r),
                         if *shot { "#" } else { "!" },
                         stdlib::kind_of(&c.register[index].value)
@@ -1403,27 +1463,79 @@ pub(crate) fn apply_command_in<H: Host>(
                     return vec![c];
                 };
                 let site = c.register[index].site.clone();
-                let window = c.window;
+                let placed = c.register[index].placed;
+                let applying = c.register.clone();
                 let ext = c.ext.clone();
-                let topic = c.topic.clone();
-                c.window = Some(index);
+                c.register.truncate(index);
                 if *shot {
                     c.topic = q.at.as_deref().cloned();
-                    c.ext = host.ext_at(crate::NodeId::from(site.position));
+                    // the photograph stands where the push stood, and
+                    // nowhere where it stood on no node (the root was
+                    // read off the site's position, which names
+                    // nothing after a reduction)
+                    c.ext = if placed {
+                        host.ext_at(crate::NodeId::from(site.position))
+                    } else {
+                        host.unplaced_ext()
+                    };
                 }
+                let photograph = c.ext.clone();
                 let mode = start_mode(std::slice::from_ref(&c));
                 let mut out =
                     apply_commands(&q.body, mode, 0, false, vec![c], host, trace, outer);
                 for t in &mut out {
-                    t.window = window;
-                    if *shot {
+                    // the applying thread's capsa back, the body's own
+                    // pushes after it
+                    let pushed = if t.register.len() > index {
+                        t.register.split_off(index)
+                    } else {
+                        Vec::new()
+                    };
+                    t.register = applying.clone();
+                    t.register.extend(pushed);
+                    // `#` returns to where it applied, unless the body
+                    // walked: a body that navigates leaves its threads
+                    // where its walk ended (ruling 2026-11-10; every
+                    // thread was put back, so `q(/tags/*)` answered
+                    // the books)
+                    if *shot
+                        && host.placed(&t.ext) == host.placed(&photograph)
+                        && host.origin_at(&t.ext).position
+                            == host.origin_at(&photograph).position
+                    {
                         t.ext = ext.clone();
                     }
                 }
-                let _ = topic;
                 out
             })
             .collect(),
+        // `| &$.x` — the held quarq spliced: its body runs as if
+        // written in place (ruling 2026-11-10), on the whole context
+        // where every thread holds the same quarq, so `@_`,
+        // `@| count` and `,x` inside it see what they would see
+        // written there. (It ran per thread always: `@| count` in a
+        // body counted one.) Threads holding different quarqs, or a
+        // projector, are read each on its own.
+        Command::Splice(r)
+            if caps.len() > 1
+                && let Value::Quarq(first) = recall(&caps[0].register, r)
+                && caps[1..].iter().all(|c| {
+                    matches!(
+                        recall(&c.register, r),
+                        Value::Quarq(q)
+                            if std::sync::Arc::ptr_eq(&q.body, &first.body)
+                                || (q.source == first.source
+                                    && q.holes.is_empty()
+                                    && first.holes.is_empty())
+                    )
+                }) =>
+        {
+            let Value::Quarq(q) = recall(&caps[0].register, r) else {
+                unreachable!("checked by the guard")
+            };
+            let mode = start_mode(&caps);
+            apply_commands(&q.body, mode, 0, false, caps, host, trace, outer)
+        }
         Command::Splice(r) => caps
             .into_iter()
             .enumerate()
@@ -1443,7 +1555,7 @@ pub(crate) fn apply_command_in<H: Host>(
                 }
                 other => {
                     record_refusal(format!(
-                        "&{} splices a quarq, and the register holds {}",
+                        "&{} splices a quarq, and the regula holds {}",
                         crate::syntax::unparse::reg(r),
                         stdlib::kind_of(&other)
                     ));
@@ -1752,7 +1864,6 @@ pub(crate) fn agg_as_func_command<H: Host>(
                         members
                     } else {
                         let as_thread = |topic: Option<Value>, prov: Prov| Thread::<H::Ext> {
-                            window: None,
                             prov,
                             register: c.register.clone(),
                             topic,
@@ -1845,7 +1956,7 @@ pub(crate) fn agg_as_func_command<H: Host>(
 /// then the attachment of what it filed to the node each thread
 /// stands at — the regula under the name, or every regula the
 /// fields push filed — committed as the command's (spec: Attached
-/// Regulae). A thread standing nowhere (after an aggregate) has no
+/// Regulae). A thread standing nowhere (after the aggregation pipe) has no
 /// node to attach to and refuses; threads standing at one node must
 /// agree (`commit`).
 pub(crate) fn attach_command<H: Host>(
@@ -1863,7 +1974,7 @@ pub(crate) fn attach_command<H: Host>(
         if host.node_ref(&c.ext).is_none() {
             record_refusal(format!(
                 "'{shown}' attaches to the node the thread stands at, and this thread stands nowhere \
-                 (after an aggregate): navigate to a node before attaching"
+                 (after the aggregation pipe): navigate to a node before attaching"
             ));
             return Vec::new();
         }
@@ -1894,7 +2005,8 @@ pub(crate) fn attach_command<H: Host>(
             );
         }
     }
-    match commit::<<H::Ext as Attachment>::Key>() {
+    let same = |a: &Value, b: &Value| crate::stdlib::compare::value_eq(a, b, &|e| host.scale_of(e));
+    match commit::<<H::Ext as Attachment>::Key>(&same) {
         Ok(_) => out,
         Err(why) => {
             record_refusal(why);
@@ -1956,7 +2068,7 @@ pub(crate) fn repeat_command<H: Host>(
                 (
                     key,
                     c.topic.clone(),
-                    named_register_fields(&c.register),
+                    crate::pipeline::register::named_register_all(&c.register),
                     attached,
                 )
             })
@@ -2013,6 +2125,7 @@ pub(crate) fn subcontext_command<H: Host>(
             c.register.push(Reg {
                 prov,
                 site: host.origin_at(&c.ext),
+                placed: host.placed(&c.ext),
                 name: name.clone(),
                 value,
             });
@@ -2029,6 +2142,23 @@ pub(crate) fn subcontext_command<H: Host>(
 pub(crate) fn expr_command<H: Host>(
     expr: &Operand,
     value_mode: bool,
+    caps: Vec<Thread<H::Ext>>,
+    host: &H,
+    trace: &H::Trace,
+    outer: Option<&Scope<'_, H::Ext>>,
+    peers: Option<&Peers<H::Ext>>,
+) -> Vec<Thread<H::Ext>> {
+    expr_command_at(expr, value_mode, None, caps, host, trace, outer, peers)
+}
+
+/// [`expr_command`] with the ordinal its scopes stand at: `None` for
+/// each thread's place in the context, `Some(g)` for a reducing
+/// command's seed, which stands for the group `g` (`@| ($ord)`).
+#[allow(clippy::too_many_arguments)]
+fn expr_command_at<H: Host>(
+    expr: &Operand,
+    value_mode: bool,
+    group: Option<usize>,
     caps: Vec<Thread<H::Ext>>,
     host: &H,
     trace: &H::Trace,
@@ -2053,12 +2183,12 @@ pub(crate) fn expr_command<H: Host>(
             if value_mode && matches!(c.topic, Some(Value::Null)) && bare_projection(expr) {
                 return vec![c];
             }
-            let scope = c.scope(Some(i + 1), peers, outer);
+            let scope = c.scope(group.or(Some(i + 1)), peers, outer);
             // An operand that yields several values is a hop in
             // value position: each value is its own row, as each
             // target of a navigation is.
             if c.members.is_empty() {
-                let (values, o) = capture(|| eval_operand(host, &c.ext, expr, trace, scope));
+                let (mut values, o) = capture(|| eval_operand(host, &c.ext, expr, trace, scope));
                 // a range of no values is no rows, not one null row
                 let empty_range = values.is_empty() && matches!(expr, Operand::Range { .. });
                 if values.len() > 1 || empty_range {
@@ -2072,6 +2202,15 @@ pub(crate) fn expr_command<H: Host>(
                         })
                         .collect::<Vec<_>>();
                 }
+                // One value, or none: the thread's topic. The operand
+                // is evaluated once: it ran a second time for its one
+                // value (`group_value` on a thread with no members is
+                // the first value of the same evaluation), twice the
+                // work for every expression command and a warning
+                // raised in it counted twice.
+                c.topic = Some(values.pop().unwrap_or(Value::Null));
+                c.prov = Prov::leaf(o);
+                return vec![c];
             }
             let (value, o) = capture(|| group_value(host, &c.ext, expr, trace, scope));
             c.topic = Some(value);
@@ -2301,7 +2440,7 @@ pub(crate) fn map_cells_command<H: Host>(
                                     declared[j] = typing.declared();
                                 }
                             }
-                            crate::Table::typed(t.header.clone(), t.rows_vec(), declared).map(Value::table)
+                            crate::Table::typed(t.header.clone(), t.rows_vec(), declared).map(|nt| Value::table(nt.with_levels(t.levels)))
                         }
                     }
                     // on a record the fields named are cast into the
@@ -2362,6 +2501,10 @@ pub(crate) fn map_cells_command<H: Host>(
                 return c;
             }
             let held = held_ref.map(|op| operand_scalar(host, &c.ext, op, trace, scope));
+            let in_structure = matches!(
+                topic,
+                Value::Table(_) | Value::List(_) | Value::Record(_)
+            );
             // the body on one cell; over a table the row stands in
             // reach of the body's bare `:name` reads (ruling
             // 2026-11-05), the cell its topic; a body that spreads
@@ -2388,8 +2531,15 @@ pub(crate) fn map_cells_command<H: Host>(
                         expr: Box::new(Operand::Lit(cell.clone())),
                         commands: body,
                     };
+                    // the body's commands stand on a cell of a
+                    // structure, or on the lone value `map` was given:
+                    // a numeric command leaves a cell of a kind it
+                    // does not take, and answers null for a lone value
+                    // (ruling 2026-11-10), as on the plain pipe
+                    crate::value::ambient::mark_cells(in_structure);
                     let mut values =
                         crate::pipeline::operand::eval_operand(host, &c.ext, &piped, trace, scope);
+                    crate::value::ambient::mark_cells(false);
                     match values.len() {
                         0 => Value::Null,
                         1 => values.pop().expect("one"),
@@ -2465,7 +2615,7 @@ pub(crate) fn map_cells_command<H: Host>(
                                 row
                             })
                             .collect();
-                        return crate::Table::typed(Some(header), rows, declared).map(|t| Value::table(t.with_index(1)));
+                        return crate::Table::typed(Some(header), rows, declared).map(|nt| Value::table(nt.with_index(1).with_levels(t.levels)));
                     }
                     if results.iter().all(|v| matches!(v, Value::Record(_))) {
                         let mut keys: Vec<String> = Vec::new();
@@ -2495,7 +2645,7 @@ pub(crate) fn map_cells_command<H: Host>(
                             })
                             .collect();
                         let n = keys.len();
-                        return crate::Table::typed(Some(header), rows, declared).map(|t| Value::table(t.with_index(n)));
+                        return crate::Table::typed(Some(header), rows, declared).map(|nt| Value::table(nt.with_index(n).with_levels(t.levels)));
                     }
                     if results.iter().any(|v| !crate::stdlib::flat_cell(v)) {
                         return Err("--to=:::index: the labels mapped are all lists, all records or all scalars; the results mix them".into());
@@ -2514,7 +2664,7 @@ pub(crate) fn map_cells_command<H: Host>(
                             row
                         })
                         .collect();
-                    crate::Table::typed(Some(header), rows, declared).map(|t| Value::table(t.with_index(1)))
+                    crate::Table::typed(Some(header), rows, declared).map(|nt| Value::table(nt.with_index(1).with_levels(t.levels)))
                 })();
                 c.topic = Some(match rebuilt {
                     Ok(v) => v,
@@ -2547,7 +2697,7 @@ pub(crate) fn map_cells_command<H: Host>(
                             };
                             let names = h.iter().map(|k| name_of(k)).collect::<Result<Vec<_>, _>>()?;
                             crate::Table::typed(Some(names), t.rows_vec(), t.declared.clone())
-                                .map(|nt| Value::table(nt.with_index(t.index).with_name(t.name.clone())))
+                                .map(|nt| Value::table(nt.with_index(t.index).with_name(t.name.clone()).with_levels(t.levels)))
                         }
                         Value::Record(f) => {
                             let names = f.iter().map(|(k, _)| name_of(k)).collect::<Result<Vec<_>, _>>()?;
@@ -2592,7 +2742,7 @@ pub(crate) fn map_cells_command<H: Host>(
                                 }
                             }
                             match crate::Table::typed(Some(header), rows, declared) {
-                                Ok(nt) => std::sync::Arc::new(nt.with_index(t.index).with_name(t.name.clone())),
+                                Ok(nt) => std::sync::Arc::new(nt.with_index(t.index).with_name(t.name.clone()).with_levels(t.levels)),
                                 Err(why) => {
                                     record_refusal(format!("map: {why}"));
                                     c.topic = Some(Value::Null);
@@ -3067,6 +3217,7 @@ pub(crate) fn expr_push_command<H: Host>(
             c.register.push(Reg {
                 prov: Prov::leaf(o),
                 site: host.origin_at(&c.ext),
+                placed: host.placed(&c.ext),
                 name: name.clone(),
                 value,
             });
@@ -3129,6 +3280,7 @@ pub(crate) fn record_push_command<H: Host>(
             c.register.push(Reg {
                 prov,
                 site: host.origin_at(&c.ext),
+                placed: host.placed(&c.ext),
                 name: name.clone(),
                 value: Value::Record(fields.into()),
             });
@@ -3163,6 +3315,12 @@ pub(crate) fn collapse_command<H: Host>(
         .iter()
         .any(|a| matches!(a, Arg::Opt { name, .. } if name == "-e" || name == "--edges"));
     let mut out: Vec<Thread<H::Ext>> = Vec::new();
+    // per kept thread, which of its regulae hold a gathering by now:
+    // a regula whose own value is a list is one value like any other
+    // (the first thread's list was taken for "the items so far", so
+    // `.x(::tags)` collapsed to one flat list with the later lists
+    // nested in it, and a list beside a scalar lost the scalar)
+    let mut gathered: Vec<Vec<bool>> = Vec::new();
     let mut index: HashMap<(<H::Ext as Attachment>::Key, Option<String>), usize> = HashMap::new();
     for c in caps {
         let key = (
@@ -3176,23 +3334,23 @@ pub(crate) fn collapse_command<H: Host>(
                 kept.ext.gather(c.ext);
                 // the capsa: equal regulae once, differing ones
                 // gathered as a list of the distinct values
-                for (a, b) in kept.register.iter_mut().zip(c.register) {
+                for (j, (a, b)) in kept.register.iter_mut().zip(c.register).enumerate() {
                     a.prov.origins.union(&b.prov.origins);
-                    if a.value == b.value {
-                        continue;
+                    if gathered[i][j] {
+                        let mut items = a.value.clone().into_items().unwrap_or_default();
+                        if !items.contains(&b.value) {
+                            items.push(b.value);
+                            a.value = Value::list(items);
+                        }
+                    } else if a.value != b.value {
+                        a.value = Value::list(vec![a.value.clone(), b.value]);
+                        gathered[i][j] = true;
                     }
-                    let mut items = match a.value.clone().into_items() {
-                        Some(items) => items,
-                        None => vec![a.value.clone()],
-                    };
-                    if !items.contains(&b.value) {
-                        items.push(b.value);
-                    }
-                    a.value = Value::list(items);
                 }
             }
             None => {
                 index.insert(key, out.len());
+                gathered.push(vec![false; c.register.len()]);
                 out.push(c);
             }
         }
@@ -3387,11 +3545,10 @@ pub(crate) fn func_command<H: Host>(
                     || matches!(a, Arg::Opt { value: Some(v), .. } if !matches!(v, Operand::Lit(_)))
             };
             let resolved;
-            // (`autocast` and `clean` name their columns: the names
-            // stay names)
-            let call = if !matches!(call.name.as_str(), "autocast" | "melt" | "clean")
-                && call.args.iter().any(unresolved)
-            {
+            // (an argument that names a column stays a name:
+            // `stdlib::names_columns`)
+            let names = |a: &Arg| stdlib::names_columns(&call.name, a);
+            let call = if call.args.iter().any(|a| unresolved(a) && !names(a)) {
                 resolved = FnCall {
                     headless: false,
                     name: call.name.clone(),
@@ -3402,9 +3559,7 @@ pub(crate) fn func_command<H: Host>(
                             // `correlate(t; --on=:col)`: the key is a
                             // column name, not read on the topic (its
                             // table argument still evaluates)
-                            Arg::Opt { name, .. } if call.name == "correlate" && name == "--on" => {
-                                a.clone()
-                            }
+                            a if names(a) => a.clone(),
                             Arg::Expr(e) => Arg::Lit(operand_scalar(
                                 host,
                                 &c.ext,
@@ -3433,10 +3588,27 @@ pub(crate) fn func_command<H: Host>(
             } else {
                 call
             };
+            let scientific;
+            let call = if call.name == "clean"
+                && host.scientific(&c.ext)
+                && !call
+                    .args
+                    .iter()
+                    .any(|a| matches!(a, Arg::Opt { name, .. } if name == "--sci"))
+            {
+                let mut with = call.clone();
+                with.args.push(Arg::Opt {
+                    name: "--sci".into(),
+                    value: None,
+                });
+                scientific = with;
+                &scientific
+            } else {
+                call
+            };
             stdlib::apply_scalar(call, topic, &|e| host.scale_of(e))
                 .into_iter()
                 .map(move |v| Thread::<H::Ext> {
-                    window: None,
                     prov: prov.clone(),
                     register: c.register.clone(),
                     topic: Some(v),
@@ -3481,7 +3653,6 @@ pub(crate) fn map_command<H: Host>(
                 .into_iter()
                 .zip(provs)
                 .map(|(v, prov)| Thread::<H::Ext> {
-                    window: None,
                     prov,
                     register: c.register.clone(),
                     topic: Some(v),
@@ -3491,8 +3662,15 @@ pub(crate) fn map_command<H: Host>(
                     ext: c.ext.clone(),
                 })
                 .collect();
+            // each item is its thread's topic: value mode (spec: the
+            // iteration pipe leaves "a thread in value mode"). The
+            // command ran in navigation mode, where a bare projection
+            // over a null topic reads the node: `@(null; 1) $| ::title`
+            // answered the title twice where `map(::title)` answers
+            // null for the null (the review of 2026-11-10, pipeline
+            // F14).
             let (mut out, mut provs): (Vec<Value>, Vec<Prov>) =
-                apply_command(inner, pseudo, host, trace, outer)
+                apply_command_in(inner, PipeMode::Value, pseudo, host, trace, outer)
                     .into_iter()
                     .map(|p| (p.topic.unwrap_or(Value::Null), p.prov))
                     .unzip();
@@ -3702,7 +3880,6 @@ fn keyed_over_value<H: Host>(
 ) -> Thread<H::Ext> {
     let topic = c.topic.take();
     let make = |v: Value| Thread::<H::Ext> {
-        window: None,
         prov: c.prov.clone(),
         register: c.register.clone(),
         topic: Some(v),
@@ -3818,7 +3995,9 @@ fn by_option(call: &FnCall, eval: &dyn Fn(&Operand) -> Value) -> Option<Vec<Stri
             Operand::Field { base, name, .. } if matches!(**base, Operand::Topic) => {
                 vec![name.clone()]
             }
-            Operand::Typed { inner, .. } | Operand::InUnit { inner, .. } => key_of(inner, eval),
+            Operand::Typed { inner, .. }
+            | Operand::InUnit { inner, .. }
+            | Operand::InOffset { inner, .. } => key_of(inner, eval),
             // `(:Sex; :Pclass)` — the tuple of keys
             Operand::List(items) => items.iter().flat_map(|i| key_of(i, eval)).collect(),
             // any expression answering a list, or a name (ruling 2026-11-06)
@@ -3897,13 +4076,25 @@ fn grouped_reduction<H: Host>(
             .retain(|a| !matches!(a, Arg::Opt { name, .. } if name == "--by"));
         c
     };
-    // the groups, in order of first appearance
+    // the groups, in order of first appearance: a row joins the
+    // group of its key as the fold partitions (`partition_by`, the
+    // sort key's equality), found in one probe. (The key was
+    // compared by structure in a scan of the groups so far, so
+    // `count(--by=:k)` and `| .g(:k) @|{.g} count` could disagree,
+    // and 40,000 keys took seconds.)
+    let scale = |e: &str| host.scale_of(e);
     let mut groups: Vec<(Vec<Value>, Vec<usize>)> = Vec::new();
+    let mut by_key: HashMap<Vec<crate::value::SortKey>, usize> = HashMap::new();
     for (i, r) in t.rows().enumerate() {
         let key: Vec<Value> = key_cols.iter().map(|&j| r.get(j)).collect();
-        match groups.iter_mut().find(|(k, _)| *k == key) {
-            Some((_, rows)) => rows.push(i),
-            None => groups.push((key, vec![i])),
+        let sort: Vec<crate::value::SortKey> =
+            key.iter().map(|v| v.sort_key_with(&scale)).collect();
+        match by_key.get(&sort) {
+            Some(&g) => groups[g].1.push(i),
+            None => {
+                by_key.insert(sort, groups.len());
+                groups.push((key, vec![i]));
+            }
         }
     }
     let mut header: Vec<String> = key_cols.iter().map(|&j| names[j].clone()).collect();
@@ -3974,10 +4165,13 @@ fn grouped_reduction<H: Host>(
                     .iter()
                     .map(|&i| data.iter().map(|&j| t.cell(i, j)).collect())
                     .collect();
-                let group = Value::table(crate::Table::new(
-                    Some(data.iter().map(|&j| names[j].clone()).collect()),
-                    group_rows,
-                ));
+                let group = Value::table(
+                    crate::Table::new(
+                        Some(data.iter().map(|&j| names[j].clone()).collect()),
+                        group_rows,
+                    )
+                    .with_levels(t.levels),
+                );
                 let value = group_value(
                     host,
                     ext,
@@ -4001,7 +4195,8 @@ fn grouped_reduction<H: Host>(
         }
     }
     let n = key_cols.len();
-    crate::Table::typed(Some(header), rows, declared).map(|t| Value::table(t.with_index(n)))
+    crate::Table::typed(Some(header), rows, declared)
+        .map(|nt| Value::table(nt.with_index(n).with_levels(t.levels)))
 }
 
 fn of_values<H: Host>(
@@ -4189,7 +4384,6 @@ pub(crate) fn agg_command<H: Host>(
     outputs
         .into_iter()
         .map(|v| Thread::<H::Ext> {
-            window: None,
             prov: Prov::leaf(
                 inputs
                     .iter()
@@ -4274,11 +4468,18 @@ pub(crate) fn partition_by<H: Host>(
 /// capsa — by the tuple of the values when the selector names
 /// several — in first-appearance order (`partition_by`); the command
 /// run per partition exactly as `@|` runs it over the whole context;
-/// the folding regulae pushed on top of each answer in selector
-/// order, holding the group's values with the members' origins for
-/// them (deduplicated), and an answer standing on the node when a
-/// regula holds one (the last such in the selector). A position past
-/// the capsa is refused.
+/// the folding regulae staying where they were pushed, holding the
+/// group's values with the members' origins for them (deduplicated),
+/// and an answer standing on the node when a regula holds one (the
+/// last such in the selector). A position past the capsa is refused.
+///
+/// Nothing is pushed on the folded thread (ruling 2026-11-10). The
+/// regulae were pushed again on top of each answer, from the days a
+/// folded thread kept the context's common prefix and would have
+/// lost a key pushed after a per-row regula; a reduction keeps what
+/// its inputs share, the key among it, so the push doubled it:
+/// `| .g | .h(5) @|{.g} count | @.` answered `@(1; 5; 1)`, and the
+/// count of regulae was no longer the text's.
 pub(crate) fn fold_command<H: Host>(
     regs: &[RegRef],
     command: &Command,
@@ -4294,10 +4495,22 @@ pub(crate) fn fold_command<H: Host>(
     let mut pool: Vec<Option<Thread<H::Ext>>> = caps.into_iter().map(Some).collect();
     let mut out = Vec::new();
     for (k, (slots, members)) in groups.into_iter().enumerate() {
-        let members: Vec<Thread<H::Ext>> = members
+        let mut members: Vec<Thread<H::Ext>> = members
             .into_iter()
             .map(|i| pool[i].take().expect("each member in one partition"))
             .collect();
+        // Every member holds the group's value in its folding regula,
+        // with the members' origins for it: the values are one key
+        // (the partition's equality), and written alike they are one
+        // regula to the reduction that keeps what its inputs share.
+        for m in &mut members {
+            for (r, (value, _, origins)) in regs.iter().zip(&slots) {
+                if let Some(i) = crate::pipeline::register::recall_index(&m.register, r) {
+                    m.register[i].value = value.clone();
+                    m.register[i].prov = Prov::leaf(origins.clone());
+                }
+            }
+        }
         // the group's ordinal, for `$ord` in a reducing command
         let before = crate::pipeline::with_run(|s| s.fold_ordinal.replace(k + 1));
         let mut folded = apply_command_in(command, mode, members, host, trace, outer);
@@ -4306,17 +4519,9 @@ pub(crate) fn fold_command<H: Host>(
             Value::Node(n) => Some(crate::NodeId(n.id)),
             _ => None,
         });
-        for t in &mut folded {
-            if let Some(id) = node {
+        if let Some(id) = node {
+            for t in &mut folded {
                 t.ext = host.ext_at(id);
-            }
-            for (value, name, origins) in &slots {
-                t.register.push(Reg {
-                    name: name.clone(),
-                    value: value.clone(),
-                    prov: Prov::leaf(origins.clone()),
-                    site: host.origin_at(&t.ext),
-                });
             }
         }
         out.extend(folded);
@@ -4363,7 +4568,6 @@ pub(crate) fn seed_capsa<H: Host>(caps: &[Thread<H::Ext>], host: &H) -> Thread<H
         })
         .unzip();
     Thread::<H::Ext> {
-        window: None,
         prov: Prov::list(provs),
         register: shared_register(caps),
         topic: Some(Value::list(topics)),
@@ -4728,7 +4932,14 @@ fn is_read_option(name: &str) -> bool {
     let (base, _) = crate::syntax::parser::split_option_scope(name);
     matches!(
         base,
-        "--null" | "--locale" | "--autounits" | "--autounit" | "--slugs" | "--units" | "--unit"
+        "--null"
+            | "--locale"
+            | "--sci"
+            | "--autounits"
+            | "--autounit"
+            | "--slugs"
+            | "--units"
+            | "--unit"
     )
 }
 
@@ -4787,6 +4998,8 @@ fn table_read_options(
                 );
             }
             "--index" | "-i" => opts.th_index = false,
+            // `--sci`: the scientific reading of the cells
+            "--sci" => opts.sci = true,
             // `--autounits` every column, `--autounit=:col…` the named
             "--autounits" => opts.autounits = Some(Vec::new()),
             "--autounit" => {

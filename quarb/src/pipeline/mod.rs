@@ -83,9 +83,7 @@ impl<X: Attachment> Thread<X> {
     ) -> Scope<'a, X> {
         Scope {
             prov: Some(&self.prov),
-            register: &self.register[..self
-                .window
-                .map_or(self.register.len(), |w| w.min(self.register.len()))],
+            register: &self.register,
             members: &self.members,
             topic: self.topic.as_ref(),
             ordinal,
@@ -360,6 +358,12 @@ pub(crate) trait Host {
         ext: &Self::Ext,
         opts: &crate::graph::tabula::ReadOptions,
     ) -> Result<Table, String>;
+    /// Whether the thread stands in a mount opened under the
+    /// scientific reading (`?sci`): `clean` reads there as
+    /// `clean(--sci)` does.
+    fn scientific(&self, _ext: &Self::Ext) -> bool {
+        false
+    }
     /// The columns of the rows beside `ext`'s node where its source
     /// hands rows of one shape (a CSV mount's): a table built from
     /// them keeps that order.

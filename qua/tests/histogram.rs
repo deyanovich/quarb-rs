@@ -90,7 +90,7 @@ fn histogram_draws_the_bars() {
     let e = refuse("/n/*:: @| histogram(-x)");
     assert!(e.contains("'histogram' has no option '-x'"), "{e}");
     let e = refuse("/n/*:: @| histogram(--width=0)");
-    assert!(e.contains("at least 1"), "{e}");
+    assert!(e.contains("a number from 1 to 4096"), "{e}");
 }
 
 /// `count(--values)` / `-v` counts the non-null values, `count(--nulls)`

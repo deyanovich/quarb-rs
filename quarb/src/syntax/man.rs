@@ -47,6 +47,35 @@ pub fn options_of(name: &str) -> Option<Vec<&'static crate::syntax::signature::O
     Some(out)
 }
 
+/// Whether the inventory's row for the command as written (`edges`,
+/// `graph:closeness`) declares the long option `long` (`--harmonic`),
+/// in any of its forms. A library's rows are read too, which
+/// [`signatures`] leaves out: the parser asks this to tell a graph
+/// command's option from an undirected hop written first.
+pub fn declares_long(written: &str, long: &str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+    static LONGS: OnceLock<HashMap<String, Vec<String>>> = OnceLock::new();
+    LONGS
+        .get_or_init(|| {
+            let mut out: HashMap<String, Vec<String>> = HashMap::new();
+            for e in entries() {
+                let Ok(forms) = crate::syntax::signature::parse_cell(&e.synopsis) else {
+                    continue;
+                };
+                out.entry(e.written()).or_default().extend(
+                    forms
+                        .iter()
+                        .flat_map(|f| f.options.iter())
+                        .filter_map(|o| o.long.clone()),
+                );
+            }
+            out
+        })
+        .get(written)
+        .is_some_and(|longs| longs.iter().any(|l| l == long))
+}
+
 /// Whether the built-in's rows list `--of`, under the notation.
 pub fn takes_of_by_signature(name: &str) -> Option<bool> {
     options_of(name).map(|opts| opts.iter().any(|o| o.long.as_deref() == Some("--of")))

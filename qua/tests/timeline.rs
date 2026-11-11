@@ -106,7 +106,7 @@ fn the_point_is_carried_from_capsa_to_capsa() {
         ok(
             &dir,
             &[
-                "--table",
+                "--pretty",
                 "/paragraph | :: | timex(en) @| timeline($_) | %(:text; :kind; :when; :from)",
                 "text:story.txt"
             ]

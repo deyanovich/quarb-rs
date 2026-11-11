@@ -883,7 +883,8 @@ impl QueryArbor {
             Operand::Typed { inner, typing } => {
                 let word = match typing {
                     crate::Typing::Declared(t) => t.word().to_string(),
-                    crate::Typing::Star(_) => "*".to_string(),
+                    // a level is a header's, never a trait written
+                    crate::Typing::Star(_) | crate::Typing::Levels(_) => "*".to_string(),
                 };
                 self.walk_typed(inner, word, parent);
             }
@@ -891,6 +892,10 @@ impl QueryArbor {
             // node, its `type` the unit's word
             Operand::InUnit { inner, unit } => {
                 self.walk_typed(inner, format!("_{unit}"), parent);
+            }
+            // the offset trait as a value: its `type` the offset's word
+            Operand::InOffset { inner, minutes } => {
+                self.walk_typed(inner, crate::value::offset_spelling(*minutes), parent);
             }
             Operand::ValueMeta { base, key } => {
                 // `:%provenance` / `:@origin`: the shape sigil and
@@ -1997,6 +2002,13 @@ impl AstAdapter for ExpansionAdapter<'_> {
         Vec::new()
     }
 
+    fn backlinks_unsupported(&self, node: NodeId, label: Option<&str>) -> bool {
+        Self::is_data(node)
+            && self
+                .untag(node)
+                .is_some_and(|real| self.data.backlinks_unsupported(real, label))
+    }
+
     fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
         if Self::is_data(node) {
             return self
@@ -2152,7 +2164,7 @@ fn matcher_kind(m: &Matcher) -> &'static str {
     }
 }
 
-/// The `?` / `!` reach mark of a path-pattern group, `None` for the
+/// The `?` / `!` reach selector of a path-pattern group, `None` for the
 /// keep-all default.
 fn reach_mark(r: Reach) -> Option<&'static str> {
     match r {

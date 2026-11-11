@@ -221,6 +221,9 @@ impl AstAdapter for XlsxAdapter {
     fn backlinks(&self, node: NodeId) -> Vec<(String, NodeId)> {
         self.model.backlinks(node)
     }
+    fn backlinks_unsupported(&self, node: NodeId, label: Option<&str>) -> bool {
+        self.model.backlinks_unsupported(node, label)
+    }
     fn reverse_resolve(
         &self,
         node: NodeId,

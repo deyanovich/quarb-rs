@@ -218,11 +218,19 @@ pub(crate) struct RunState {
     /// such a path's predicates, where the predicate scope has no
     /// topic of its own.
     pub(crate) enclosing_topic: Vec<Value>,
+    /// The captures of the threads whose paths are being navigated,
+    /// innermost last (ruling 2026-11-10): what `$1`… and `%+`
+    /// answer inside such a path's predicates where the predicate
+    /// has made none of its own, as `$.name` there reads the
+    /// thread's regulae.
+    pub(crate) enclosing_captures: Vec<crate::pipeline::Captured>,
     /// The rows in reach, innermost last (ruling 2026-11-05): while a
     /// table projector's expression item or `map`'s body over a table
     /// evaluates, the row it evaluates for, the bare `:name` reading
-    /// its cell in that column.
-    pub(crate) row_in_reach: Vec<Value>,
+    /// its cell in that column. `None` is a frame with no row: a
+    /// path navigated inside such a body, whose predicates stand on
+    /// nodes and read a node's own fields ([`out_of_row_reach`]).
+    pub(crate) row_in_reach: Vec<Option<Value>>,
     /// The prefix the pipeline keeps right after the one branch's
     /// last step (`@| [..n]`, `@| [n]`, `@| first(n)`), computed once
     /// per top-level query (ruling 2026-11-05: a slice right after the
@@ -236,8 +244,13 @@ pub(crate) struct RunState {
     /// 9293, 2026-11-06); cleared when a top-level query starts.
     pub(crate) walk_captures: std::collections::HashMap<crate::NodeId, crate::pipeline::Captured>,
     /// The ordinal of the group a regula fold (`@|{.name}`) is
-    /// reducing, 1-based in the fold's order: what `$ord` reads in
-    /// the fold's reducing command, whose own scope has no position.
+    /// reducing, 1-based in the fold's order, while the fold's
+    /// command runs; `None` outside a fold, where a reducing command
+    /// stands for the one group there is. Read through
+    /// [`group_ordinal`] when a reducing command builds its seed's
+    /// scope, never by `$ord` itself, and set aside for the span of
+    /// a nested pipeline ([`fresh_group`]), whose own commands
+    /// reduce their own context.
     pub(crate) fold_ordinal: Option<usize>,
     /// Whether the hop in progress is that last step, with no test of
     /// its own that would thin the prefix after the adapter cut it.
@@ -282,6 +295,31 @@ thread_local! {
     static FINISHED: std::cell::RefCell<RunState> = std::cell::RefCell::new(RunState::default());
 }
 
+/// The ordinal of the group the reducing command now running stands
+/// for (spec: the fold by a regula; ruling 2026-11-10): the group's
+/// place in the fold's order under a fold, 1 where the command
+/// reduces the whole context. What `$ord` reads in a reducing
+/// command, in every position alike: the seed's scope carries it.
+pub(crate) fn group_ordinal() -> usize {
+    with_run(|s| s.fold_ordinal).unwrap_or(1)
+}
+
+/// A nested pipeline's own ground: the enclosing fold's ordinal is
+/// set aside until the guard drops, so a reducing command inside
+/// the nested pipeline stands for its own one group.
+pub(crate) struct FreshGroup(Option<usize>);
+
+pub(crate) fn fresh_group() -> FreshGroup {
+    FreshGroup(with_run(|s| s.fold_ordinal.take()))
+}
+
+impl Drop for FreshGroup {
+    fn drop(&mut self) {
+        let before = self.0;
+        with_run(|s| s.fold_ordinal = before);
+    }
+}
+
 /// Read or write the run in progress (the innermost), or the
 /// finished-run slot when nothing is running.
 pub(crate) fn with_run<R>(f: impl FnOnce(&mut RunState) -> R) -> R {
@@ -317,6 +355,12 @@ pub(crate) fn begin_run(options: Option<RunOptions>) -> RunGuard {
             diagnostics: Vec::new(),
             omitted: false,
             keying: 0,
+            cells: false,
+            cells_next: false,
+            untaken: Vec::new(),
+            surfaced: Default::default(),
+            presence: 0,
+            tested: Vec::new(),
         };
         runs.push(RunState {
             options,
@@ -347,7 +391,26 @@ impl Drop for RunGuard {
 /// the bare `:name` reads inside it (ruling 2026-11-05: a table
 /// projector's expression item, `map`'s body over a table).
 pub(crate) fn with_row_in_reach<R>(row: Value, f: impl FnOnce() -> R) -> R {
-    with_run(|s| s.row_in_reach.push(row));
+    with_run(|s| s.row_in_reach.push(Some(row)));
+    let out = f();
+    with_run(|s| {
+        s.row_in_reach.pop();
+    });
+    out
+}
+
+/// Run `f`, a navigation, with no row in reach: the predicates of a
+/// path stand on the path's nodes, and a bare `:name` there is the
+/// node's core field whatever row the enclosing body evaluates for.
+/// (The row is the run's, not the scope's, so a path nested in
+/// `map`'s body over a table read the row's cell in its predicate:
+/// `map((^/books/*[:name = "0"] @| count))` counted 0 or refused
+/// "no column 'name'" by the table's header.)
+pub(crate) fn out_of_row_reach<R>(f: impl FnOnce() -> R) -> R {
+    if with_run(|s| s.row_in_reach.last().is_none_or(Option::is_none)) {
+        return f();
+    }
+    with_run(|s| s.row_in_reach.push(None));
     let out = f();
     with_run(|s| {
         s.row_in_reach.pop();
@@ -360,18 +423,24 @@ pub(crate) fn with_row_in_reach<R>(row: Value, f: impl FnOnce() -> R) -> R {
 /// called `name` (for the refusal).
 pub(crate) fn row_field(name: &str) -> Option<Result<Value, Vec<String>>> {
     with_run(|s| {
-        s.row_in_reach.last().map(|r| match r {
-            Value::Record(f) => f
-                .get(name)
-                .cloned()
-                .ok_or_else(|| f.iter().map(|(k, _)| k.clone()).collect()),
-            _ => Err(Vec::new()),
-        })
+        s.row_in_reach
+            .last()
+            .and_then(Option::as_ref)
+            .map(|r| match r {
+                Value::Record(f) => f
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| f.iter().map(|(k, _)| k.clone()).collect()),
+                _ => Err(Vec::new()),
+            })
     })
 }
 
-/// Run `f` with `scope`'s topic (if any) reachable as `$_` inside
-/// the predicates of the paths it navigates (see `Operand::Topic`).
+/// Run `f`, the navigation of a path that `scope`'s expression
+/// holds, with what the path's predicates read of the thread that
+/// navigates it: its topic (if any) as `$_` (see `Operand::Topic`)
+/// and its captures (if any) as `$1`… and `%+`
+/// ([`enclosing_captures`]).
 pub(crate) fn with_enclosing_topic<X: Attachment, R>(
     scope: &Scope<'_, X>,
     f: impl FnOnce() -> R,
@@ -380,13 +449,53 @@ pub(crate) fn with_enclosing_topic<X: Attachment, R>(
     if let Some(t) = scope.topic {
         with_run(|s| s.enclosing_topic.push(t.clone()));
     }
-    let out = f();
+    let out = with_enclosing_captures(scope.captures, scope.named, f);
     if carried {
         with_run(|s| {
             s.enclosing_topic.pop();
         });
     }
     out
+}
+
+/// Run `f`, a navigation a thread makes, with the thread's captures
+/// in reach of the predicates on its way, and with a capture map of
+/// its own. The captures a step's pattern comparison makes are kept
+/// by node for the capsa made of the node; that map was one for the
+/// run, so a nested predicate read the stale capture of its
+/// candidate node (`/books/*[::t == (/^(\w)/)] | (^/books/*[$1 =
+/// "O"] @| count)` counted 1 on every thread), and the captures of a
+/// path nested in a predicate landed on the outer step's threads.
+/// The navigation's map is set aside for the span and put back.
+pub(crate) fn with_enclosing_captures<R>(
+    captures: &[String],
+    named: &[(String, String)],
+    f: impl FnOnce() -> R,
+) -> R {
+    let carried = !captures.is_empty() || !named.is_empty();
+    let outer_map = with_run(|s| {
+        if carried {
+            s.enclosing_captures
+                .push((captures.to_vec(), named.to_vec()));
+        }
+        std::mem::take(&mut s.walk_captures)
+    });
+    let out = f();
+    with_run(|s| {
+        s.walk_captures = outer_map;
+        if carried {
+            s.enclosing_captures.pop();
+        }
+    });
+    out
+}
+
+/// The captures a predicate reads where its scope holds none: those
+/// of the thread navigating the path it stands on (ruling
+/// 2026-11-10: a nested predicate sees the outer thread's captures,
+/// as it sees that thread's regulae).
+pub(crate) fn enclosing_captures<R>(f: impl FnOnce(Option<&crate::pipeline::Captured>) -> R) -> R {
+    with_run(|s| f(s.enclosing_captures.last()))
 }
 
 /// Run `f` under a fresh read frame and return what it read.

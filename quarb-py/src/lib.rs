@@ -307,12 +307,16 @@ fn open_boxed(path: &str, graft: bool, no_graft: bool) -> Result<Box<dyn AstAdap
 /// stem: `mount(["fleet.yaml", "cmdb.db"])` answers `/fleet/...`
 /// and `/cmdb/...`. A single path just [`open`]s (keeping its typed
 /// rendering). `graft` grafts parseable leaves under directory
-/// mounts; `no_graft` holds every boundary opaque. (`descend` is
-/// the pre-0.24 spelling of `graft`, kept as an alias.)
+/// mounts; `no_graft` holds every boundary opaque. (`descend`, the
+/// pre-0.24 spelling of `graft`, is refused with the pointer.)
 #[pyfunction]
 #[pyo3(signature = (paths, graft=false, no_graft=false, descend=false))]
 fn mount(paths: Vec<String>, graft: bool, no_graft: bool, descend: bool) -> PyResult<Document> {
-    let graft = graft || descend;
+    if descend {
+        return Err(PyValueError::new_err(
+            "descend= is retired: write graft=True",
+        ));
+    }
     if paths.is_empty() {
         return Err(PyValueError::new_err("mount needs at least one path"));
     }
@@ -626,7 +630,7 @@ impl Document {
                 .map(|v| match v {
                     Value::Record(_) => value_to_py(py, v),
                     other => Err(PyTypeError::new_err(format!(
-                        "records() expects record results (rec(...)); got {other}"
+                        "records() expects record results (a query ending in %(…)); got {other}"
                     ))),
                 })
                 .collect(),
@@ -634,6 +638,14 @@ impl Document {
                 "records() expects record results; the query returned nodes",
             )),
         }
+    }
+
+    /// Execute `query` and return the result lines as strings, as
+    /// the `qua` CLI renders them: the string-faithful layer
+    /// ([`run`], [`run_file`]) over a document already opened, so
+    /// `quarb.open(path).lines(query)` reads whatever `open` opens.
+    fn lines(&self, query: &str) -> PyResult<Vec<String>> {
+        render_lines(&self.doc, query, &self.session)
     }
 
     /// Execute `query` expecting a node result: the matched nodes'
@@ -749,7 +761,8 @@ fn load(path: PathBuf, format: Option<&str>) -> PyResult<Document> {
 ///
 /// - a directory mounts as a filesystem tree (`graft=True`
 ///   grafts parseable leaves — JSON, CSV, code, … — as subtrees;
-///   `descend=True` is the pre-0.24 spelling, kept as an alias);
+///   `descend=True`, the pre-0.24 spelling, is refused with the
+///   pointer);
 /// - `no_graft=True` disables grafting entirely: archive members
 ///   stay opaque entries (the tar -t view);
 /// - `.db` / `.sqlite` / `.sqlite3` opens SQLite;
@@ -767,7 +780,11 @@ fn load(path: PathBuf, format: Option<&str>) -> PyResult<Document> {
 #[pyfunction]
 #[pyo3(signature = (path, graft=false, no_graft=false, descend=false))]
 fn open(path: &str, graft: bool, no_graft: bool, descend: bool) -> PyResult<Document> {
-    let graft = graft || descend;
+    if descend {
+        return Err(PyValueError::new_err(
+            "descend= is retired: write graft=True",
+        ));
+    }
     let opts = quarb_open::OpenOpts {
         graft,
         no_graft,
@@ -849,7 +866,7 @@ fn defs_only(text: &str) -> PyResult<bool> {
 #[pyfunction]
 fn run(query: &str, input: &str, format: &str) -> PyResult<Vec<String>> {
     let doc = Doc::parse(input, format).map_err(PyValueError::new_err)?;
-    render_lines(&doc, query)
+    render_lines(&doc, query, &notebook_session())
 }
 
 /// Execute `query` against the file at `path`, inferring the
@@ -865,14 +882,11 @@ fn run_file(query: &str, path: PathBuf) -> PyResult<Vec<String>> {
     })?;
     let input = std::fs::read_to_string(&path)?;
     let doc = Doc::parse(&input, format).map_err(PyValueError::new_err)?;
-    render_lines(&doc, query)
+    render_lines(&doc, query, &notebook_session())
 }
 
-fn render_lines(doc: &Doc, query: &str) -> PyResult<Vec<String>> {
-    match doc
-        .execute(query, &notebook_session())
-        .map_err(PyValueError::new_err)?
-    {
+fn render_lines(doc: &Doc, query: &str, session: &quarb::SessionMemory) -> PyResult<Vec<String>> {
+    match doc.execute(query, session).map_err(PyValueError::new_err)? {
         QueryResult::Nodes(ns) => Ok(ns.into_iter().map(|n| doc.render(n)).collect()),
         QueryResult::Values(vs) => Ok(vs.into_iter().map(|v| v.display_form()).collect()),
     }

@@ -142,9 +142,15 @@ fn the_operand_of_a_conversion_must_be_a_known_unit() {
     // in a record item, where the silent null was found
     let e = refused("/rows/* | %(::id; size = convert(::size, KB))");
     assert!(e.contains("no unit 'KB'"), "{e}");
-    // a known unit of another dimension stays null, as the spec says
-    assert_eq!(one("= 548_B | convert(km)"), "null");
-    assert_eq!(one("= 5_km | unit(kg)"), "null");
+    // a known unit of another dimension is refused (ruling
+    // 2026-11-10; it answered null), under `unit(u)` as under
+    // `convert`
+    let e = refuse("= 548_B | convert(km)");
+    assert!(
+        e.contains("convert(km)") && e.contains("unlike (b and m)"),
+        "{e}"
+    );
+    assert!(refuse("= 5_km | unit(kg)").contains("unit(kg)"));
     // a value's unknown unit still reads as an opaque unit; the
     // operand alone must be known
     assert_eq!(one("= 3_apples/kg | dimension"), "apples/M");
@@ -237,7 +243,8 @@ fn an_undeclared_name_is_an_opaque_unit_through_the_underscore() {
     assert_eq!(one("= '12 EUR/kg' | quantity"), "12_EUR/kg");
     assert_eq!(one("= '12 EUR' | quantity | dimension"), "EUR");
     assert!(refuse("= ('12 EUR' | quantity) + ('3 USD' | quantity)").contains("unlike dimensions"));
-    assert_eq!(one("= ('12 EUR' | quantity) | convert(USD)"), "null");
+    // one currency into another is a rate's work (`exchange`)
+    assert!(refuse("= ('12 EUR' | quantity) | convert(USD)").contains("unlike (EUR and USD)"));
     assert_eq!(one("= '12 UAH' | quantity"), "12_UAH");
     assert_eq!(one("= '₦500' | quantity"), "500_NGN");
     assert_eq!(one("= '12 GEL' | quantity"), "12_GEL");
@@ -271,7 +278,7 @@ fn convert_keeps_an_opaque_factor_and_scales_the_rest() {
         one("= 12_EUR/kg | convert('EUR/lb') | round(3)"),
         "5.443_EUR/lb"
     );
-    assert_eq!(one("= 12_EUR/kg | convert('USD/lb')"), "null");
+    assert!(refuse("= 12_EUR/kg | convert('USD/lb')").contains("unlike"));
     assert_eq!(one("= 12_EUR | convert(EUR)"), "12_EUR");
 }
 
@@ -518,12 +525,12 @@ fn unit_magnitude_and_the_base_form() {
     assert_eq!(one("= 5 | unit"), "null");
     assert_eq!(one("= 5 | unit(km)"), "5_km");
     assert_eq!(one("= 5_km | unit(m)"), "5000_m");
-    assert_eq!(one("= 5_km | unit(kg)"), "null");
+    assert!(refuse("= 5_km | unit(kg)").contains("unlike (m and kg)"));
     assert_eq!(all("/rows/*::id | unit(B)"), "1_B | 2_B | 3_B");
     assert_eq!(one("= 5_km | magnitude"), "5");
     assert_eq!(one("= 1.5_h | magnitude"), "1.5");
     assert_eq!(one("= 1_km | magnitude(m)"), "1000");
-    assert_eq!(one("= 1_km | magnitude(kg)"), "null");
+    assert!(refuse("= 1_km | magnitude(kg)").contains("magnitude(kg)"));
     assert_eq!(one("= 'x' | magnitude"), "null");
     assert_eq!(one("= 5_km | convert"), "5000_m");
     assert_eq!(one("= 60_km/h | convert | round(3)"), "16.667_m/s");

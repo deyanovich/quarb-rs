@@ -125,6 +125,14 @@ impl Store {
 }
 
 fn main() -> Result<()> {
+    // A refusal is a message, as in qua: `RUST_BACKTRACE=1` is a
+    // panic's; an error's stack is asked for by `RUST_LIB_BACKTRACE=1`
+    // (the first statement, before any thread or error).
+    if std::env::var_os("RUST_LIB_BACKTRACE").is_none() {
+        unsafe {
+            std::env::set_var("RUST_LIB_BACKTRACE", "0");
+        }
+    }
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Crawl { source, into, base } => {

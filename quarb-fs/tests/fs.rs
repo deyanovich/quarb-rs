@@ -302,13 +302,15 @@ fn provenance_is_path_and_mtime() {
     // No dpid: the filesystem assigns none (null displays empty).
     assert_eq!(values("//guide.txt:dpid", &dir), vec![""]);
     // The composite carries source and instant only; the kaiv
-    // spelling prints the instant to the whole second.
+    // spelling prints the instant to the whole second, with its
+    // offset: an mtime is an epoch, so `Z` (ruling 2026-11-10).
     let composite = values("//guide.txt:provenance", &dir);
     let instant = values("//guide.txt:instant", &dir)[0].clone();
+    assert!(instant.ends_with('Z'), "{instant}");
     let expected = format!(
-        "?{}@{}",
+        "?{}@{}Z",
         root.join("docs/guide.txt").display(),
-        instant.split('.').next().unwrap()
+        instant.split('.').next().unwrap().trim_end_matches('Z')
     );
     assert_eq!(composite, vec![expected]);
 }

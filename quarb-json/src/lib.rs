@@ -1220,9 +1220,28 @@ impl JsonLines {
                     r.1 = u32::MAX;
                 }
             }
-            String::from_utf8(buf).ok()?
+            match String::from_utf8(buf) {
+                Ok(text) => text,
+                Err(_) => {
+                    quarb::record_refusal(format!(
+                        "line {} is not valid UTF-8; say the file's encoding with \
+                         ?encoding=LABEL",
+                        i + 1
+                    ));
+                    return None;
+                }
+            }
         };
-        let a = JsonAdapter::parse_lines_as(&text, self.reading).ok()?;
+        // A line that does not parse refuses the query, as the whole
+        // reading refuses the file: it answered a node of nulls
+        // under the root's locator.
+        let a = match JsonAdapter::parse_lines_as(&text, self.reading) {
+            Ok(a) => a,
+            Err(e) => {
+                quarb::record_refusal(format!("line {}: {e}", i + 1));
+                return None;
+            }
+        };
         let out = f(&a);
         *self.last.borrow_mut() = Some((i, a));
         Some(out)
@@ -1579,9 +1598,28 @@ impl JsonArray {
                     r.0.read_exact(&mut skip).ok()?;
                 }
             }
-            String::from_utf8(buf).ok()?
+            match String::from_utf8(buf) {
+                Ok(text) => text,
+                Err(_) => {
+                    quarb::record_refusal(format!(
+                        "element {} of the array is not valid UTF-8; say the file's encoding \
+                         with ?encoding=LABEL",
+                        i + 1
+                    ));
+                    return None;
+                }
+            }
         };
-        let a = JsonAdapter::parse_one_as(&text, i, self.reading).ok()?;
+        // An element that does not parse refuses the query, as the
+        // whole reading refuses the document (the same document
+        // under the streaming threshold): it answered nulls.
+        let a = match JsonAdapter::parse_one_as(&text, i, self.reading) {
+            Ok(a) => a,
+            Err(e) => {
+                quarb::record_refusal(format!("element {} of the array: {e}", i + 1));
+                return None;
+            }
+        };
         let out = f(&a);
         *self.last.borrow_mut() = Some((i, a));
         Some(out)

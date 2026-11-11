@@ -55,6 +55,70 @@ pub enum CsvError {
     DecimalLabel(String),
     #[error("reading the file: {0}")]
     Io(#[from] std::io::Error),
+    /// The file is not the UTF-8 the stream reads: the whole
+    /// reader's refusal, in its words.
+    #[error(transparent)]
+    Source(#[from] quarb::source::SourceError),
+}
+
+/// How many of a file's first lines decide whether it is written
+/// under another delimiter.
+const DELIMITER_LINES: usize = 32;
+
+/// The delimiter a file is written under where the decided one never
+/// stands in its header: a candidate that stands in the header and
+/// in every one of the first lines that say anything. Both readers
+/// ask this of the same first lines (ruling 2026-11-10): the whole
+/// reader looked at every line and the stream at thirty-two, so one
+/// of them could refuse a file the other read.
+fn other_delimiter(body: &str, delimiter: u8) -> Option<u8> {
+    let header = body.lines().next().unwrap_or("");
+    if header.as_bytes().contains(&delimiter) {
+        return None;
+    }
+    [b',', b';', b'\t', b'|'].into_iter().find(|&candidate| {
+        candidate != delimiter
+            && header.as_bytes().contains(&candidate)
+            && body
+                .lines()
+                .take(DELIMITER_LINES)
+                .filter(|l| !l.trim().is_empty())
+                .all(|l| l.as_bytes().contains(&candidate))
+    })
+}
+
+/// The offset of the first byte of `path` that is not UTF-8, read in
+/// chunks; `None` for a file that is UTF-8 throughout.
+fn first_invalid_utf8(path: &std::path::Path) -> std::io::Result<Option<usize>> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut buf = vec![0u8; 1 << 16];
+    // the bytes of a sequence cut by the chunk's end, carried over
+    let mut carried = 0usize;
+    let mut consumed = 0usize;
+    loop {
+        let n = file.read(&mut buf[carried..])?;
+        if n == 0 {
+            // a sequence left unfinished at the end of the file
+            return Ok((carried > 0).then_some(consumed));
+        }
+        let have = carried + n;
+        match std::str::from_utf8(&buf[..have]) {
+            Ok(_) => {
+                consumed += have;
+                carried = 0;
+            }
+            Err(e) => match e.error_len() {
+                Some(_) => return Ok(Some(consumed + e.valid_up_to())),
+                None => {
+                    let good = e.valid_up_to();
+                    buf.copy_within(good..have, 0);
+                    consumed += good;
+                    carried = have - good;
+                }
+            },
+        }
+    }
 }
 
 /// How a delimited file is read: the options a mount carries
@@ -187,23 +251,12 @@ impl CsvAdapter {
             None => (text, None),
         };
         let delimiter = options.delimiter.or(declared).unwrap_or(by_extension);
-        let header = text.lines().next().unwrap_or("");
-        if !header.as_bytes().contains(&delimiter) {
-            for candidate in [b',', b';', b'\t', b'|'] {
-                if candidate != delimiter
-                    && header.as_bytes().contains(&candidate)
-                    && text
-                        .lines()
-                        .filter(|l| !l.trim().is_empty())
-                        .all(|l| l.as_bytes().contains(&candidate))
-                {
-                    return Err(CsvError::Delimiter {
-                        decided: delimiter as char,
-                        found: candidate as char,
-                        name: delimiter_name(candidate),
-                    });
-                }
-            }
+        if let Some(candidate) = other_delimiter(text, delimiter) {
+            return Err(CsvError::Delimiter {
+                decided: delimiter as char,
+                found: candidate as char,
+                name: delimiter_name(candidate),
+            });
         }
         Ok(Self::read(
             text,
@@ -361,6 +414,19 @@ impl AstAdapter for CsvAdapter {
         Some(self.columns.clone())
     }
 
+    /// The header is every property a row has; what links the rows
+    /// is another layer's to say.
+    fn surface(&self, node: NodeId) -> Option<quarb::Surface> {
+        if node.0 == 0 {
+            return None;
+        }
+        Some(quarb::Surface {
+            container: "/row".to_string(),
+            properties: Some(self.columns.clone()),
+            labels: None,
+        })
+    }
+
     fn row_text(&self, node: NodeId, f: &mut dyn FnMut(&[&str])) -> bool {
         let Some(row) = (node.0 as usize)
             .checked_sub(1)
@@ -514,24 +580,27 @@ impl CsvStream {
         };
         let delimiter = options.delimiter.or(declared).unwrap_or(by_extension);
         let body = &head[(data_start - bom) as usize..];
-        let header_line = body.lines().next().unwrap_or("");
-        if !header_line.as_bytes().contains(&delimiter) {
-            for candidate in [b',', b';', b'\t', b'|'] {
-                if candidate != delimiter
-                    && header_line.as_bytes().contains(&candidate)
-                    && body
-                        .lines()
-                        .take(32)
-                        .filter(|l| !l.trim().is_empty())
-                        .all(|l| l.as_bytes().contains(&candidate))
-                {
-                    return Err(CsvError::Delimiter {
-                        decided: delimiter as char,
-                        found: candidate as char,
-                        name: delimiter_name(candidate),
-                    });
-                }
-            }
+        // a line the head cut short is not one of the first lines
+        let body = if size > head.len() as u64 + bom && !body.ends_with('\n') {
+            body.rsplit_once('\n').map_or(body, |(whole, _)| whole)
+        } else {
+            body
+        };
+        if let Some(candidate) = other_delimiter(body, delimiter) {
+            return Err(CsvError::Delimiter {
+                decided: delimiter as char,
+                found: candidate as char,
+                name: delimiter_name(candidate),
+            });
+        }
+        // The stream reads UTF-8 and answers rows by their offsets:
+        // a byte that is not UTF-8 is refused here as the whole
+        // reader refuses it. (The scan below counts byte records and
+        // never looked, so such a row read as null and the table of
+        // the rows came out with that row gone and the next one
+        // twice.)
+        if let Some(offset) = first_invalid_utf8(path)? {
+            return Err(quarb::source::SourceError::NotUtf8 { offset }.into());
         }
         let mut file = std::fs::File::open(path)?;
         file.seek(std::io::SeekFrom::Start(data_start))?;
@@ -600,14 +669,21 @@ impl CsvStream {
         // record; any other, the reader seeks the file to its offset
         // (the file's, whatever the open skipped — a BOM, a `sep=`
         // line) and reads the one record there
+        // a read that fails leaves no row held and no next row known
+        let lost = |last: &mut (u64, csv::StringRecord)| {
+            self.next.set(0);
+            last.0 = 0;
+        };
         if self.next.get() != id {
             let mut pos = csv::Position::new();
             pos.set_byte(offset);
-            reader.seek(pos).ok()?;
+            if reader.seek(pos).is_err() {
+                lost(&mut last);
+                return None;
+            }
         }
-        if !reader.read_record(&mut last.1).ok()? {
-            self.next.set(0);
-            last.0 = 0;
+        if !matches!(reader.read_record(&mut last.1), Ok(true)) {
+            lost(&mut last);
             return None;
         }
         self.next.set(id + 1);
@@ -731,7 +807,11 @@ impl AstAdapter for CsvStream {
             self.columns
                 .iter()
                 .zip(r.iter())
-                .filter(|(_, v)| !v.is_empty())
+                // a missing value is an empty cell or a text the
+                // `null=` option names, as `cell` reads it: the
+                // stream's record reading kept "NA" where the whole
+                // reader, and `::note` here, left the field out
+                .filter(|(_, v)| !v.is_empty() && !self.nulls.iter().any(|n| n == v))
                 .map(|(c, v)| (c.clone(), Value::Str(self.canonical(v))))
                 .collect()
         })
@@ -740,6 +820,19 @@ impl AstAdapter for CsvStream {
 
     fn row_columns(&self, _node: NodeId) -> Option<Vec<String>> {
         Some(self.columns.clone())
+    }
+
+    /// The header is every property a row has; what links the rows
+    /// is another layer's to say.
+    fn surface(&self, node: NodeId) -> Option<quarb::Surface> {
+        if node.0 == 0 {
+            return None;
+        }
+        Some(quarb::Surface {
+            container: "/row".to_string(),
+            properties: Some(self.columns.clone()),
+            labels: None,
+        })
     }
 
     /// The row's cells from the record as parsed, borrowed — the

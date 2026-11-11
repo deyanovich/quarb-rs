@@ -579,7 +579,7 @@ impl AstAdapter for AzlAdapter {
                 return Some(Value::Instant {
                     secs: row.secs,
                     nanos: row.nanos,
-                    offset_min: None,
+                    offset_min: Some(0),
                     calendar: Default::default(),
                 });
             }

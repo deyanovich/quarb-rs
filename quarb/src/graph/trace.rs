@@ -459,7 +459,7 @@ impl<'a, A: AstAdapter> Tracer<'a, A> {
         let mut ordinal = 0i64;
         for th in prev {
             let Some(u) = th.node else {
-                return Err(unsupported("a hop after an aggregate"));
+                return Err(unsupported("a hop after the aggregation pipe"));
             };
             let cands = self.nav(u, &bare);
             let surv: Vec<NodeId> = self.nav(u, &full).into_iter().map(|(n, _)| n).collect();
@@ -556,7 +556,7 @@ impl<'a, A: AstAdapter> Tracer<'a, A> {
         let mut walks: Vec<Walk> = Vec::new();
         for th in prev {
             let Some(u) = th.node else {
-                return Err(unsupported("a walk after an aggregate"));
+                return Err(unsupported("a walk after the aggregation pipe"));
             };
             walks.push(Walk {
                 driver: th.clone(),
@@ -679,7 +679,7 @@ impl<'a, A: AstAdapter> Tracer<'a, A> {
         let mut next = Vec::new();
         for th in prev {
             let Some(u) = th.node else {
-                return Err(unsupported("a projection after an aggregate"));
+                return Err(unsupported("a projection after the aggregation pipe"));
             };
             next.push(Th {
                 topic: Some(project(self.adapter, u, p)),
@@ -696,7 +696,7 @@ impl<'a, A: AstAdapter> Tracer<'a, A> {
                 let mut next = Vec::new();
                 for (i, th) in prev.iter().enumerate() {
                     let Some(u) = th.node else {
-                        return Err(unsupported("a filter after an aggregate"));
+                        return Err(unsupported("a filter after the aggregation pipe"));
                     };
                     let caps = vec![Capsa::bare(GraphExt::at(u), th.topic.clone())];
                     let out = apply_command(st, caps, self.adapter, &trace, None);
@@ -727,7 +727,7 @@ impl<'a, A: AstAdapter> Tracer<'a, A> {
                     .iter()
                     .map(|th| match th.node {
                         Some(u) => Ok(Capsa::bare(GraphExt::at(u), th.topic.clone())),
-                        None => Err(unsupported("an aggregate push after an aggregate")),
+                        None => Err(unsupported("an aggregate push after the aggregation pipe")),
                     })
                     .collect::<Result<_>>()?;
                 let out = apply_command(st, caps, self.adapter, &trace, None);
@@ -756,13 +756,13 @@ impl<'a, A: AstAdapter> Tracer<'a, A> {
                     .iter()
                     .map(|th| match th.node {
                         Some(u) => Ok(Capsa::bare(GraphExt::at(u), th.topic.clone())),
-                        None => Err(unsupported("an aggregate of an aggregate")),
+                        None => Err(unsupported("a second aggregation pipe")),
                     })
                     .collect::<Result<_>>()?;
                 let out = apply_command(st, caps, self.adapter, &trace, None);
                 if out.len() != 1 {
                     return Err(unsupported(format!(
-                        "aggregate `{name}` yielding {} capsae",
+                        "`{name}` after the aggregation pipe yielding {} capsae",
                         out.len()
                     )));
                 }
@@ -790,7 +790,7 @@ impl<'a, A: AstAdapter> Tracer<'a, A> {
                 let mut next = Vec::new();
                 for th in prev {
                     let Some(u) = th.node else {
-                        return Err(unsupported("a command after an aggregate"));
+                        return Err(unsupported("a command after the aggregation pipe"));
                     };
                     let caps = vec![Capsa::bare(GraphExt::at(u), th.topic.clone())];
                     let out = apply_command(other, caps, self.adapter, &trace, None);
@@ -1191,8 +1191,10 @@ pub fn trace<A: AstAdapter>(
 
     // Tables.
     let mode_of = |s: &Snap| {
+        // the spec's two execution modes, by their names (the
+        // contract said `scalar` through 0.0-draft.1)
         if s.live.iter().any(|t| t.topic.is_some()) {
-            "scalar"
+            "value"
         } else {
             "navigation"
         }

@@ -1195,13 +1195,26 @@ root-anchored sequence of hops, each an axis followed by a name:
     proximal/distal suffixes, the pattern dot wildcard, and the
     bare-operator sugar. A set walk (an open quantifier with a
     floor of at most one, under all matches or the proximal reach,
-    no push or mark) reaches each node once, at the fewest rounds,
-    and runs to its fixpoint; every other walk is exact, one acyclic
-    walk per history (no node revisited within one walk, the anchor
-    included), its rounds capped by the adapter's quantifier bound
-    (default 32; \texttt{--quantifier-bound} overrides). Both are
-    capped by the frontier bound on the paths in flight per round
-    (default 100\,000; \texttt{--frontier-bound}) \\
+    no push or mark, every alternative one step, a guard that does
+    not read the walk: \texttt{set\_form},
+    \texttt{guard\_reads\_walk}) reaches each node once, at the
+    fewest rounds, and runs to its fixpoint; every other walk is
+    exact, one acyclic walk per history (no node revisited within
+    one walk, the anchor included), its rounds capped by the
+    adapter's quantifier bound (default 32;
+    \texttt{--quantifier-bound} overrides). Both are capped by the
+    frontier bound on the paths in flight per round (default
+    100\,000; \texttt{--frontier-bound}). Under a budget the
+    proximal reach keeps the survivors of least total, the tie set,
+    as the distal keeps those of greatest (ruling 2026-11-10). The
+    search by total, least first and each node settled once, runs
+    where it is exact (\texttt{by\_total} in
+    \texttt{expand\_group}: one brace, no floor, a rule other than
+    \texttt{min}, one-step alternatives that record nothing, a
+    guard that reads the node alone) and ends at the first total
+    past the answer's; any other form runs the exact walk and keeps
+    its lightest survivors. A walk cut at the quantifier bound below
+    the answer's total refuses \\
 \texttt{| upper}, \texttt{@| count}, \texttt{| .n}, \texttt{| \$.n}
   & \live per-capsa transform, whole-context aggregation, register
     push and recall \\
@@ -1213,8 +1226,11 @@ root-anchored sequence of hops, each an axis followed by a name:
     positional selection, and per-capsa filters \\
 \texttt{| .k(::k) @|{.k} top(2, ::v)}, \texttt{\$ord}
   & \live the fold by a regula (one partition per value of the
-    pushed key, the command per partition, the key on top of each
-    folded thread; \texttt{group} retired 2026-11-04),
+    pushed key, the command per partition; nothing is pushed on the
+    folded thread, the folding regula stays where it was pushed and
+    a reduction keeps it with what its inputs share, each member
+    holding the group's value there, ruling 2026-11-10;
+    \texttt{group} retired 2026-11-04),
     \texttt{ungroup} for windows, and the \texttt{\$ordinal} operand
     (position in the current context, scope-threaded into filters) \\
 \texttt{| \%.}, \texttt{qua q.quarb}
@@ -1253,6 +1269,25 @@ root-anchored sequence of hops, each an axis followed by a name:
     reflection kinds \texttt{cmd} (né \texttt{func}),
     \texttt{agg-push}, \texttt{agg-record}, \texttt{agg-recall},
     \texttt{seed}, \texttt{option} \\
+\texttt{| \&\$.f}, \texttt{| \&\$.f!}, \texttt{| \&\$.f\#}
+  & \live the held quarq spliced and applied (spec: Quarqs, the held
+    quarq's appliers; rulings 2026-11-10). \texttt{\&\$.f} is the
+    body written in place: where every thread of the context holds
+    the same quarq (the bodies one object, or one canonical text)
+    it runs once over the whole context, so \texttt{@\_} and an
+    aggregation inside it see what they would see written there;
+    threads holding different quarqs, or a projector, are read each
+    on its own. \texttt{\&\$.f!} and \texttt{\&\$.f\#} apply per
+    thread on the capsa as it stood before the regula holding the
+    quarq: the body's thread carries that capsa as its register
+    (the applying register is put back after the body, the body's
+    own pushes appended), so every command of the body reads it and
+    the body sees what it pushed. There is no window mark on the
+    thread. \texttt{\#} starts from the topic and the position of
+    the push (\texttt{Reg::site}, \texttt{Reg::placed}; an unplaced
+    push photographs no position) and returns to the applying
+    position unless the body walked. Tests:
+    \texttt{qua/tests/review\_1110.rs}, \texttt{qua/tests/quarq.rs} \\
 \texttt{qua '…| sh:tr(a-z; A-Z) @| go:sort(-r)' go=exec:~/go/bin sh=shell:}
   & \live environment commands (\texttt{quarb::env}): an
     environment is a namespace of commands the host mounts beside
@@ -1743,6 +1778,94 @@ root-anchored sequence of hops, each an axis followed by a name:
     a list of texts the same way (\texttt{clean\_text}). The column
     names ride unevaluated, as \texttt{autocast}'s do. Tests:
     \texttt{qua/tests/document\_tables.rs}. \\
+\texttt{AstAdapter::surface}; \texttt{UNKNOWN\_LABEL}, \texttt{UNKNOWN\_PROPERTY}
+  & \live a name the surface a source declares lacks is told (the
+    user's ruling of 2026-11-10: a misspelled label or property was
+    silent). An adapter that declares every property its members
+    have and every label that leaves or reaches them answers
+    \texttt{surface(node)} for a member \texttt{node}: \texttt{Surface
+    \{ container, properties, labels \}}, each list whole or
+    \texttt{None} where that side is open. quarb-relational answers,
+    for a row, its table's columns and the labels of its keys and of
+    the keys that point at it; quarb-csv, for a row, the header, the
+    labels open; quarb-model the base's properties with its own
+    declared ones, the labels open (a model's edge is labeled as it
+    declares); the mount and compose forward to the adapter that
+    owns the node and name the container from their own root
+    (\texttt{Surface::under}: \texttt{/db/employees}), the forwarding
+    macro to its inner one; the autounits wrapper stays open, its
+    names being the renamed ones. The default is \texttt{None}, a
+    source that declares nothing (JSON, a document store, the
+    filesystem), of which nothing is said; so is a node that is no
+    member (the table itself, a cell). The word is ``declared'', not
+    ``closed'': a closed surface is the other thing, an adapter
+    whose properties document content cannot grow. Two places ask,
+    through \texttt{steps::unknown\_property} and
+    \texttt{unknown\_label}: the one projection, for a projection
+    and a predicate that read a property null (\texttt{project}),
+    and a link hop whose named label no link of the node carries
+    (\texttt{link\_edges}; the navop wildcard is not asked, its
+    name being a child's or the parent's as well). A warning, so it
+    prints by default and the exit stays 0; once per declaring
+    container and name (\texttt{ambient::surface\_asked}; a source
+    that declares nothing is not recorded, its containers being as
+    many as its nodes), the names there listed, the nearest first
+    where they are many. No answer changes. Tests:
+    \texttt{qua/tests/surface.rs} \\
+\texttt{agreed\_keys}; \texttt{INDEX\_CAST}, \texttt{TRANSPOSE\_CAST}
+  & \live two indexes that meet agree on a type, level by level,
+    before any label is compared (the user's rulings of 2026-11-10):
+    a declared index wins and the other side's labels are cast to it
+    (a label that does not cast refuses naming it), two undeclared
+    are upcast to the least type every label of the two reads as,
+    two declared are the same type or an integer with a float, which
+    meet as floats, any other pair refused naming both. One helper,
+    \texttt{stdlib::agreed\_keys(command, t, u, pairs)}, asked by
+    every aligning form before it matches: the append by label and
+    the rows under one header (\texttt{++}, \texttt{++!}), an
+    operator between two indexed tables, \texttt{correlate}. It
+    answers the two tables with their key columns cast
+    (\texttt{Table::with\_column}), or nothing where nothing
+    changes, so a caller calls itself again on what it answers.
+    Where labels are cast it tells so, an info \texttt{INDEX\_CAST}
+    naming the command, the two indexes, their types and what they
+    became; a transposition that brings the cells of columns of
+    several kinds to one tells \texttt{TRANSPOSE\_CAST}
+    (\texttt{transpose\_cast\_told}). Both once per run for one
+    text (\texttt{ambient::record\_info\_once}). Tests:
+    \texttt{qua/tests/review\_1110.rs} \\
+\texttt{Table::levels}; \texttt{unstack}, \texttt{transpose}, \texttt{stack}, \texttt{t:bar}
+  & \live a colon in a source's column title is one name until a
+    command makes levels (ruling 2026-11-10; any colon was a level,
+    so the title \texttt{Time (HH:MM)} nested every row under
+    \texttt{Time (HH}). The levels are a mark on the table,
+    \texttt{Table::levels}: false on every table read from a source
+    or built from records (the builder, \texttt{Table::typed},
+    \texttt{Table::new}, \texttt{Table::assemble}); set by
+    \texttt{unstack} over several data columns (the paths
+    \texttt{column:value}), by the transpose of a composite index
+    (\texttt{label\_name} joins the levels) and by a literal whose
+    header writes a path, \texttt{\#(@(bar:A; bar:B; baz); …)}
+    (\texttt{header\_names} reads the segments glued by colons, a
+    word or a quoted name each; \texttt{Operand::Table} carries
+    \texttt{levels}); a quoted name alone is one name. The printers
+    write a levelled column as its path and a name with a colon
+    quoted (\texttt{header\_spelling}, in \texttt{to\_quarb} and
+    the unparser), so both read back. The mark is one per table: in
+    a header with levels every colon is a level, and the three
+    makers refuse a colon inside a segment by name (the literal, a
+    path beside a quoted name that holds one; \texttt{unstack}, a
+    title or a label; the transpose, a label). Read by
+    \texttt{header\_has\_levels} (the
+    row and column readings nest by level only then), by
+    \texttt{sub\_columns} (\texttt{t:bar}), by \texttt{stack} and
+    by the transpose's split of the old names. Every rebuild from a
+    table carries the mark with the index and the name
+    (\texttt{with\_levels} beside \texttt{with\_index} and
+    \texttt{with\_name}): a new site that builds a table from
+    another's header chains it, or the levels read as names from
+    there on. Tests: \texttt{qua/tests/review\_1110.rs}
+    (\texttt{a\_colon\_in\_a\_sources\_title\_is\_one\_name}). \\
 \texttt{\#(--autounits)}, \texttt{\#(--autounit=:col…)}, \texttt{\#(--slugs[=sep])}; the same on \texttt{clean}; \texttt{?autounits}, \texttt{?slugs} on a target; \texttt{quarb::autounits::title\_plan}
   & \live the title rules (the header-units round, ruling
     2026-11-09): a unit at the end of a column title — \texttt{(u)},
@@ -1989,10 +2112,18 @@ root-anchored sequence of hops, each an axis followed by a name:
     \texttt{Operand::Topic}; the parser's
     \texttt{projector\_items\_ahead}); a record shape over a list of
     records reads each item; the web planner keeps its prefilter
-    rung under such a projector. The finishers that read a number
-    leave a value with no numeric coercion unchanged wherever they
-    broadcast (\texttt{numeric\_or\_same}), so a text column of a
-    table survives \texttt{| round(3)}. Beside them: a web
+    rung under such a projector. The numeric commands (the
+    rounders, \texttt{abs}, the logarithms, \texttt{exp},
+    \texttt{sqrt}, \texttt{pow}) leave a cell of a kind they do not
+    take as it is wherever they broadcast, so a text column of a
+    table survives \texttt{| round(3)} and \texttt{| sqrt}; a lone
+    value of such a kind answers null, and the run warns once for
+    the command, counting the values (\texttt{NOT\_NUMERIC}; ruling
+    2026-11-10). The rule is decided in \texttt{apply\_scalar}
+    (\texttt{untaken}); the count rides the ambient
+    (\texttt{record\_untaken}), and \texttt{map} marks its body's
+    commands as standing on a cell (\texttt{mark\_cells}, taken by
+    the nested pipeline's \texttt{cells\_ground}). Beside them: a web
     \texttt{<dir>} row answers \texttt{::name}, and a page reference
     held in a value prints its arbor path (a root-only provenance
     path falls back to the name path) \\
@@ -2175,6 +2306,20 @@ pub trait AstAdapter {
     fn backlink_rows(&self, _node: NodeId)
         -> Vec<(String, NodeId, Option<NodeId>)> { … }
 
+    /// Whether the links into `node` are ones this source cannot
+    /// walk back: it answers `links` and provides no `backlinks`
+    /// (a document store whose references live in the referring
+    /// documents). The engine then refuses the hop that needs the
+    /// backward direction (`<-`, `--`, the navop wildcard, `edges`
+    /// over any of them) rather than answer an empty set that
+    /// would read as "nothing points here". `label` is the one
+    /// label the hop names, `None` for a wildcard, a pattern or a
+    /// selection: a layer that walks some labels back itself (a
+    /// model's declared references) answers for those and hands
+    /// the rest down. A source with no links at all says no.
+    fn backlinks_unsupported(&self, _node: NodeId, _label: Option<&str>)
+        -> bool { false }
+
     /// Whether the link from `source` under `label` is a reference
     /// an edge declaration consumed: a bare wildcard hop (`->*`,
     /// `<-*`, `--*`, the crosslink part of `~`) skips it, the label
@@ -2299,6 +2444,12 @@ pub trait AstAdapter {
     /// `node` belongs to: a source whose rows are records of one
     /// shape (a CSV's) names them; `None` where they have no one shape.
     fn row_columns(&self, _node: NodeId) -> Option<Vec<String>> { None }
+    /// The surface the source declares for the container `node` is
+    /// a member of (ruling 2026-11-10): the properties its members
+    /// have and the labels that leave or reach them, where the
+    /// source declares them all (a table's columns and keys, a
+    /// CSV's header). `None` is a source that declares nothing.
+    fn surface(&self, _node: NodeId) -> Option<Surface> { None }
     /// The node `node` stands for (identity is intrinsic, ruling
     /// 2026-11-06): a model's role node answers the source it aliases.
     fn intrinsic(&self, node: NodeId) -> NodeId { node }
@@ -2788,6 +2939,7 @@ nothing about encodings.
   (\texttt{quarb-maildir}).
 \end{itemize}
 
+\noindent
   \texttt{bibref(STANDARD)} (\texttt{quarb::bibref}) reads one
   reference text under a citation standard — \texttt{gost},
   \texttt{gb7714}, \texttt{cmos}, \texttt{ams}, an open tag set

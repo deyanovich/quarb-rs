@@ -33,7 +33,7 @@ def test_mount_and_query(shell, tmp_path_factory):
     r = shell.run_line_magic("quarb", "/tracks/1::artist_id-->::name")
     assert r.values == ["Holst"]
     # a query closing in a drawing renders rich, as a table does
-    r = shell.run_line_magic("quarb", "/tracks/* @| tree(0; -k)")
+    r = shell.run_line_magic("quarb", "/tracks/* @| tree(-d=0 -k)")
     html = r._repr_html_()
     assert "quarb-tree" in html and "expand all" in html and "<details" in html
     assert repr(r).startswith("/ <database>")

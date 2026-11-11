@@ -526,6 +526,16 @@ impl AstAdapter for DatastoreAdapter {
         self.entity_node(&kind, &key)
     }
 
+    /// The links are read off the node they leave, and nothing here
+    /// records what points at an entity: the hop back is refused rather
+    /// than answered empty (spec: The adapter contract).
+    fn backlinks_unsupported(&self, node: NodeId, _label: Option<&str>) -> bool {
+        matches!(
+            self.nodes.borrow()[node.0 as usize].kind,
+            Kind::Entity { .. }
+        )
+    }
+
     /// Every key property is an outgoing crosslink, labeled by the
     /// property name.
     fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {

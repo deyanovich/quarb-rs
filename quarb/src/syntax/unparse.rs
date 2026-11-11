@@ -30,18 +30,7 @@ pub fn unparse(query: &Query) -> String {
         && query.correlations.is_empty()
         && let Some((Command::Expr(head), rest)) = query.pipeline.split_first()
     {
-        // the stage projector on the topic prints bare after a pipe
-        // (`| %(:a; :b)`); lifted to the head it needs its base, or
-        // it reads back as the record constructor
-        let printed = operand(head);
-        let printed = if printed.starts_with("%(")
-            && matches!(head, Operand::Projected { base, .. } if matches!(**base, Operand::Topic))
-        {
-            format!("$_:{printed}")
-        } else {
-            printed
-        };
-        let mut out = format!("= {printed}");
+        let mut out = format!("= {}", operand(head));
         for command_ast in rest {
             out.push(' ');
             out.push_str(&command(command_ast));
@@ -239,8 +228,22 @@ pub(crate) fn group(g: &Group) -> String {
         .iter()
         .map(|alt| alt.iter().map(elem).collect())
         .collect();
-    let mut quant = quant_text(&g.quant);
-    for q in &g.more {
+    // A count before a further brace prints as its brace: `{1}`
+    // printed as nothing and `{1;}` as `+`, so `(->x){1}{;5_km}`,
+    // one hop within five kilometres, came back as any number of
+    // hops, and `(->x){1;}{;5_km}` as `+{;5_km}`, which the parser
+    // refuses ("a brace never follows '+' or '*'").
+    let mut quant = if g.more.is_empty() {
+        quant_text(&g.quant)
+    } else {
+        quant_brace(&g.quant)
+    };
+    // a reach selector written directly after a brace before the last
+    // (`{…}?{…}`), where the group has any
+    for (i, q) in g.more.iter().enumerate() {
+        if let Some(mark) = g.marks.get(i) {
+            quant.push_str(reach_mark(mark));
+        }
         quant.push_str(&quant_text(q));
     }
     let preds: String = g.predicates.iter().map(predicate).collect();
@@ -276,6 +279,21 @@ pub(crate) fn quant_text(q: &Quant) -> String {
         (m, Some(n)) if m == n => format!("{{{m}}}"),
         (m, Some(n)) => format!("{{{m};{n}}}"),
         (m, None) => format!("{{{m};}}"),
+    }
+}
+
+/// [`quant_text`] where the brace must stand: the count forms that
+/// print as nothing, `+` or `*` on their own print as `{1}`, `{1;}`
+/// and `{0;}`.
+fn quant_brace(q: &Quant) -> String {
+    if q.budget.is_some() {
+        return quant_text(q);
+    }
+    let rule = q.rule.map(|r| format!("{}:", r.name())).unwrap_or_default();
+    match (q.min, q.max) {
+        (m, Some(n)) if m == n => format!("{{{rule}{m}}}"),
+        (m, Some(n)) => format!("{{{rule}{m};{n}}}"),
+        (m, None) => format!("{{{rule}{m};}}"),
     }
 }
 
@@ -652,6 +670,11 @@ pub(crate) fn pred_expr(e: &PredExpr) -> String {
             _ => format!("!{}", parens(&pred_expr(a))),
         },
         PredExpr::Compare(l, op, r) => {
+            // a side that is a coalescence keeps its parentheses: `??`
+            // holds looser than a comparison, so `(::m ?? "-") = "-"`
+            // printed as `::m ?? "-" = "-"`, which does not read back
+            // (met by the corpus of 2026-11-10)
+            let side = |o: &Operand| held(o, ARITH);
             // Ruling #33: the canonical spelling of a literal
             // substring test is the pattern form — `*= "x"` prints
             // as `== *"x"*`. A dynamic right operand keeps `*=`
@@ -661,7 +684,7 @@ pub(crate) fn pred_expr(e: &PredExpr) -> String {
             {
                 let pat =
                     Operand::Pattern(vec![PatSeg::Star, PatSeg::Lit(t.clone()), PatSeg::Star]);
-                return format!("{} == {}", operand(l), operand(&pat));
+                return format!("{} == {}", side(l), operand(&pat));
             }
             // A pattern literal is a pattern comparison however it
             // was spelled (`= *"x"*` is heritage): `==` / `!==`.
@@ -669,7 +692,7 @@ pub(crate) fn pred_expr(e: &PredExpr) -> String {
                 && matches!(op, CmpOp::Eq | CmpOp::Ne)
             {
                 let eq = if matches!(op, CmpOp::Eq) { "==" } else { "!==" };
-                return format!("{} {} {}", operand(l), eq, operand(r));
+                return format!("{} {} {}", side(l), eq, operand(r));
             }
             // A match's literal pattern prints as `== (/x/i)` /
             // `!== (/x/i)`; a dynamic pattern (a non-literal right
@@ -677,9 +700,9 @@ pub(crate) fn pred_expr(e: &PredExpr) -> String {
             if matches!(op, CmpOp::Match | CmpOp::NotMatch)
                 && let Operand::Lit(Value::Str(t)) = r
             {
-                return format!("{} {} {}", operand(l), cmp(*op), regex_literal(t, true));
+                return format!("{} {} {}", side(l), cmp(*op), regex_literal(t, true));
             }
-            format!("{} {} {}", operand(l), cmp(*op), operand(r))
+            format!("{} {} {}", side(l), cmp(*op), side(r))
         }
         PredExpr::Chain(operands, ops) => {
             let mut out = operand(&operands[0]);
@@ -777,7 +800,34 @@ fn reshape_text(call: &crate::syntax::ast::FnCall) -> String {
         } if name == "--name" => Some(format!("--name={}", name_text(s))),
         _ => None,
     });
-    let parts: Vec<String> = head.into_iter().chain(index).chain(name).collect();
+    // every other option as any call prints its options: `-a`,
+    // `--cast`, `--null`, `--locale`, `--autounits`, `--slugs`,
+    // `--units` and the scoped ones were dropped, so
+    // `#(--autounits; --slugs)` printed as `#()`, an empty table, and
+    // two quarqs differing in an option compared equal
+    // (a string value quoted: the reshape's options read no bare
+    // word, `--locale=de` is "'de' is not a command" there)
+    let option = |a: &Arg| match a {
+        Arg::Opt {
+            name,
+            value: Some(Operand::Lit(Value::Str(s))),
+        } => format!("{name}={}", crate::value::quarb_string(s)),
+        other => arg_text(other),
+    };
+    let rest = call.args.iter().filter_map(|a| match a {
+        Arg::Opt { name, .. } if name != "--index" && name != "--name" => Some(option(a)),
+        Arg::Opt {
+            name,
+            value: Some(v),
+        } if name == "--name" && !matches!(v, Operand::Lit(Value::Str(_))) => Some(option(a)),
+        _ => None,
+    });
+    let parts: Vec<String> = head
+        .into_iter()
+        .chain(index)
+        .chain(name)
+        .chain(rest)
+        .collect();
     format!("#({})", parts.join("; "))
 }
 
@@ -786,6 +836,12 @@ pub(crate) fn operand_text(o: &Operand) -> String {
 }
 
 pub(crate) fn operand(o: &Operand) -> String {
+    // as deep as a flat chain is long: the stack grows where it runs
+    // short (see `eval_operand`)
+    stacker::maybe_grow(256 * 1024, 4 * 1024 * 1024, || operand_in(o))
+}
+
+fn operand_in(o: &Operand) -> String {
     match o {
         Operand::Match {
             scrutinee,
@@ -856,13 +912,13 @@ pub(crate) fn operand(o: &Operand) -> String {
             let inner: Vec<String> = items
                 .iter()
                 .map(|(n, e)| match n {
-                    Some(n) => format!("{} = {}", row_key_text(n), body_text(e)),
-                    None => body_text(e),
+                    Some(n) => format!("{} = {}", row_key_text(n), held_body(e, ITEM)),
+                    None => held_body(e, ITEM),
                 })
                 .collect();
             format!("%({})", inner.join("; "))
         }
-        Operand::Desc(inner) => format!("-{}", operand(inner)),
+        Operand::Desc(inner) => format!("-{}", held(inner, UNARY)),
         Operand::Through { base, projection } => {
             let key = match projection {
                 Projection::Property(Some(k)) => format!("::{k}"),
@@ -870,17 +926,12 @@ pub(crate) fn operand(o: &Operand) -> String {
                 Projection::CoreMeta(k) => format!(":{k}"),
                 Projection::AdapterMeta(k) => format!(":::{k}"),
             };
-            format!("{}{key}", operand(base))
+            format!("{}{key}", held(base, POSTFIX))
         }
-        Operand::Spread(inner) => format!("{}...", operand(inner)),
+        Operand::Spread(inner) => format!("{}...", held(inner, POSTFIX)),
         // `v&$.f`, `v&$.f!`, `v&$.f#` — the glued recall
         Operand::Apply { base, reg: r, shot } => {
-            let b = match **base {
-                Operand::Arith { .. } | Operand::Concat { .. } | Operand::Coalesce { .. } => {
-                    parens(&operand(base))
-                }
-                _ => operand(base),
-            };
+            let b = held(base, POSTFIX);
             let suffix = match shot {
                 Some(true) => "#",
                 Some(false) => "!",
@@ -889,29 +940,24 @@ pub(crate) fn operand(o: &Operand) -> String {
             format!("{b}&{}{}", reg(r), suffix)
         }
         Operand::Projected { base, shape } => {
-            let b = match **base {
-                Operand::Arith { .. } | Operand::Concat { .. } | Operand::Coalesce { .. } => {
-                    parens(&operand(base))
-                }
-                _ => operand(base),
-            };
+            let b = held(base, POSTFIX);
             match shape {
                 crate::syntax::ast::ProjShape::Value(v) => match &**v {
                     Operand::List(_) | Operand::Recall(_) => format!("{b}:{}", operand(v)),
                     // the record shape prints as the constructor it
-                    // was written as; on the topic, bare: `| %(:a;
-                    // :b)` is the pipe form of `$_:%(:a; :b)` (ruling
-                    // 2026-11-01), and the two spellings are one
+                    // was written as, on its base. The bare form,
+                    // `| %(:a; :b)`, the pipe spelling of `$_:%(:a;
+                    // :b)` (ruling 2026-11-01), is the whole command
+                    // alone and is printed by `command`: inside an
+                    // expression the bare text read back as a row
+                    // (`$_:%(:a) * 2` printed `%(:a) * 2`, which does
+                    // not parse).
                     Operand::Piped { expr, commands }
                         if matches!(**expr, Operand::Topic)
                             && let [Command::Func(c)] = commands.as_slice()
                             && c.name == "rec" =>
                     {
-                        if matches!(**base, Operand::Topic) {
-                            format!("%{}", record_args(c, "; "))
-                        } else {
-                            format!("{b}:%{}", record_args(c, "; "))
-                        }
+                        format!("{b}:%{}", record_args(c, "; "))
                     }
                     other => format!("{b}:({})", operand(other)),
                 },
@@ -936,13 +982,7 @@ pub(crate) fn operand(o: &Operand) -> String {
                 ),
             }
         }
-        Operand::Neg(inner) => format!(
-            "- {}",
-            match **inner {
-                Operand::Arith { .. } | Operand::Concat { .. } => parens(&operand(inner)),
-                _ => operand(inner),
-            }
-        ),
+        Operand::Neg(inner) => format!("- {}", held(inner, UNARY)),
         Operand::Gathered(inner) => operand(inner),
         Operand::Group(e) => parens(&pred_expr(e)),
         Operand::Recall(r) => reg(r),
@@ -951,13 +991,15 @@ pub(crate) fn operand(o: &Operand) -> String {
         // The seed never stands alone in parsed text; a headless
         // body pipeline prints without it (see `body_text`).
         Operand::Seed => "$_".to_string(),
+        // a field's name quoted where it is no bare name (`:"a b"`,
+        // `:"Draught, m"`)
         Operand::Field { base, name, bare } => match **base {
-            Operand::Topic if *bare => format!(":{name}"),
-            _ => format!("{}:{name}", operand(base)),
+            Operand::Topic if *bare => format!(":{}", name_text(name)),
+            _ => format!("{}:{}", held(base, POSTFIX), name_text(name)),
         },
         Operand::LabelIndex { base, labels } => format!(
             "{}[[{}]]",
-            operand(base),
+            held(base, POSTFIX),
             labels.iter().map(body_text).collect::<Vec<_>>().join("; ")
         ),
         // `:A<int>`; the bare trait body of `map` is the brackets alone
@@ -966,6 +1008,11 @@ pub(crate) fn operand(o: &Operand) -> String {
             _ => format!("{}{}", operand(inner), typing.spelling()),
         },
         Operand::InUnit { inner, unit } => format!("{}<_{unit}>", operand(inner)),
+        Operand::InOffset { inner, minutes } => format!(
+            "{}<{}>",
+            operand(inner),
+            crate::value::offset_spelling(*minutes)
+        ),
         Operand::ValueMeta { base, key } => format!("{}:{key}", operand(base)),
         Operand::PeerReg { at, reg: r } => match at {
             Some(at) => format!("{}:{}", operand(at), reg(r).trim_start_matches('$')),
@@ -973,7 +1020,7 @@ pub(crate) fn operand(o: &Operand) -> String {
         },
         Operand::NamedCaptures => "%+".to_string(),
         Operand::List(items) => {
-            let inner: Vec<String> = items.iter().map(|i| grouped(body_text(i))).collect();
+            let inner: Vec<String> = items.iter().map(|i| grouped(held_body(i, ITEM))).collect();
             format!("@({})", inner.join("; "))
         }
         Operand::Coalesce { left, right } => {
@@ -998,8 +1045,8 @@ pub(crate) fn operand(o: &Operand) -> String {
                 }
             }
             match cols {
-                Some(c) => format!("{}[{}; {}]", body_text(base), spec(rows), spec(c)),
-                None => format!("{}[{}]", body_text(base), spec(rows)),
+                Some(c) => format!("{}[{}; {}]", held_body(base, POSTFIX), spec(rows), spec(c)),
+                None => format!("{}[{}]", held_body(base, POSTFIX), spec(rows)),
             }
         }
         Operand::Range { from, to, step } => {
@@ -1030,15 +1077,58 @@ pub(crate) fn operand(o: &Operand) -> String {
             header,
             declared,
             rows,
+            levels,
         } => {
+            // A table shape nested in another constructor
+            // (`%(t = #(::Name; ::Age))`) is read as a table with the
+            // header its items name and their one row; it prints as
+            // it was written. Printed as the literal, `#(@(Name;
+            // Age); %(::Name; ::Age))`, it read back with the row's
+            // items named, and the text settled only on the second
+            // print. An unnamed item marks the shape: a written
+            // literal's record row names every item.
+            if let Some(h) = header
+                && declared.iter().all(Option::is_none)
+                && let [crate::syntax::ast::TableRow::Record(items)] = rows.as_slice()
+                && items.len() == h.len()
+                && items.iter().any(|(n, _)| n.is_none())
+                && items.iter().zip(h).all(|((n, e), column)| {
+                    n.as_deref()
+                        .map(|n| crate::syntax::ast::row_key(n).0)
+                        .or_else(|| crate::syntax::ast::auto_field_name(e))
+                        == Some(column.as_str())
+                })
+            {
+                let inner: Vec<String> = items
+                    .iter()
+                    .map(|(n, e)| match n {
+                        Some(n) => format!("{} = {}", row_key_text(n), held_body(e, ITEM)),
+                        None => held_body(e, ITEM),
+                    })
+                    .collect();
+                return format!("#({})", inner.join("; "));
+            }
             let mut parts: Vec<String> = Vec::new();
             if let Some(h) = header {
                 let names: Vec<String> = h
                     .iter()
                     .enumerate()
-                    .map(|(j, n)| match declared.get(j) {
-                        Some(Some(t)) => format!("{n}<{}>", t.word()),
-                        _ => n.clone(),
+                    .map(|(j, n)| {
+                        // a path of levels as written, any other name
+                        // as a key: a name that is no bare word printed
+                        // bare (`Time (HH:MM)`) and read back as
+                        // something else
+                        // (a number names its column by its text, and
+                        // prints as the number it was written)
+                        let n = if n.parse::<f64>().is_ok() {
+                            n.clone()
+                        } else {
+                            crate::value::header_spelling(n, *levels)
+                        };
+                        match declared.get(j) {
+                            Some(Some(t)) => format!("{n}<{}>", t.word()),
+                            _ => n,
+                        }
                     })
                     .collect();
                 parts.push(format!("@({})", names.join("; ")));
@@ -1053,7 +1143,9 @@ pub(crate) fn operand(o: &Operand) -> String {
                         let inner: Vec<String> = items
                             .iter()
                             .map(|(n, e)| match n {
-                                Some(n) => format!("{n} = {}", body_text(e)),
+                                // (the quoted key's marker printed
+                                // raw, a NUL byte in the text)
+                                Some(n) => format!("{} = {}", row_key_text(n), body_text(e)),
                                 None => body_text(e),
                             })
                             .collect();
@@ -1217,16 +1309,62 @@ pub(crate) fn operand(o: &Operand) -> String {
 /// `1 + 1 + 1 + …` therefore prints flat, within the nesting the
 /// parser accepts.
 fn arith_term(o: &Operand, parent: ArithOp, right: bool) -> String {
-    let inner = match o {
-        Operand::Arith { op, .. } => arith_precedence(*op),
-        Operand::Concat { .. } => arith_precedence(ArithOp::Add),
-        _ => return operand(o),
-    };
-    let outer = arith_precedence(parent);
+    let inner = strength(o);
+    let outer = ARITH + arith_precedence(parent);
     if inner < outer || (right && inner == outer) {
         parens(&operand(o))
     } else {
         operand(o)
+    }
+}
+
+/// How tightly an operand's text holds together, loosest first: the
+/// coalescence, the additive forms (the concatenation with them),
+/// the multiplicative ones, the unary minus, and everything else,
+/// which is a primary or prints its own parentheses. The parser
+/// strips the group around any of the first four; a context that
+/// binds tighter puts it back ([`held`]). The printer knew this for
+/// arithmetic under arithmetic alone, so `(1 ?? 2) * 3` printed as
+/// `1 ?? 2 * 3`, which answers 1, `-(null ?? 5)` as `- null ?? 5`,
+/// and `(@(1) ++ @(2))[2]` as `@(1) ++ @(2)[2]`.
+fn strength(o: &Operand) -> u8 {
+    match o {
+        Operand::Coalesce { .. } => COALESCE,
+        Operand::Arith { op, .. } => ARITH + arith_precedence(*op),
+        Operand::Concat { .. } => ARITH + arith_precedence(ArithOp::Add),
+        Operand::Neg(_) | Operand::Desc(_) => UNARY,
+        _ => PRIMARY,
+    }
+}
+
+const COALESCE: u8 = 1;
+/// An item of a list, a row or a record: anything but a bare
+/// coalescence, whose `??` the item's separator would not close.
+const ITEM: u8 = 2;
+const ARITH: u8 = 2;
+const UNARY: u8 = 5;
+/// What a postfix glues to: a field, an index, a projection, an
+/// applied quarq.
+const POSTFIX: u8 = 6;
+const PRIMARY: u8 = 9;
+
+/// `o` as it stands in a context that binds at `min`: parenthesized
+/// where it holds together more loosely.
+fn held(o: &Operand, min: u8) -> String {
+    if strength(o) < min {
+        parens(&operand(o))
+    } else {
+        operand(o)
+    }
+}
+
+/// [`held`] where a headless body prints headless (`body_text`): an
+/// item, a value, an index's base.
+fn held_body(o: &Operand, min: u8) -> String {
+    if strength(o) < min {
+        parens(&operand(o))
+    } else {
+        body_text(o)
     }
 }
 
@@ -1264,6 +1402,11 @@ pub(crate) fn literal(v: &Value) -> String {
             key,
             typing,
         } => Value::projector_spelling(*ladder, key, typing.as_ref()),
+        // A structure prints as the literal that reads back: its
+        // display form, `12, 12` for `@(12; 12)`, read back as two
+        // operands (the comma is separator sugar), and a record as
+        // loose words.
+        Value::List(_) | Value::Record(_) | Value::Table(_) => v.to_quarb(),
         other => other.to_string(),
     }
 }
@@ -1440,6 +1583,15 @@ pub(crate) fn command(st: &Command) -> String {
         // never `| (0)`, which is the rounded register.
         Command::Expr(e) => {
             let text = operand(e);
+            // the stage projector on the topic, as the whole command,
+            // prints bare
+            if let Operand::Projected { base, .. } = e
+                && matches!(**base, Operand::Topic)
+                && let Some(bare) = text.strip_prefix("$_:")
+                && bare.starts_with("%(")
+            {
+                return format!("| {bare}");
+            }
             let delimited = text.starts_with(['(', '\'', '"', ':', ';', '$', '%', '_'])
                 || text.starts_with("@-")
                 || text.starts_with("@(")
@@ -1587,6 +1739,7 @@ fn record_args(call: &crate::syntax::ast::FnCall, sep: &str) -> String {
                     Arg::Expr(Operand::Typed { inner, typing }) => {
                         out.push(format!("{key}{} = {}", typing.spelling(), body_text(inner)));
                     }
+                    Arg::Expr(e) => out.push(format!("{key} = {}", held_body(e, ITEM))),
                     value => out.push(format!("{key} = {}", arg_text(value))),
                 }
                 i += 2;
@@ -1741,7 +1894,9 @@ pub(crate) fn reg(r: &RegRef) -> String {
         RegRef::Top => "$.".to_string(),
         RegRef::Index(n) => format!("$.{n}"),
         RegRef::Back(n) => format!("$.-{n}"),
-        RegRef::Named(n) => format!("$.{}", crate::syntax::ast::display_name(n)),
+        // quoted where the name is no identifier: `$."1"` is the
+        // regula named "1", `$.1` the first one
+        RegRef::Named(n) => format!("$.{}", push_name(n)),
         RegRef::Session(n) => format!("$,{n}"),
         RegRef::SessionRecord => "%,".to_string(),
         RegRef::Whole => "@.".to_string(),
@@ -1916,9 +2071,11 @@ mod tests {
         // `= 3` is not `| (3)`, which is the capture `$3`
         assert_eq!(rt("= 3"), "= 3");
         assert_eq!(rt("= 1 + 2 | $_ * 2"), "= 1 + 2 | $_ * 2");
-        // the rounded hole's opener is escaped inside a string
-        assert_eq!(rt("= 'a(,b'"), r#"= "a\(,b""#);
-        assert_fixpoint(r#"= "a\(,b""#);
+        // the rounded hole's opener is escaped inside a string; the
+        // opener of before draft 166, `(,`, is text like any other
+        assert_eq!(rt("= 'a(_b'"), r#"= "a\(_b""#);
+        assert_fixpoint(r#"= "a\(_b""#);
+        assert_eq!(rt("= 'a(,b'"), r#"= "a(,b""#);
     }
 
     /// The fold's selector prints as written, several references
@@ -2038,5 +2195,133 @@ mod tests {
         assert_eq!(assert_fixpoint("/x | s/a/c\\/d/"), "/x | s/a/c\\/d/");
         // No slash in the parts — output is unchanged from before.
         assert_eq!(assert_fixpoint("/x | s/a/b/g"), "/x | s/a/b/g");
+    }
+
+    /// The unparser rows of the code review of 2026-11-10: what was
+    /// written prints, and prints so that it reads back.
+    #[test]
+    fn a_count_brace_before_a_further_brace_prints_as_its_brace() {
+        // `{1}` printed as nothing and `{1;}` as `+`: one hop within
+        // five kilometres came back as any number of hops, and the
+        // other as `+{;5_km}`, which does not parse
+        assert_eq!(assert_fixpoint("/a(->x){1}{;5_km}"), "/a(->x){1}{;5_km}");
+        assert_eq!(assert_fixpoint("/a(->x){1;}{;5_km}"), "/a(->x){1;}{;5_km}");
+        assert_eq!(assert_fixpoint("/a(->x){0;}{;5_km}"), "/a(->x){0;}{;5_km}");
+        // alone, the short forms stand
+        assert_eq!(assert_fixpoint("/a(->x){1;}"), "/a(->x)+");
+        assert_eq!(assert_fixpoint("/a(->x){0;}"), "/a(->x)*");
+    }
+
+    #[test]
+    fn a_name_that_needs_quotes_prints_quoted() {
+        // `$."1"` is the regula named "1", `$.1` the first one
+        assert_eq!(
+            assert_fixpoint("= 10 | . | 20 | .\"1\" | $.\"1\""),
+            "= 10 | . | 20 | .\"1\" | $.\"1\""
+        );
+        assert_eq!(assert_fixpoint("= 1 | .n | $.n"), "= 1 | .n | $.n");
+        // a field read by a name that is no bare name
+        let read = assert_fixpoint("= %(\"a b\" = 1) | :\"a b\"");
+        assert!(read.ends_with("| :\"a b\""), "{read}");
+        assert_eq!(
+            assert_fixpoint("/t | :\"Draught, m\" | mean"),
+            "/t | :\"Draught, m\" | mean"
+        );
+        // a row's quoted name in a table literal: the parser's
+        // marker printed raw, a NUL byte in the text
+        let text = assert_fixpoint("= #(@(a; b); %(\"my col\" = 1))");
+        assert!(!text.contains('\u{0}'), "{text:?}");
+        assert!(text.contains("\"my col\" = 1"), "{text}");
+    }
+
+    #[test]
+    fn the_reshape_prints_every_option() {
+        // all but the header, the index and the name were dropped:
+        // the text was `#()`, an empty table
+        let text = assert_fixpoint("//t | #(--autounits; --slugs; --locale=\"de\")");
+        for option in ["--autounits", "--slugs", "--locale=\"de\""] {
+            assert!(text.contains(option), "{option} in {text}");
+        }
+        let with = assert_fixpoint("= q(#(--header=@(a; b); -a))");
+        let without = assert_fixpoint("= q(#(--header=@(a; b)))");
+        assert_ne!(with, without);
+        assert!(with.contains("-a"), "{with}");
+    }
+
+    #[test]
+    fn a_literal_structure_prints_as_the_literal() {
+        // the display form, `12, 12`, read back as two operands
+        assert_eq!(
+            assert_fixpoint("/row @| np:reshape(@(12; 12))"),
+            "/row @| np:reshape(@(12; 12))"
+        );
+        let rec = assert_fixpoint("= %(tags = @(\"old\"; 1))");
+        assert!(rec.contains("@(\"old\"; 1)"), "{rec}");
+    }
+
+    #[test]
+    fn the_bare_stage_projector_is_the_whole_command_alone() {
+        // after a pipe, bare
+        assert_eq!(assert_fixpoint("/a | %(:a; :b)"), "/a | %(:a; :b)");
+        assert_eq!(assert_fixpoint("/a | $_:%(:a; :b)"), "/a | %(:a; :b)");
+        // inside an expression the base stays: bare it read back as
+        // a row, or did not parse
+        let arith = assert_fixpoint("/a | $_:%(:a) * 2");
+        assert!(arith.contains("$_:%(:a)"), "{arith}");
+        let pred = assert_fixpoint("/a | [$_:%(:a) != 1]");
+        assert!(pred.contains("$_:%(:a)"), "{pred}");
+        assert_eq!(assert_fixpoint("= $_:%(:a)"), "= $_:%(:a)");
+    }
+
+    /// A group the parser strips is put back wherever the text would
+    /// bind otherwise (the review's row B7): each of these printed
+    /// without its parentheses and answered something else.
+    #[test]
+    fn a_stripped_group_is_restored_under_a_tighter_context() {
+        for q in [
+            // under an arithmetic operator, on either side
+            "= (1 ?? 2) * 3",
+            "= (1 ?? 2) + 3",
+            "= 3 * (1 ?? 2)",
+            // under a unary minus
+            "= - (null ?? 5)",
+            "= - (1 + 2)",
+            // under a postfix: an index, a field, a projection
+            "= (@(1) ++ @(2))[2]",
+            "= (1 + 2)[1]",
+            "= (1 + 2):a",
+            "= (- 1):a",
+            "= (1 + 2)::x",
+            // as an item of a list and of a record
+            "= @((1 ?? 2); 3)",
+            // beside a comparison, on either side
+            "/row[(::m ?? \"-\") = \"-\"]::name",
+            "/row[\"-\" = (::m ?? \"-\")]::name",
+        ] {
+            assert_eq!(assert_fixpoint(q), q, "{q}");
+        }
+        let rec = assert_fixpoint("/row | ++ %(cabin = (::Cabin ?? \"none\"))");
+        assert!(rec.contains("cabin = (::Cabin ?? \"none\")"), "{rec}");
+        // what holds together as tightly stays bare
+        assert_eq!(assert_fixpoint("= 1 + 2 * 3"), "= 1 + 2 * 3");
+        assert_eq!(assert_fixpoint("= (1 + 2) * 3"), "= (1 + 2) * 3");
+        assert_eq!(assert_fixpoint("= 1 ?? 2 ?? 3"), "= 1 ?? 2 ?? 3");
+        assert_eq!(assert_fixpoint("= - 1 + 2"), "= - 1 + 2");
+        assert_eq!(assert_fixpoint("= :a[1]"), "= :a[1]");
+    }
+
+    #[test]
+    fn a_nested_table_shape_prints_as_written() {
+        assert_eq!(
+            assert_fixpoint("/row | %(t = #(::Name; ::Age); n = ::Name)"),
+            "/row | %(t = #(::Name; ::Age); n = ::Name)"
+        );
+        assert_eq!(
+            assert_fixpoint("/row | %(t = #(a = ::Name; ::Age))"),
+            "/row | %(t = #(a = ::Name; ::Age))"
+        );
+        // a written literal with its header stays the literal
+        let lit = assert_fixpoint("= %(t = #(@(a; b); %(1; 2)))");
+        assert!(lit.contains("#(@(a; b); %(1; 2))"), "{lit}");
     }
 }

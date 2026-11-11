@@ -345,7 +345,7 @@ pub(crate) struct GPath {
     /// exact walk's path is one acyclic walk per history.
     pub(crate) set_walk: bool,
     /// Whether what consumes the walk reads nodes alone (`@|
-    /// collapse`, `nodes`, `edges`, `pagerank`, a marker): the
+    /// collapse`, `nodes`, `edges`, `pagerank`, a reach selector): the
     /// expansion may then go by node and round where that is exact
     /// — under the acyclic promise, or for a plain open walk (spec:
     /// Expansion paths, Acyclic links).
@@ -641,6 +641,25 @@ impl GPath {
     }
 }
 
+/// The label of the virtual edge a resolution walks: the relation
+/// the adapter gives it (html: the `rel` text of the link), else the
+/// property's reference label, its name without the `_id` suffix
+/// (spec draft.186: a property-declared reference labels its edge
+/// by the stripped name, "and the resolution edge"). One rule for
+/// the edge a step's predicates read and the edge read after the
+/// step: the arm after the step answered the property's full name
+/// and never asked the adapter, so `::manager_id-->[$- = "manager"]`
+/// matched an edge that `| $-` printed `manager_id`.
+pub(crate) fn resolution_label(
+    adapter: &impl AstAdapter,
+    source: NodeId,
+    property: &str,
+) -> String {
+    adapter
+        .ref_label(source, property)
+        .unwrap_or_else(|| reference_label(property).to_string())
+}
+
 /// The edge `step` walked from `from` to `succ` — the `$-` referent
 /// a pattern command sees. Crosslink labels are re-derived from the
 /// adapter (first matching edge; the parallel-edge caveat of
@@ -781,18 +800,23 @@ pub(crate) fn arrived_edge(
         }
         Axis::Resolve { property, .. } => EdgeCtx {
             source: from,
-            label: property.clone().unwrap_or_else(|| "ref".to_string()),
+            label: match property.clone().or_else(|| adapter.ref_property(from)) {
+                Some(p) => resolution_label(adapter, from, &p),
+                None => "ref".to_string(),
+            },
             target: succ,
             row: None,
         },
         Axis::ReverseResolve { property, .. } => EdgeCtx {
             source: succ,
             label: match property {
-                RefProp::Named(p) => p.clone(),
-                _ => adapter
-                    .ref_property(succ)
-                    .unwrap_or_else(|| "ref".to_string()),
-            },
+                RefProp::Named(p) => Some(p.clone()),
+                _ => adapter.ref_property(succ),
+            }
+            .map_or_else(
+                || "ref".to_string(),
+                |p| resolution_label(adapter, succ, &p),
+            ),
             target: from,
             row: None,
         },
@@ -935,7 +959,7 @@ pub(crate) fn expand_group(
     // Every walk is answered (spec: Expansion paths): the set walk
     // stays an internal expansion where the answer cannot tell, the
     // proximal reach alone — one thread per node at its first round.
-    // What consumes the walk reads nodes alone — a marker selects
+    // What consumes the walk reads nodes alone — a reach selector selects
     // per node, a collapsing reducer or a graph table follows the
     // branch — so a node-level expansion is exact: the plain open
     // walk by node (every node reachable at all is reachable by an
@@ -944,6 +968,9 @@ pub(crate) fn expand_group(
     let set_walk = anchor.set_walk
         && group_is_plain(group)
         && set_form(group)
+        // a guard that reads the walk tells two arrivals at a node
+        // apart, and the set walk keeps the first alone
+        && !guard_reads_walk(group)
         && (group.reach == Reach::Proximal || (group.reach == Reach::All && node_level))
         && budgets.is_empty();
     let anchor_was_set = anchor.set_walk;
@@ -1090,15 +1117,66 @@ pub(crate) fn expand_group(
         matches.push((anchor.clone(), 0));
     }
     // The lightest walks under a budget (spec: The budget
-    // quantifier, the proximal reach): breadth first by total —
-    // each node settled once, at its least total, the first
-    // satisfying settlement the answer for that node. Weights are
-    // non-negative (a negative one refuses on the hop).
-    if budget.is_some() && group.reach == Reach::Proximal {
-        let mut settled: HashSet<NodeId> = HashSet::from([adapter.intrinsic(anchor.ext.node)]);
-        let mut pending: Vec<GPath> = Vec::new();
+    // quantifier, the proximal reach): the survivors of LEAST total,
+    // the tie set, as the distal reach keeps those of greatest
+    // (ruling 2026-11-10: "proximal should give multiple results
+    // only in case of a tie"; every node was answered at its own
+    // least total, five towns where one is the nearest).
+    let lightest = budget.is_some() && group.reach == Reach::Proximal;
+    // The search by total, least first, each node settled at its
+    // least total, is
+    // exact where one brace bounds the walk and nothing can prefer a
+    // dearer arrival: no count brace and no second budget, no floor,
+    // a cost that never falls along a walk (every rule but `min`),
+    // alternatives of one hop each, and a guard that reads the node
+    // alone. A group that records its way (`(->* .(::code))`) is
+    // searched too: the routes answered are those of the lightest
+    // walks, every one that ties. Weights are non-negative there (a
+    // negative one refuses on the hop). Any other form runs the
+    // exact walk below and keeps its lightest survivors. (The search
+    // ran for every form: `{;15_h}{*_EUR}[P]?` answered nothing
+    // where the cheap way in ran out of hours, `{;1}{*_EUR}?`
+    // answered a walk of two hops, a floor and `min:` were not
+    // looked at.)
+    let by_total = lightest
+        && braces.len() == 1
+        && budgets.len() == 1
+        && budgets[0].floor.is_none()
+        && budgets[0].rule != CostRule::Min
+        && one_hop_alternatives(group)
+        && !guard_reads_walk(group);
+    if by_total {
+        // the answer's total, once a survivor is met (the start
+        // itself, where the walk admits no hop and the guard it)
+        let mut least: Option<f64> = matches.first().map(|(p, _)| p.total);
+        // the least total at which a walk stood at the quantifier
+        // bound with a hop still to take
+        let mut cut: Option<f64> = None;
+        // Each node settles at its least total, and EVERY walk that
+        // arrives at that total is kept and walked on from: under a
+        // reach selector every walk tied at the best total is an
+        // answer, two walks to one node included (the user,
+        // 2026-11-10: "reporting one result when two give the same
+        // cost is wrong"; a node settled once, so the first arrival
+        // won by the search's own order). The reach selects among
+        // the threads the plain walk answers and merges none ("the
+        // reach never merges"): two walks are one where the plain
+        // walk has them one, by its own key, the node, the ground
+        // covered, the capsa and the arriving edge.
+        let start = adapter.intrinsic(anchor.ext.node);
+        let mut settled: HashMap<NodeId, f64> = HashMap::from([(start, anchor.total)]);
+        let mut arrived = HashSet::from([anchor.key()]);
+        // Each walk beside its place in the plain walk's order: the
+        // position of every hop among its round's expansions, so the
+        // tied walks answer by round and then by the edges' document
+        // order, as the exact walk lists them, whatever order the
+        // search met them in (it answered BOM before DEL where the
+        // walk lists DEL first).
+        let mut pending: Vec<(GPath, Vec<u32>)> = Vec::new();
+        let mut placed: Vec<Vec<u32>> = matches.iter().map(|_| Vec::new()).collect();
+        let mut at_start: u32 = 0;
         for alt in &group.alts {
-            pending.extend(expand_elems(
+            for p in expand_elems(
                 adapter,
                 alt,
                 vec![anchor.clone()],
@@ -1107,36 +1185,65 @@ pub(crate) fn expand_group(
                 witness,
                 &shape,
                 promise.borrow().as_deref(),
-            ));
+            ) {
+                pending.push((p, vec![at_start]));
+                at_start += 1;
+            }
         }
         let mut rounds = 0usize;
         while !pending.is_empty() {
             rounds += 1;
+            // no silent end: the search answers, or says why not
             if rounds > n_max * f_max {
-                break;
+                record_refusal_coded(
+                    FRONTIER_BOUND,
+                    format!("round {rounds}"),
+                    format!(
+                        "the search for the lightest walk settled {} positions without an \
+                         end (the quantifier bound {n_max} times the frontier bound {f_max}); \
+                         give the quantifier a ceiling, {{;M}}",
+                        rounds - 1
+                    ),
+                );
+                return Vec::new();
             }
             // the least total first
             let (i, _) = pending
                 .iter()
                 .enumerate()
-                .min_by(|(_, p), (_, q)| {
+                .min_by(|(_, (p, _)), (_, (q, _))| {
                     p.total
                         .partial_cmp(&q.total)
                         .unwrap_or(std::cmp::Ordering::Equal)
                 })
                 .expect("non-empty");
-            let path = pending.swap_remove(i);
-            if !settled.insert(adapter.intrinsic(path.ext.node)) {
+            let (path, place) = pending.swap_remove(i);
+            // past the answer's total nothing ties with it
+            if least.is_some_and(|l| path.total > l) {
+                break;
+            }
+            let at = adapter.intrinsic(path.ext.node);
+            match settled.get(&at) {
+                // a dearer arrival at a node already settled
+                Some(&least) if path.total > least => continue,
+                Some(_) => {}
+                None => {
+                    settled.insert(at, path.total);
+                }
+            }
+            // every arrival at the settled total is a walk of its
+            // own, answered where it is admitted and walked on from
+            if !arrived.insert(path.key()) {
                 continue;
             }
             if admits(&path) {
+                least = Some(path.total);
                 matches.push((path.clone(), 0));
+                placed.push(place.clone());
             }
-            if path.hops >= n_max {
-                continue;
-            }
+            let mut next: Vec<GPath> = Vec::new();
             for alt in &group.alts {
-                for p in expand_elems(
+                next.extend(expand_elems(
                     adapter,
                     alt,
                     vec![path.clone()],
@@ -1145,15 +1252,34 @@ pub(crate) fn expand_group(
                     witness,
                     &shape,
                     promise.borrow().as_deref(),
-                ) {
-                    if !settled.contains(&adapter.intrinsic(p.ext.node)) {
-                        pending.push(p);
-                    }
-                }
+                ));
             }
             if crate::value::ambient::refusal_pending() {
                 return Vec::new();
             }
+            // at the quantifier bound a walk is not taken further;
+            // the walks come least total first, so the first one cut
+            // is the least
+            if path.hops >= n_max {
+                if !next.is_empty() && cut.is_none() {
+                    cut = Some(path.total);
+                }
+                continue;
+            }
+            pending.extend(
+                next.into_iter()
+                    .enumerate()
+                    .filter(|(_, p)| {
+                        settled
+                            .get(&adapter.intrinsic(p.ext.node))
+                            .is_none_or(|&least| p.total <= least)
+                    })
+                    .map(|(k, p)| {
+                        let mut at = place.clone();
+                        at.push(k as u32);
+                        (p, at)
+                    }),
+            );
             if pending.len() > f_max {
                 record_refusal_coded(
                     FRONTIER_BOUND,
@@ -1168,7 +1294,29 @@ pub(crate) fn expand_group(
                 return Vec::new();
             }
         }
-        return exit_walk(matches.into_iter().map(|(p, _)| p).collect(), &shape);
+        // A walk cut at the bound below the answer's total could have
+        // gone on to a lighter survivor: refused, as the exact walk
+        // refuses a closure it could not finish (the search ended in
+        // silence there).
+        if let Some(c) = cut
+            && least.is_none_or(|l| c < l)
+        {
+            record_refusal_coded(
+                QUANTIFIER_BOUND,
+                format!("round {n_max}"),
+                format!(
+                    "quantifier bound reached at round {n_max} with edges \
+                     still to take — the lightest walk would be silently \
+                     incomplete; raise --quantifier-bound"
+                ),
+            );
+            return Vec::new();
+        }
+        // the walk's order: by round, then by the edges' order
+        let mut answers: Vec<(GPath, Vec<u32>)> =
+            matches.into_iter().map(|(p, _)| p).zip(placed).collect();
+        answers.sort_by(|(_, a), (_, b)| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
+        return exit_walk(answers.into_iter().map(|(p, _)| p).collect(), &shape);
     }
     let mut frontier = vec![anchor];
     let mut answered = false;
@@ -1209,8 +1357,9 @@ pub(crate) fn expand_group(
             );
             // Proximal keeps only the smallest matched count: the
             // first tier with a survivor is the answer — stop
-            // expanding.
-            if group.reach == Reach::Proximal && matches.len() > before {
+            // expanding. Under a budget the answer is the least
+            // total, which a later round may hold: the walk runs on.
+            if group.reach == Reach::Proximal && !lightest && matches.len() > before {
                 answered = true;
                 break;
             }
@@ -1239,26 +1388,59 @@ pub(crate) fn expand_group(
         Reach::Proximal => matches.iter().map(|&(_, c)| c).min(),
         Reach::Distal => matches.iter().map(|&(_, c)| c).max(),
     };
-    // Under a budget the distal reach is the heaviest walk within it,
-    // the count of hops aside.
-    let out: Vec<GPath> = if budget.is_some() && group.reach == Reach::Distal {
-        let heaviest = matches
-            .iter()
-            .map(|(p, _)| p.total)
-            .fold(f64::NEG_INFINITY, f64::max);
+    // Under a budget the distal reach is the heaviest walk within it
+    // and the proximal the lightest, the count of hops aside.
+    let mut kept: Vec<(GPath, usize)> = if budget.is_some() && group.reach != Reach::All {
+        let totals = matches.iter().map(|(p, _)| p.total);
+        let extreme = if group.reach == Reach::Distal {
+            totals.fold(f64::NEG_INFINITY, f64::max)
+        } else {
+            totals.fold(f64::INFINITY, f64::min)
+        };
         matches
             .into_iter()
-            .filter(|(p, _)| p.total == heaviest)
-            .map(|(p, _)| p)
+            .filter(|(p, _)| p.total == extreme)
             .collect()
     } else {
         matches
             .into_iter()
             .filter(|&(_, c)| extreme.is_none_or(|e| c == e))
-            .map(|(p, _)| p)
             .collect()
     };
-    // The markers keep the equidistant set (ruling 2026-11-07): the
+    // A marker per brace (ruling 2026-11-10: "last brace first, first
+    // brace tie-breaker"): the last brace's marker has selected; each
+    // earlier brace that carries one then selects among the walks
+    // still tied, from right to left, the least of its own cost under
+    // `?` and the greatest under `!` (a count brace by its rounds). A
+    // brace without a selector orders nothing.
+    for (k, mark) in group.marks.iter().enumerate().rev() {
+        if *mark == Reach::All || kept.len() < 2 {
+            continue;
+        }
+        let Some(brace) = braces.get(k) else {
+            continue;
+        };
+        // the brace's place among the budgets, where it is one
+        let slot = brace
+            .budget
+            .is_some()
+            .then(|| braces[..k].iter().filter(|q| q.budget.is_some()).count());
+        let cost = |p: &GPath, rounds: usize| -> f64 {
+            match slot {
+                Some(i) => p.costs.get(i).copied().flatten().unwrap_or(0.0),
+                None => rounds as f64,
+            }
+        };
+        let costs = kept.iter().map(|(p, c)| cost(p, *c));
+        let extreme = if *mark == Reach::Distal {
+            costs.fold(f64::NEG_INFINITY, f64::max)
+        } else {
+            costs.fold(f64::INFINITY, f64::min)
+        };
+        kept.retain(|(p, c)| cost(p, *c) == extreme);
+    }
+    let out: Vec<GPath> = kept.into_iter().map(|(p, _)| p).collect();
+    // The reach selectors keep the equidistant set (ruling 2026-11-07): the
     // proximal reach every survivor of the first round that has one,
     // the distal every survivor of the last, per starting thread;
     // under a budget the nodes at the least total and at the greatest
@@ -1266,7 +1448,16 @@ pub(crate) fn expand_group(
     // (spec: Expansion paths); no document-order tie-break beyond
     // that — one node is `@| [1]` after the reach. Every other form
     // answers every walk.
-    let out: Vec<GPath> = if group.reach == Reach::All {
+    //
+    // Under a walk that carries a cost the reach never merges (the
+    // user, 2026-11-10): it selects among the threads the plain walk
+    // answers, which are one where the walk's own key has them one
+    // (the node, the ground covered, the capsa, the arriving edge),
+    // so two tied walks over two edges are two answers, alike or
+    // not, and `$-` reads each walk's own edge. The reach by hop
+    // count alone stays the node set it is, one thread per node and
+    // capsa.
+    let out: Vec<GPath> = if group.reach == Reach::All || !budgets.is_empty() {
         out
     } else {
         let mut once: HashSet<(NodeId, Vec<(Option<String>, String)>)> = HashSet::new();
@@ -1304,8 +1495,85 @@ fn exit_walk(mut out: Vec<GPath>, shape: &WalkBraces) -> Vec<GPath> {
 /// nodes a shortest walk reaches (spec: Expansion paths). An exact
 /// count, a ceiling, a floor above one or the distal reach ask about
 /// acyclic walks of a given length and expand exactly.
+/// The alternatives are one step each: a set walk keeps no ground,
+/// so inside `(->a->b)` nothing blocks a node met in mid-repetition,
+/// and the walk reached nodes no acyclic walk reaches
+/// (`/towns/S(->a->b)+ @| collapse` answered Q, P, U where the exact
+/// walk answers Q).
 pub(crate) fn set_form(group: &Group) -> bool {
-    group.quant.min <= 1 && group.quant.max.is_none() && group.reach != Reach::Distal
+    group.quant.min <= 1
+        && group.quant.max.is_none()
+        && group.reach != Reach::Distal
+        && one_step_alternatives(group)
+}
+
+/// Whether every alternative of the group is one hop: one step, and
+/// beside it nothing but the pushes and marks that record the way.
+/// A repetition then moves by one edge, with no node in between.
+fn one_hop_alternatives(group: &Group) -> bool {
+    group.alts.iter().all(|alt| {
+        alt.iter()
+            .filter(|e| matches!(e, PathElem::Step(_)))
+            .count()
+            == 1
+            && alt.iter().all(|e| {
+                matches!(
+                    e,
+                    PathElem::Step(_) | PathElem::Push { .. } | PathElem::Mark(_)
+                )
+            })
+    })
+}
+
+/// Whether every alternative of the group is one step.
+fn one_step_alternatives(group: &Group) -> bool {
+    group
+        .alts
+        .iter()
+        .all(|alt| matches!(alt.as_slice(), [PathElem::Step(_)]))
+}
+
+/// Whether the group's guard reads the walk: the edge it arrived by
+/// (`$-`, `@-`) or a fact of the walk, read off the same accessor
+/// (`$-:hops`, `$-:total`, `$-:round`). A guard that reads the node
+/// alone answers alike for every walk that ends there; one that
+/// reads the walk tells two arrivals apart, so a search that keeps
+/// one arrival per node cannot run it (spec: Expansion paths, the
+/// predicates filter the matches before the reach selects;
+/// `/airports/FRA(->*)+[$-::code = "CA016"]?` answered nothing where
+/// `{1;3}` answers SIN).
+fn guard_reads_walk(group: &Group) -> bool {
+    use crate::syntax::ast::visit::Visitor;
+    let mut reads = EdgeReads(false);
+    for p in &group.predicates {
+        reads.predicate(p);
+    }
+    reads.0
+}
+
+/// Whether any of `commands` reads an arriving edge (`$-`, `@-`):
+/// what follows a walk then tells two arrivals at a node apart.
+pub(crate) fn commands_read_edges(commands: &[Command]) -> bool {
+    use crate::syntax::ast::visit::Visitor;
+    let mut reads = EdgeReads(false);
+    for c in commands {
+        reads.command(c);
+    }
+    reads.0
+}
+
+/// The one question the walk's shortcuts ask before they run: is an
+/// arriving edge read?
+struct EdgeReads(bool);
+
+impl crate::syntax::ast::visit::Visitor for EdgeReads {
+    fn operand(&mut self, o: &Operand) {
+        if matches!(o, Operand::Edge { .. } | Operand::Edges { .. }) {
+            self.0 = true;
+        } else {
+            crate::syntax::ast::visit::walk_operand(self, o);
+        }
+    }
 }
 
 /// Whether a pattern records nothing along the walk: no push and no
@@ -1455,6 +1723,126 @@ fn group_promise(adapter: &impl AstAdapter, group: &Group) -> Option<String> {
     decl
 }
 
+/// The nearest names first, and no more than a message holds: what
+/// a surface has, for the warning that names it.
+fn surface_names(have: &[String], asked: &str) -> String {
+    const SHOWN: usize = 16;
+    if have.is_empty() {
+        return "none".to_string();
+    }
+    let mut names: Vec<&String> = have.iter().collect();
+    if names.len() > SHOWN {
+        names.sort_by_key(|n| crate::stdlib::levenshtein(n, asked));
+    }
+    let shown: Vec<&str> = names.iter().take(SHOWN).map(|n| n.as_str()).collect();
+    if have.len() > SHOWN {
+        format!("{}, … ({} in all)", shown.join(", "), have.len())
+    } else {
+        shown.join(", ")
+    }
+}
+
+/// A property a declared surface lacks (ruling 2026-11-10): where
+/// the source of `node` declares every property its members have (a
+/// table's columns, a CSV's header) and `name` is none of them, a
+/// warning names the container and what it has. Such a source is
+/// asked once per container and name; one that declares nothing
+/// says nothing and costs a lookup; no answer changes.
+/// (`/employees/* | ::nosuch` answered null per row in silence, and
+/// `[::nosuch = 1]` nothing.) A test of presence, `[::name]` or
+/// `[!::name]`, is itself the question (ruling 2026-11-11): its
+/// warning is kept, and raised at the run's end only when nothing
+/// the test asked has the name. `//*[::name]` over a database tells
+/// the tables that have the column from those that lack it;
+/// `/employees/*[::manger_id]` is still told of.
+pub(crate) fn unknown_property(adapter: &impl AstAdapter, node: NodeId, name: &str) {
+    if crate::value::ambient::in_presence() {
+        let container = adapter.parent(node).unwrap_or(node);
+        if crate::value::ambient::presence_asked(container.0, name) {
+            return;
+        }
+        let Some(surface) = adapter.surface(node) else {
+            return;
+        };
+        let lacking = surface.properties.as_ref().and_then(|properties| {
+            (!properties.iter().any(|p| p == name)).then(|| {
+                crate::diagnostic::Diagnostic::warning(
+                    crate::diagnostic::UNKNOWN_PROPERTY,
+                    surface.container.as_str(),
+                    format!(
+                        "no property '{name}' on {}; its properties: {}",
+                        surface.container,
+                        surface_names(properties, name)
+                    ),
+                )
+            })
+        });
+        // a surface that declares no properties neither has the
+        // name nor lacks it
+        if lacking.is_some() || surface.properties.is_some() {
+            crate::value::ambient::presence_ask(container.0, name, lacking);
+        }
+        return;
+    }
+    let container = adapter.parent(node).unwrap_or(node);
+    if crate::value::ambient::surface_asked(container.0, name, false) {
+        return;
+    }
+    // a source that declares nothing answers at once and is not
+    // remembered: its containers are as many as its nodes
+    let Some(surface) = adapter.surface(node) else {
+        return;
+    };
+    crate::value::ambient::surface_ask(container.0, name, false);
+    let Some(properties) = &surface.properties else {
+        return;
+    };
+    if properties.iter().any(|p| p == name) {
+        return;
+    }
+    crate::value::ambient::record_warning_once(
+        crate::diagnostic::UNKNOWN_PROPERTY,
+        &surface.container,
+        format!(
+            "no property '{name}' on {}; its properties: {}",
+            surface.container,
+            surface_names(properties, name)
+        ),
+    );
+}
+
+/// A label a declared surface lacks: where the source of `node`
+/// declares every label that leaves or reaches its members (a
+/// table's keys and those that point at it) and `label` is none of
+/// them, a warning names the container and the labels there.
+/// (`/employees/*[1](->manager_id)+` answered nothing in silence,
+/// the label being `manager`.)
+pub(crate) fn unknown_label(adapter: &impl AstAdapter, node: NodeId, label: &str) {
+    let container = adapter.parent(node).unwrap_or(node);
+    if crate::value::ambient::surface_asked(container.0, label, true) {
+        return;
+    }
+    let Some(surface) = adapter.surface(node) else {
+        return;
+    };
+    crate::value::ambient::surface_ask(container.0, label, true);
+    let Some(labels) = &surface.labels else {
+        return;
+    };
+    if labels.iter().any(|l| l == label) {
+        return;
+    }
+    crate::value::ambient::record_warning_once(
+        crate::diagnostic::UNKNOWN_LABEL,
+        &surface.container,
+        format!(
+            "no edge is labelled '{label}' from {}; the labels there: {}",
+            surface.container,
+            surface_names(labels, label)
+        ),
+    );
+}
+
 /// A node named for a message by its path from the root
 /// (`/stations/1`), the names the adapter gives its ancestors.
 pub(crate) fn node_path(adapter: &impl AstAdapter, node: NodeId) -> String {
@@ -1476,13 +1864,19 @@ pub(crate) fn node_path(adapter: &impl AstAdapter, node: NodeId) -> String {
 /// expansion path, its ground the union of theirs — the nodes from
 /// which this one was reached, any of which reached again is a
 /// cycle. The breadcrumbs' provenance unites as in [`dedup_paths`].
+/// The arriving edge is the edge with its row, as [`GPath::key`] has
+/// it: two rows on one leg are two edges, and the promise is cost,
+/// not answers (the row was left out, so under the promise
+/// `(->leg){1;2}[$-::id = 2]` lost the second row of a parallel
+/// leg).
+#[allow(clippy::type_complexity)]
 fn merge_by_position(paths: Vec<GPath>) -> Vec<GPath> {
     let mut kept: Vec<GPath> = Vec::new();
     let mut index: HashMap<
         (
             NodeId,
             Vec<(Option<String>, String)>,
-            Option<(NodeId, String, NodeId)>,
+            Option<(NodeId, String, NodeId, Option<NodeId>)>,
         ),
         usize,
     > = HashMap::new();
@@ -1492,7 +1886,7 @@ fn merge_by_position(paths: Vec<GPath>) -> Vec<GPath> {
             reg_key(&p.register),
             p.last_edge
                 .as_ref()
-                .map(|e| (e.source, e.label.clone(), e.target)),
+                .map(|e| (e.source, e.label.clone(), e.target, e.row)),
         );
         match index.get(&key) {
             Some(&i) => {
@@ -1714,6 +2108,7 @@ pub(crate) fn expand_elems(
                             position: (path.ext.node).into(),
                             command: command_now(),
                         },
+                        placed: true,
                         name: name.clone(),
                         value,
                     });
@@ -1765,6 +2160,10 @@ pub(crate) fn project(adapter: &impl AstAdapter, node: NodeId, proj: &Projection
             if matches!(v, Value::Null) && adapter.property_withheld(node, name) {
                 crate::value::ambient::record_omitted();
                 crate::pipeline::note_omitted();
+            }
+            // a name the source's declared surface lacks is told
+            if matches!(v, Value::Null) {
+                unknown_property(adapter, node, name);
             }
             v
         }
@@ -2289,6 +2688,12 @@ pub(crate) fn incident_edges(
             ));
         }
     }
+    // The incoming half is what the navop wildcard cannot leave out:
+    // over a source that cannot walk its links back the hop is
+    // refused (spec: The adapter contract).
+    if backward_refused(adapter, node, "~", named_label(step)) {
+        return Vec::new();
+    }
     for (label, s, row) in select_links(step, &backlinks_of(adapter, node), |l, s| {
         adapter.link_consumed(s, l)
     }) {
@@ -2431,7 +2836,8 @@ pub(crate) fn both_link_step(
 }
 
 /// A link hop's successors, each with the edge it crosses: `->` the
-/// outgoing links, `<-` the incoming, `--` both (the edge context
+/// outgoing links, `<-` the incoming, `--` both, `~` every edge
+/// touching the node, the tree's among them (the edge context
 /// recording the edge's true direction — the walk just declined to
 /// assert it). `None` for any other axis. One successor per EDGE:
 /// a node reached by two rows of an edge-declared table, or linked
@@ -2450,12 +2856,48 @@ pub(crate) fn link_edges(
     state: &GraphExt,
     register: &[Reg],
 ) -> Option<Vec<(NodeId, EdgeCtx)>> {
+    // `~`, the navop wildcard, hands its edges over as a link hop
+    // does (the review of 2026-11-10, graph B7): `~x` is
+    // `(/x|\x|->x|<-x)`, one thread per edge. The step had each edge
+    // in hand and answered nodes, and the edge was derived again from
+    // the node, the first that matched: two flights between two
+    // airports were one thread with the first one's fare, so
+    // `(~*){*_EUR}[P]?` answered a dearer total than `(--*)`.
+    if matches!(step.axis, Axis::Any) {
+        let matched = incident_edges(adapter, node, step);
+        // (the surface is not asked here: the wildcard's name may be
+        // a child's or the parent's, which are data, `/employees~99`)
+        return Some(apply_predicates(
+            adapter,
+            matched,
+            step,
+            trace,
+            outer,
+            witness,
+            state,
+            register,
+            |(n, _)| *n,
+            |(_, e)| Some(e.clone()),
+        ));
+    }
     let (outgoing, incoming) = match step.axis {
         Axis::OutLink => (true, false),
         Axis::InLink => (false, true),
         Axis::BothLink => (true, true),
         _ => return None,
     };
+    // A source with links it cannot walk back refuses the backward
+    // hop and the headless one (spec: The adapter contract).
+    if incoming
+        && backward_refused(
+            adapter,
+            node,
+            if outgoing { "--" } else { "<-" },
+            named_label(step),
+        )
+    {
+        return Some(Vec::new());
+    }
     let mut matched: Vec<(String, NodeId, bool, Option<NodeId>)> = Vec::new();
     if outgoing {
         matched.extend(
@@ -2474,6 +2916,12 @@ pub(crate) fn link_edges(
             .into_iter()
             .map(|(label, source, row)| (label, source, false, row)),
         );
+    }
+    // a label the source's declared surface lacks is told
+    if matched.is_empty()
+        && let Some(label) = named_label(step)
+    {
+        unknown_label(adapter, node, label);
     }
     matched.retain(|(_, other, _, _)| tests_ok(adapter, *other, step));
     let edge_of = |label: &String, other: NodeId, out: bool, row: Option<NodeId>| {
@@ -2642,15 +3090,12 @@ pub(crate) fn resolve_step(
         state,
         register,
         |&n| n,
-        // A resolution edge is labeled by its relation — html's
-        // rel — falling back to the property's reference label
-        // (the name without its `_id` suffix).
+        // the edge the step's predicates read: labeled as it is
+        // after the step
         |&t| {
             Some(EdgeCtx {
                 source: node,
-                label: adapter
-                    .ref_label(node, property)
-                    .unwrap_or_else(|| reference_label(property).to_string()),
+                label: resolution_label(adapter, node, property),
                 target: t,
                 row: None,
             })
@@ -2972,6 +3417,12 @@ pub(crate) fn value_match_step(
     let Some(own) = adapter.property(node, property) else {
         return;
     };
+    // A null on either side matches nothing (spec: Value Match;
+    // ruling 2026-11-10, as in a join's condition): a property that
+    // is there and null paired with every node whose cell is null.
+    if matches!(own, Value::Null) {
+        return;
+    }
     let candidates: Vec<NodeId> = match scope {
         // A model `index SCOPE::prop;` over this scope hands
         // the nodes holding the value; else the scope is
@@ -3026,7 +3477,7 @@ pub(crate) fn value_match_step(
         .filter(|&u| {
             adapter
                 .property(u, target)
-                .is_some_and(|v| value_eq(&own, &v, &scale))
+                .is_some_and(|v| !matches!(v, Value::Null) && value_eq(&own, &v, &scale))
                 && tests_ok(adapter, u, step)
         })
         .collect();
@@ -3079,9 +3530,7 @@ pub(crate) fn reverse_found(
         |&(source, ref p)| {
             Some(EdgeCtx {
                 source,
-                label: adapter
-                    .ref_label(source, p)
-                    .unwrap_or_else(|| reference_label(p).to_string()),
+                label: resolution_label(adapter, source, p),
                 target: node,
                 row: None,
             })

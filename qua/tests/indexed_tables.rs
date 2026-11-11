@@ -456,10 +456,11 @@ fn header_levels_stack_unstack_and_transpose() {
     let e = refuse("= #(@(a); %(1)) | unstack");
     assert!(e.contains("no index level to move"), "{e}");
     // unstack of a composite index: the inner level's values become
-    // header paths under each data column; the views nest by level
+    // header paths under each data column; the views nest by level,
+    // the header's own reading with them (ruling 2026-11-10)
     assert_eq!(
         one(&format!("= {m} | unstack | header")),
-        "@(:first<*; text>; :A:one<*; int>; :A:two<*; int>; :B:one<*; int>; :B:two<*; int>)"
+        "@(:first<*; text>; :A:@(:one<*; int>; :two<*; int>); :B:@(:one<*; int>; :two<*; int>))"
     );
     assert_eq!(
         one(&format!("= {m} | unstack | :A")),
@@ -477,10 +478,12 @@ fn header_levels_stack_unstack_and_transpose() {
         one(&format!("= {m} | unstack | @ | [1]")),
         r#"%(first = "bar"; A = %(one = 1; two = 2); B = %(one = 10; two = 20))"#
     );
-    // transpose carries the levels across
+    // transpose carries the levels across; the printed header writes
+    // a levelled column as its path (ruling 2026-11-10: a quoted name
+    // is one name, a bare path the levels)
     assert_eq!(
         one(&format!("= {m} | transpose")),
-        "#(@(column; \"bar:one\"; \"bar:two\"; \"baz:one\"; \"baz:two\");\n  %(\"A\"; 1; 2; 3; 4);\n  %(\"B\"; 10; 20; 30; 40))"
+        "#(@(column; bar:one; bar:two; baz:one; baz:two);\n  %(\"A\"; 1; 2; 3; 4);\n  %(\"B\"; 10; 20; 30; 40))"
     );
     assert_eq!(
         one(&format!("= {m} | transpose | :::index")),
@@ -620,9 +623,11 @@ fn a_literal_of_any_kind_and_a_conditional_stand_after_a_pipe() {
         "2013-01-01T06:00:00"
     );
     assert_eq!(one("= 2013-01-01T10:07:23 | truncate(1_w)"), "2012-12-27");
+    // the floor is taken in the written offset, which is kept
+    // (ruling 2026-11-10; it floored in UTC and dropped the offset)
     assert_eq!(
         one("= 2013-01-01T10:07:23+02:00 | truncate(1_h)"),
-        "2013-01-01T08:00:00"
+        "2013-01-01T10:00:00+02:00"
     );
     assert_eq!(
         one("= 1969-12-31T23:59:00 | truncate(1_h)"),

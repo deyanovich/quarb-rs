@@ -126,7 +126,7 @@ fn named_side<T: Clone>(
 pub(crate) fn session_recall(r: &RegRef) -> Value {
     let Some(memory) = crate::pipeline::run_option(|o| o.session.clone()) else {
         crate::value::ambient::record_refusal(
-            "the session memory is not open in this run: '$,name' and '| ,name' live in a session (quai, the qua REPL, a .quai file); the capsa's register is '$.name'".into(),
+            "the session memory is not open in this run: '$,name' and '| ,name' live in a session (quai, the qua REPL, a .quai file); the capsa's regula is '$.name'".into(),
         );
         return Value::Null;
     };
@@ -138,7 +138,7 @@ pub(crate) fn session_recall(r: &RegRef) -> Value {
             None => {
                 let held: Vec<&str> = memory.keys().map(String::as_str).collect();
                 crate::value::ambient::record_refusal(format!(
-                    "no value ',{name}' in the session memory (it holds: {}); the capsa's register is '$.{name}'",
+                    "no value ',{name}' in the session memory (it holds: {}); the capsa's regula is '$.{name}'",
                     if held.is_empty() {
                         "nothing".to_string()
                     } else {
@@ -222,16 +222,12 @@ pub(crate) fn recall_origins(register: &[Reg], r: &RegRef) -> Origins {
 /// The origins of one field of a recalled record (`$.r:name`): that
 /// part's own, the rest of the tree untouched.
 pub(crate) fn recall_field_origins(register: &[Reg], r: &RegRef, name: &str) -> Origins {
-    let reg = match r {
-        RegRef::Top => register.last(),
-        RegRef::Index(n) => register.get(n.saturating_sub(1)),
-        RegRef::Back(n) => register.iter().rev().nth(n.saturating_sub(1)),
-        RegRef::Named(key) => register
-            .iter()
-            .rev()
-            .find(|r| r.name.as_deref() == Some(key.as_str())),
-        _ => None,
-    };
+    // the regula the recall reads, by the recall's own count: the
+    // positions on the value side, a mark and a hidden regula out
+    // (the review of 2026-11-10, pipeline F10: the raw register was
+    // indexed, so with a mark pushed first `$.1:a` answered the
+    // record's field under the mark's origin)
+    let reg = recall_index(register, r).map(|i| &register[i]);
     match reg {
         Some(reg) => reg.prov.part(name).origins,
         None => recall_prov(register, r).part(name).origins,
@@ -271,13 +267,23 @@ pub(crate) fn named_register<T: Clone>(
     fields
 }
 
-/// The `%.` layout's provenance.
+/// The `%.` layout's provenance: the value side, as `%.` answers it.
 pub(crate) fn named_register_parts(register: &[Reg]) -> Vec<(String, Prov)> {
-    named_register(register, |r| &r.prov)
+    named_side(register, false, |r| &r.prov)
 }
 
-/// The `%.` layout's fields.
+/// The `%.` layout's fields: the value side, as `%.` answers it, the
+/// marks and the hidden regulae out. The enriched record `%%(…)` is
+/// `%.` with the given fields (spec: the named capsa record
+/// "extended with the given fields"); it read both sides, so a mark
+/// stood in it as a field (the review of 2026-11-10, pipeline F12).
 pub(crate) fn named_register_fields(register: &[Reg]) -> Vec<(String, Value)> {
+    named_side(register, false, |r| &r.value)
+}
+
+/// Every named regula of the register, the marks among them: what a
+/// round of a quantified push may change (the loop's signature).
+pub(crate) fn named_register_all(register: &[Reg]) -> Vec<(String, Value)> {
     named_register(register, |r| &r.value)
 }
 

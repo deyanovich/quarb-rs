@@ -566,10 +566,11 @@ impl AstAdapter for KafkaAdapter {
                 "partition" => Some(Value::Int(msg.partition as i64)),
                 "offset" => Some(Value::Int(msg.offset)),
                 "topic" => Some(Value::Str(topic.clone())),
+                // the broker's epoch stamp, a point of the timeline
                 "ts" => Some(Value::Instant {
                     secs: msg.secs,
                     nanos: msg.nanos,
-                    offset_min: None,
+                    offset_min: Some(0),
                     calendar: Default::default(),
                 }),
                 other => msg

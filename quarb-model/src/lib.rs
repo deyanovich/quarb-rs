@@ -18,8 +18,8 @@ mod parse;
 
 pub use parse::{
     AliasDecl, AliasKind, AliasRule, EdgeDecl, Label, Model, Mount, NodeDecl, PropertyDecl,
-    PropertyTyping, RefDecl, RelDecl, UnitDecl, WeightSpec, parse_model, parse_model_file,
-    resolve_mount_target,
+    PropertyTyping, RefDecl, RelDecl, STATEMENTS, UnitDecl, WeightSpec, parse_model,
+    parse_model_file, resolve_mount_target,
 };
 
 use quarb::{AstAdapter, NodeId, QueryResult, Value};
@@ -144,6 +144,11 @@ struct Fabric {
     /// The same edges from the far end: the backward reading,
     /// `<-label`; `--label` reads both.
     edge_back: HashMap<NodeId, Vec<(String, NodeId, NodeId)>>,
+    /// Every label the fabric walks back under (a declared ref's, a
+    /// relation's, an edge's backward reading): over a base that
+    /// cannot walk its own links back, a hop naming one of these is
+    /// still the model's to answer (`backlinks_unsupported`).
+    back_labels: HashSet<String>,
     /// (source, label, target) → the scope node the edge was made
     /// from (a stage row): its other cells are the edge's properties
     /// (`$-::parasangs`), both directions.
@@ -803,6 +808,7 @@ impl<A: AstAdapter> ModelAdapter<A> {
         if let Err(e) = &self.units {
             return Err(e.clone());
         }
+        self.check_queries()?;
         self.check_declared_traits()?;
         self.check_declaration_order()?;
         self.check_weights()?;
@@ -810,6 +816,61 @@ impl<A: AstAdapter> ModelAdapter<A> {
         self.check_ref_targets()?;
         self.check_label_properties()?;
         self.check_trees()
+    }
+
+    /// Every declaration's query parses (the user, 2026-11-10: "wrong
+    /// query should raise an error"). A statement whose path did not
+    /// parse answered an empty container, an empty scope or no edges,
+    /// and the model loaded in silence: each place that ran such a
+    /// query took its failure for an empty answer. Refused at load,
+    /// naming the statement; a query that parses and is refused when
+    /// it runs refuses the query that reached it (`refused_query`).
+    pub fn check_queries(&self) -> Result<(), String> {
+        let defs = quarb::parse_defs(&self.model.defs_text)
+            .map_err(|e| format!("the model's definitions do not parse: {e}"))?;
+        let run = quarb::inherited();
+        let parses = |statement: String, query: &str| -> Result<(), String> {
+            quarb::Query::parse_with(query, &defs, &self.base, &run)
+                .map(|_| ())
+                .map_err(|e| format!("{statement}: the query '{query}' is refused: {e}"))
+        };
+        for d in &self.model.nodes {
+            parses(format!("node /{}/{}", d.name, d.role), &d.query)?;
+        }
+        for d in &self.model.refs {
+            parses(format!("ref {}::{}", d.scope, d.field), &d.scope)?;
+        }
+        for d in &self.model.rels {
+            let statement = || format!("rel {} -> {}", d.source, d.target);
+            parses(statement(), &d.source)?;
+            parses(statement(), &d.target)?;
+        }
+        for d in &self.model.edges {
+            parses(format!("edge {}", d.scope), &d.scope)?;
+        }
+        for d in &self.model.trees {
+            parses(format!("tree {}", d.identity), &d.path)?;
+        }
+        for d in &self.model.indexes {
+            parses(format!("index {}::{}", d.scope, d.property), &d.scope)?;
+        }
+        for d in &self.model.graphs {
+            parses(d.stmt.clone(), &d.scope)?;
+        }
+        for d in &self.model.potentials {
+            parses(d.stmt.clone(), &d.scope)?;
+        }
+        Ok(())
+    }
+
+    /// A declaration's query that was refused when it ran: the
+    /// refusal is the enclosing query's, so the query that reached
+    /// the declaration is refused in its words. It was taken for an
+    /// empty answer.
+    fn refused_query(query: &str, e: &dyn std::fmt::Display) {
+        let why = e.to_string();
+        let why = why.strip_prefix("refused: ").unwrap_or(&why);
+        quarb::record_refusal(format!("the model's query '{query}' is refused: {why}"));
     }
 
     /// Refuse a label by property (`as ::prop`) where a row's value
@@ -1175,7 +1236,10 @@ impl<A: AstAdapter> ModelAdapter<A> {
                     .map(Member::Node)
                     .collect()
             }
-            Err(_) => Vec::new(),
+            Err(e) => {
+                Self::refused_query(query, &e);
+                Vec::new()
+            }
         }
     }
 
@@ -1268,6 +1332,7 @@ impl<A: AstAdapter> ModelAdapter<A> {
                 rel_back: HashMap::new(),
                 edges: HashMap::new(),
                 edge_back: HashMap::new(),
+                back_labels: HashSet::new(),
                 edge_rows: HashMap::new(),
                 acyclic: HashMap::new(),
                 renamed: HashSet::new(),
@@ -1300,6 +1365,18 @@ impl<A: AstAdapter> ModelAdapter<A> {
             // (node, field) reaches is kept for the edges below.
             let mut reached: HashMap<(NodeId, String), Vec<(String, NodeId)>> = HashMap::new();
             for decl in &self.model.refs {
+                // the labels a ref walks back under are the model's to
+                // answer whether or not a row carries one yet: its name,
+                // or the role of the scope it leaves
+                match &decl.label {
+                    Some(Label::Name(l)) => {
+                        f.back_labels.insert(l.clone());
+                    }
+                    Some(Label::Property(_)) => {}
+                    None => {
+                        f.back_labels.insert(scope_role(&decl.scope));
+                    }
+                }
                 // The target's key index: a derived container's
                 // members (within the role the path names, when it
                 // names one), keyed by the explicit target property
@@ -1512,6 +1589,7 @@ impl<A: AstAdapter> ModelAdapter<A> {
                             );
                         }
                         f.ref_fwd.entry(node).or_default().push((fwd, target));
+                        f.back_labels.insert(back.clone());
                         f.ref_back
                             .entry(target)
                             .or_default()
@@ -1528,6 +1606,7 @@ impl<A: AstAdapter> ModelAdapter<A> {
             for decl in &self.model.rels {
                 let fwd = scope_role(&decl.target);
                 let back = scope_role(&decl.source);
+                f.back_labels.insert(back.clone());
                 for source in self.view_nodes(&decl.source, &defs) {
                     let cond = self.bind_driver(&decl.cond, source);
                     let query = format!("{}{}", decl.target, cond);
@@ -1555,6 +1634,10 @@ impl<A: AstAdapter> ModelAdapter<A> {
             // edge of its own (spec: Edge rows): two rows on one leg
             // are two edges, told apart by the row.
             for decl in &self.model.edges {
+                // a named edge walks back under its name, rows or none
+                if let Some(Label::Name(l)) = &decl.label {
+                    f.back_labels.insert(l.clone());
+                }
                 for node in self.scope_nodes(&decl.scope, &defs) {
                     let (Some(ends_a), Some(ends_b)) = (
                         reached.get(&(node, decl.field_a.clone())),
@@ -1599,6 +1682,7 @@ impl<A: AstAdapter> ModelAdapter<A> {
                                     .entry(*na)
                                     .or_default()
                                     .push((fwd.clone(), *nb, node));
+                                f.back_labels.insert(back.clone());
                                 f.edge_back
                                     .entry(*nb)
                                     .or_default()
@@ -1630,7 +1714,11 @@ impl<A: AstAdapter> ModelAdapter<A> {
     fn scope_nodes(&self, scope: &str, defs: &quarb::Defs) -> Vec<NodeId> {
         match quarb::run_with_defs(scope, defs, &self.base) {
             Ok(QueryResult::Nodes(ns)) => ns,
-            _ => Vec::new(),
+            Ok(_) => Vec::new(),
+            Err(e) => {
+                Self::refused_query(scope, &e);
+                Vec::new()
+            }
         }
     }
 
@@ -1647,7 +1735,11 @@ impl<A: AstAdapter> ModelAdapter<A> {
         };
         match quarb::run_with_defs(path, defs, &view) {
             Ok(QueryResult::Nodes(ns)) => ns,
-            _ => Vec::new(),
+            Ok(_) => Vec::new(),
+            Err(e) => {
+                Self::refused_query(path, &e);
+                Vec::new()
+            }
         }
     }
 
@@ -2323,6 +2415,35 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
         }
     }
 
+    /// The base's surface under the model: the properties the model
+    /// declares are properties too, and the labels are open, a
+    /// model's edge being labeled as it declares, by a name or by a
+    /// property's value. Every declared name counts, whatever its
+    /// scope: a property declared under a predicate
+    /// (`/flights/*[::carrier = "swissair"]::swiss`) is absent from
+    /// the rows outside it and a property of the table all the same,
+    /// so a name is told only where neither the base nor the model
+    /// knows it.
+    fn surface(&self, node: NodeId) -> Option<quarb::Surface> {
+        let base = match self.decode(node) {
+            Some((_, v)) if v > 0 => self.aliased(node)?,
+            Some(_) => return None,
+            None => node,
+        };
+        let mut surface = self.base.surface(base)?;
+        if let Some(properties) = &mut surface.properties {
+            // those declared on this node first, as its own
+            let here = self.declared_on(base);
+            for i in here.iter().copied().chain(0..self.props.len()) {
+                if !properties.contains(&self.props[i].name) {
+                    properties.push(self.props[i].name.clone());
+                }
+            }
+        }
+        surface.labels = None;
+        Some(surface)
+    }
+
     fn row_columns(&self, node: NodeId) -> Option<Vec<String>> {
         let base = match self.decode(node) {
             Some((_, v)) if v > 0 => self.aliased(node)?,
@@ -2661,6 +2782,22 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
                 out
             }
         }
+    }
+
+    /// Over a base that cannot walk its links back (spec: The adapter
+    /// contract) the model still walks back what it declares: a
+    /// value node's backlinks are the fabric's alone, and at a base
+    /// node a hop naming a label the fabric walks back under — a
+    /// ref's, a relation's, an edge's — is answered from the fabric.
+    /// Any other hop there (a wildcard, a pattern, a label of the
+    /// base's own) needs the base's backlinks, and the base's answer
+    /// stands. The base is asked first: the fabric is built only
+    /// over a base that says it cannot.
+    fn backlinks_unsupported(&self, node: NodeId, label: Option<&str>) -> bool {
+        if self.decode(node).is_some() || !self.base.backlinks_unsupported(node, label) {
+            return false;
+        }
+        !label.is_some_and(|l| self.fabric().back_labels.contains(l))
     }
 
     /// The document the base holds under a URL — base ids pass

@@ -111,10 +111,10 @@ fn a_quarq_written_in_place_applies_and_a_held_one_is_spliced() {
     assert_eq!(one("= q(mean | $_ * 5.6) | .f | @(1; 2; 3) | &$.f"), "11.2");
     // the glued colon applies a quarq as it applies a projector
     assert_eq!(one("= @(1; 2) | .f(q(+ 1)) | $_&$.f"), "@(2; 3)");
-    // a register holding no quarq refuses the splice
+    // a regula holding no quarq refuses the splice
     let e = run("= \"x\" | .f | 10 | &$.f").unwrap_err().to_string();
     assert!(
-        e.contains("&$.f splices a quarq, and the register holds text"),
+        e.contains("&$.f splices a quarq, and the regula holds text"),
         "{e}"
     );
 }

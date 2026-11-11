@@ -158,15 +158,20 @@ struct Cli {
     #[arg(long, conflicts_with_all = ["json", "kaiv"])]
     jsonl: bool,
 
-    /// Print the results as an aligned text table: records become
-    /// columns (the union of their fields, in first-seen order),
-    /// scalars a `value` column; widths count grapheme clusters, so
-    /// stressed words align.
-    #[arg(long = "pretty", alias = "table", conflicts_with_all = ["json", "jsonl", "kaiv", "csv"])]
+    /// Print the results as an aligned text table: each record a
+    /// row, its fields the columns (the union of the records'
+    /// fields, in first-seen order), scalars a `value` column;
+    /// widths count grapheme clusters, so stressed words align.
+    #[arg(long = "pretty", conflicts_with_all = ["json", "jsonl", "kaiv", "csv"])]
     table: bool,
 
+    /// Retired: the aligned text table is `--pretty` (an alias
+    /// through 0.37; refused with the pointer since).
+    #[arg(long = "table", hide = true)]
+    retired_table: bool,
+
     /// Print the results as CSV (RFC 4180), a header row first; the
-    /// same columns as --table.
+    /// same columns as --pretty.
     #[arg(long, conflicts_with_all = ["json", "jsonl", "kaiv", "table"])]
     csv: bool,
 
@@ -266,8 +271,9 @@ struct Cli {
     highlight_html: bool,
 
     /// Save the result instead of printing it: `.json` writes a
-    /// JSON array, any other extension a SQLite table (records
-    /// become columns) — both first-class inputs for later queries.
+    /// JSON array, any other extension a SQLite table (each record
+    /// a row, its fields the columns) — both first-class inputs for
+    /// later queries.
     #[arg(long, value_name = "FILE")]
     save: Option<PathBuf>,
 
@@ -758,6 +764,18 @@ fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
         }
     }
 
+    // A refused query is a message, not a crash: under
+    // `RUST_BACKTRACE=1` every error captured a stack and the
+    // refusal printed it after its causes. The variable keeps its
+    // meaning for a panic; the stack of an error is asked for by
+    // its own name, `RUST_LIB_BACKTRACE=1` (single-threaded here,
+    // and before the first error is made).
+    if std::env::var_os("RUST_LIB_BACKTRACE").is_none() {
+        unsafe {
+            std::env::set_var("RUST_LIB_BACKTRACE", "0");
+        }
+    }
+
     // `qua man [--ru] [NAME | '|' | @|]` and `qc man`: the command
     // inventory, before the query grammar sees the words (`man` is
     // reserved as a first argument); `--commands` lists the
@@ -811,6 +829,9 @@ fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
     // scheme) are taken off the inputs here, from the command line
     // only: mounting one is the opt-in that lets `ALIAS:name(…)`
     // run code outside the query.
+    if cli.retired_table {
+        anyhow::bail!("'--table' is retired: the aligned text table is '--pretty'");
+    }
     let (environments, mounted) = take_environments(&mut cli)?;
     let locale = set_output_locale(&cli)?;
     let mut piped = if profile == Profile::Calc {
@@ -1318,6 +1339,19 @@ fn resident_socket(cli: &Cli, oc: &OutputCtx) -> anyhow::Result<PathBuf> {
         .hash(&mut h);
     // (a thirteenth element: tuples hash up to twelve)
     cli.frontier_bound.hash(&mut h);
+    // The root the tree is opened at, the graph bound, and the
+    // environments mounted. The key hashes `allow_shell` so that a
+    // client is never answered by a session with more reach than it
+    // asked for; the mounts that replaced the flag are taken out of
+    // the paths before the paths are hashed, so a client that mounted
+    // nothing reached a session started with `bin=exec:/bin` and ran
+    // `bin:cat` in it, for the session's half hour. And a session
+    // opened at `--root /a` answered a client that named no root.
+    cli.root.hash(&mut h);
+    cli.graph_bound.hash(&mut h);
+    for e in &oc.environments {
+        (&e.alias, std::mem::discriminant(&e.kind), &e.target).hash(&mut h);
+    }
     // A session renders as it was started: its output form and its
     // grouping are part of its identity, so a --json session never
     // answers a plain client. A relative source (`t.txt`,
@@ -3119,7 +3153,7 @@ fn human_size(n: usize) -> String {
     if n < 1000 {
         format!("{n} B")
     } else if n < 1_000_000 {
-        format!("{:.1} KB", n as f64 / 1000.0)
+        format!("{:.1} kB", n as f64 / 1000.0)
     } else {
         format!("{:.1} MB", n as f64 / 1_000_000.0)
     }
@@ -3168,10 +3202,23 @@ fn clipboard_tool(text: &str) -> anyhow::Result<&'static str> {
         else {
             continue;
         };
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(text.as_bytes())?;
+        // A tool that exits before it has read everything (no display,
+        // a wrapper that fails) closes the pipe. Under the default
+        // SIGPIPE disposition `cli_main` restores, that write killed
+        // qua: exit 141, no message, the next tool never tried. The
+        // signal is ignored for the write, which then fails with EPIPE.
+        #[cfg(unix)]
+        let previous = unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+        let wrote = match child.stdin.take() {
+            Some(mut stdin) => stdin.write_all(text.as_bytes()).is_ok(),
+            None => true,
+        };
+        #[cfg(unix)]
+        unsafe {
+            libc::signal(libc::SIGPIPE, previous);
         }
-        if child.wait().map(|st| st.success()).unwrap_or(false) {
+        let finished = child.wait().map(|st| st.success()).unwrap_or(false);
+        if wrote && finished {
             return Ok(tool);
         }
     }
@@ -3363,6 +3410,8 @@ fn units_target(p: &Path) -> Option<PathBuf> {
                 || pair == "slugs"
                 || pair.starts_with("slugs=")
                 || pair.starts_with("units=")
+                || pair == "sci"
+                || pair.starts_with("sci=")
         })
         .then(|| p.to_path_buf())
 }
@@ -3962,8 +4011,8 @@ fn config_output(key: &str) -> Option<toml::Value> {
 
 /// Materialize a result: `.json` writes a JSON array (records as
 /// objects — the shape the JSON adapter reads back); anything else
-/// writes a SQLite table (records become columns, scalars a
-/// `value` column). Refuses to overwrite: an existing .json file,
+/// writes a SQLite table (each record a row, its fields the columns,
+/// scalars a `value` column). Refuses to overwrite: an existing .json file,
 /// or an existing table in a .db.
 fn save_result(path: &Path, table: &str, values: Vec<Value>) -> anyhow::Result<()> {
     let ext = path
@@ -4000,7 +4049,7 @@ fn save_result(path: &Path, table: &str, values: Vec<Value>) -> anyhow::Result<(
         )?;
         return Ok(());
     }
-    // SQLite: records become columns (first-appearance union),
+    // SQLite: the records' fields are the columns (first-appearance union),
     // scalars a single `value` column.
     let mut conn =
         rusqlite::Connection::open(path).with_context(|| format!("opening {}", path.display()))?;

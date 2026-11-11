@@ -7,7 +7,7 @@
 //! [`SqlError::Unsupported`] naming the construct, never silently
 //! approximated.
 //!
-//! - `SELECT cols FROM t` → `/t/* | rec(::col, …)`; `SELECT *` →
+//! - `SELECT cols FROM t` → `/t/* | %(::col; …)`; `SELECT *` →
 //!   the row nodes; `SELECT DISTINCT col` → `/t/*::col @| unique`.
 //! - `WHERE` → a predicate: comparisons, `AND`/`OR`/`NOT`,
 //!   `IS [NOT] NULL` → `= null` / `!= null` (exact: Quarb's

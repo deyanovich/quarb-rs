@@ -279,6 +279,37 @@ fn bounded_repeat(text: &str, n: usize, what: &str) -> Value {
     }
 }
 
+/// A padding past [`MAX_REPEAT_BYTES`]: the refusal, as `repeat`
+/// refuses. A width is a count taken from the query or from data
+/// (`lpad(::n)`), and `lpad(30000000000)` aborted the process on its
+/// allocation.
+fn pad_too_wide(what: &str, n: usize, have: usize, fill: &str) -> Option<Value> {
+    let widest = fill.chars().map(char::len_utf8).max().unwrap_or(1);
+    match (n - have).checked_mul(widest) {
+        Some(bytes) if bytes <= MAX_REPEAT_BYTES => None,
+        _ => {
+            crate::value::ambient::record_refusal(format!(
+                "{what}({n}): the result would exceed {} bytes",
+                MAX_REPEAT_BYTES
+            ));
+            Some(Value::Null)
+        }
+    }
+}
+
+/// The most bins a histogram or `bins(n)` builds: a count from the
+/// query must not size an allocation without a bound
+/// (`bins(99999999999)` aborted the process).
+pub const MAX_BINS: usize = 1 << 20;
+
+/// The widest bar `histogram(--width=n)` draws, in cells.
+pub const MAX_BAR_WIDTH: usize = 4096;
+
+/// The most values `skipgrams` answers, over all its grams: the
+/// count of grams times their length grows past memory on a long
+/// stream.
+pub const MAX_GRAM_VALUES: usize = 1 << 24;
+
 /// How far below the shallowest level an outline may reach: the
 /// executor refuses `number` / `outline` past it (levels are data).
 pub const MAX_OUTLINE_DEPTH: i64 = 64;
@@ -617,7 +648,14 @@ pub fn apply_scalar(
     if crate::syntax::man::is_scalar_kind(&call.name)
         && !BROADCAST_EXEMPT.contains(&call.name.as_str())
     {
+        let numeric = NUMERIC_COMMANDS.contains(&call.name.as_str());
         let one = |v: Value| {
+            // a cell of a kind a numeric command does not take stays
+            // as it is (ruling 2026-11-10: `sqrt`, the logarithms,
+            // `exp` and `pow` made it null, where `round` kept it)
+            if numeric && untaken(call, &v) {
+                return v;
+            }
             let mut out = apply_scalar_inner(call, v, scale);
             match out.len() {
                 0 => Value::Null,
@@ -654,10 +692,63 @@ pub fn apply_scalar(
                     }
                 }];
             }
+            // A lone value of a kind a numeric command does not take
+            // answers null, and the run warns once for the command,
+            // counting them (the same ruling: every thread is a lone
+            // value, so a refusal would end a query over one "n/a",
+            // and the text kept under `round` looked like an answer).
+            // The cell `map` hands its body stays, as above.
+            other if numeric && untaken(call, &other) => {
+                if crate::value::ambient::in_cells() {
+                    return vec![other];
+                }
+                crate::value::ambient::record_untaken(
+                    &call.name,
+                    numeric_takes(&call.name),
+                    || {
+                        let shown = crate::value::held_text(&other);
+                        let shown = match shown.char_indices().nth(40) {
+                            Some((cut, _)) => format!("{}…", &shown[..cut]),
+                            None => shown,
+                        };
+                        format!("{} {shown}", kind_of(&other))
+                    },
+                );
+                return vec![Value::Null];
+            }
             other => return apply_scalar_inner(call, other, scale),
         }
     }
     apply_scalar_inner(call, topic, scale)
+}
+
+/// The numeric commands: what they do with a value that is no number
+/// is one rule ([`apply_scalar`]).
+const NUMERIC_COMMANDS: [&str; 10] = [
+    "round", "floor", "ceil", "abs", "log", "log2", "log10", "exp", "sqrt", "pow",
+];
+
+/// What a numeric command takes, for the warning.
+fn numeric_takes(name: &str) -> &'static str {
+    match name {
+        "round" | "floor" | "ceil" | "abs" => "a number or a quantity",
+        _ => "a number",
+    }
+}
+
+/// Whether `v` is of a kind the numeric command `call` does not
+/// apply to. Null is no kind (it answers null); a table and a
+/// library value are refused by kind where the command runs.
+fn untaken(call: &FnCall, v: &Value) -> bool {
+    match v {
+        Value::Null | Value::Table(_) | Value::Foreign(_) => false,
+        // `pow` with no exponent is refused whatever stands before it
+        _ if call.name == "pow" && arg_num(call, 0).is_none() => false,
+        // the rounders and `abs` work in a quantity's written unit;
+        // the elementary functions have no reading of one
+        Value::Quantity { .. } => numeric_takes(&call.name) == "a number",
+        other => other.numeric().is_none(),
+    }
 }
 
 fn apply_scalar_inner(
@@ -1007,6 +1098,8 @@ fn apply_scalar_inner(
             let have = text.graphemes(true).count();
             if have >= n || fill.is_empty() {
                 vec![Value::Str(text.clone())]
+            } else if let Some(refused) = pad_too_wide(&call.name, n, have, fill) {
+                vec![refused]
             } else {
                 let left = (n - have) / 2;
                 let right = n - have - left;
@@ -1021,6 +1114,8 @@ fn apply_scalar_inner(
             let have = text.graphemes(true).count();
             if have >= n || fill.is_empty() {
                 vec![Value::Str(text.clone())]
+            } else if let Some(refused) = pad_too_wide(&call.name, n, have, fill) {
+                vec![refused]
             } else {
                 let pad: String = fill.chars().cycle().take(n - have).collect();
                 vec![Value::Str(if call.name == "lpad" {
@@ -1398,22 +1493,11 @@ fn apply_scalar_inner(
         // defined via the temporal reading, so they serve typed
         // instants, epoch integers, and ISO text alike; no reading
         // means null.
+        // `datetime` takes no operand (ruling 2026-11-10): it reads
+        // ISO 8601, which no locale respells; `strptime(fmt; LOCALE)`
+        // is the parser that reads a locale's words (the parser
+        // refuses an operand here with that pointer).
         "datetime" => {
-            // `datetime(LOCALE)`: a locale the tables do not carry is
-            // refused, naming the carried ones (spec: the locale-taking
-            // functions, 2026-11-06); a carried one reads as the
-            // canonical forms do today
-            let locale = arg_str(call, 0, "");
-            if !locale.is_empty()
-                && !crate::value::locale::is_canonical(locale)
-                && crate::value::locale::for_tag(locale).is_none()
-            {
-                crate::value::ambient::record_refusal(format!(
-                    "datetime: no tables for locale {locale:?} (carried: {})",
-                    crate::value::locale::SHIPPED.join(", ")
-                ));
-                return vec![Value::Null];
-            }
             vec![match &topic {
                 Value::Instant { .. } => topic.clone(),
                 Value::Str(s) => crate::temporal::parse_iso(s)
@@ -1424,12 +1508,13 @@ fn apply_scalar_inner(
                         calendar: Default::default(),
                     })
                     .unwrap_or(Value::Null),
+                // a number is an epoch, a point of the timeline: `Z`
                 other => other
-                    .temporal_reading()
-                    .map(|(secs, nanos)| Value::Instant {
+                    .offset_reading()
+                    .map(|(secs, nanos, offset_min)| Value::Instant {
                         secs,
                         nanos,
-                        offset_min: None,
+                        offset_min,
                         calendar: Default::default(),
                     })
                     .unwrap_or(Value::Null),
@@ -1491,7 +1576,7 @@ fn apply_scalar_inner(
             }
             let Some((ds, dn)) = d.span_parts() else {
                 return refuse(format!(
-                    "truncate: the argument must be a duration of seconds to weeks (5_min, 6_h, 1_d), not {}",
+                    "truncate: the operand must be a duration of seconds to weeks (5_min, 6_h, 1_d), not {}",
                     kind_of(&d)
                 ));
             };
@@ -1499,14 +1584,18 @@ fn apply_scalar_inner(
             if step <= 0 {
                 return refuse(format!("truncate: the duration must be positive, not {d}"));
             }
-            vec![match topic.temporal_reading() {
-                Some((secs, nanos)) => {
-                    let total = secs as i128 * 1_000_000_000 + nanos as i128;
+            // the floor is taken on the wall clock the instant is
+            // written on, and the offset is kept (ruling 2026-11-10):
+            // a day at +02:00 begins at its own midnight
+            vec![match topic.offset_reading() {
+                Some((secs, nanos, offset_min)) => {
+                    let shift = i128::from(offset_min.unwrap_or(0)) * 60;
+                    let total = (secs as i128 + shift) * 1_000_000_000 + nanos as i128;
                     let floored = total.div_euclid(step) * step;
                     Value::Instant {
-                        secs: floored.div_euclid(1_000_000_000) as i64,
+                        secs: (floored.div_euclid(1_000_000_000) - shift) as i64,
                         nanos: floored.rem_euclid(1_000_000_000) as u32,
-                        offset_min: None,
+                        offset_min,
                         calendar: Default::default(),
                     }
                 }
@@ -1516,13 +1605,70 @@ fn apply_scalar_inner(
         // `isoformat` is the reading, formatted UTC (spec: The
         // Temporal Fragment) — a typed instant renders in UTC, not
         // its written display offset, so it agrees with the text and
-        // epoch paths rather than short-circuiting to Display.
+        // epoch paths rather than short-circuiting to Display. The
+        // text carries the `Z` (ruling 2026-11-10), for every
+        // instant, one read with no offset included: it is a point
+        // on the UTC timeline and reads back as one.
         "isoformat" => vec![
             topic
                 .temporal_reading()
-                .map(|(s, n)| Value::Str(crate::temporal::format_instant(s, n, None)))
+                .map(|(s, n)| Value::Str(crate::temporal::format_instant(s, n, Some(0))))
                 .unwrap_or(Value::Null),
         ],
+        // `offset` (ruling 2026-11-10), the command of the offset
+        // trait. Bare: the offset the instant is written at, as text,
+        // "+02:00" or "Z"; null where it is written with none. With
+        // an operand, the offset's word written or computed
+        // (`offset(+2)`, `offset(Z)`, `offset(::tz)`): the instant
+        // declared at it where it was written with none, the wall
+        // time kept and the point moved; displayed at it where it
+        // has one, the point kept. A topic that is no instant is
+        // null.
+        "offset" => {
+            let written = match &topic {
+                Value::Instant { offset_min, .. } => Some(*offset_min),
+                Value::Str(s) => crate::temporal::parse_iso(s).map(|(_, _, o)| o),
+                _ => None,
+            };
+            let word = match call.args.first() {
+                None => {
+                    return vec![match written {
+                        Some(Some(m)) => Value::Str(crate::value::offset_spelling(m)),
+                        _ => Value::Null,
+                    }];
+                }
+                Some(Arg::Lit(Value::Null)) => return vec![Value::Null],
+                Some(Arg::Lit(Value::Str(s))) => s.clone(),
+                // a number written or computed is a count of hours
+                Some(Arg::Lit(Value::Int(n))) => format!("{n:+}"),
+                Some(Arg::Lit(other)) => other.to_string(),
+                Some(other) => {
+                    crate::value::ambient::record_refusal(format!(
+                        "offset takes an offset from UTC, written or computed (offset(+2), \
+                         offset(+02:00), offset(Z), offset(::tz)), not {}",
+                        arg_kind(other)
+                    ));
+                    return vec![Value::Null];
+                }
+            };
+            match crate::value::offset_word(&word) {
+                Some(Ok(m)) => vec![match written {
+                    Some(_) => crate::value::cast_offset(&topic, m).unwrap_or(Value::Null),
+                    None => Value::Null,
+                }],
+                Some(Err(why)) => {
+                    crate::value::ambient::record_refusal(format!("offset: {why}"));
+                    vec![Value::Null]
+                }
+                None => {
+                    crate::value::ambient::record_refusal(format!(
+                        "offset: '{word}' names no offset from UTC: a signed count of hours \
+                         ('+2'), hours and minutes ('+02:00', '+05:30'), or 'Z' for UTC"
+                    ));
+                    vec![Value::Null]
+                }
+            }
+        }
         "year" | "month" | "day" | "hour" | "minute" | "second" => {
             // the date fields in the topic's calendar reading (spec:
             // Calendars): the year in its era, the month's ordinal,
@@ -1532,8 +1678,10 @@ fn apply_scalar_inner(
             let code = call.name == "month" && arg_str(call, 0, "") == "code";
             vec![
                 topic
-                    .temporal_reading()
-                    .and_then(|(secs, _)| {
+                    .offset_reading()
+                    .and_then(|(secs, _, offset)| {
+                        // in the written offset (ruling 2026-11-10)
+                        let secs = Value::wall_secs(secs, offset);
                         let (gy, gmo, gd, h, mi, se) = crate::temporal::components(secs);
                         let cd = crate::calendar::date(calendar, secs.div_euclid(86400))?;
                         let (y, mo, d) = if calendar == Default::default() {
@@ -1564,8 +1712,13 @@ fn apply_scalar_inner(
             let calendar = topic_calendar(&topic);
             vec![
                 topic
-                    .temporal_reading()
-                    .and_then(|(secs, _)| crate::calendar::date(calendar, secs.div_euclid(86400)))
+                    .offset_reading()
+                    .and_then(|(secs, _, offset)| {
+                        crate::calendar::date(
+                            calendar,
+                            Value::wall_secs(secs, offset).div_euclid(86400),
+                        )
+                    })
                     .and_then(|cd| cd.era)
                     .map(Value::Str)
                     .unwrap_or(Value::Null),
@@ -1611,11 +1764,11 @@ fn apply_scalar_inner(
                     .map(Value::period)
                     .unwrap_or(Value::Null),
                 other => other
-                    .temporal_reading()
-                    .map(|(secs, nanos)| Value::Instant {
+                    .offset_reading()
+                    .map(|(secs, nanos, offset_min)| Value::Instant {
                         secs,
                         nanos,
-                        offset_min: None,
+                        offset_min,
                         calendar: cal,
                     })
                     .unwrap_or(Value::Null),
@@ -1623,8 +1776,9 @@ fn apply_scalar_inner(
         }
         "isodate" | "isomonth" | "isoweek" => vec![
             topic
-                .temporal_reading()
-                .map(|(secs, _)| {
+                .offset_reading()
+                .map(|(secs, _, offset)| {
+                    let secs = Value::wall_secs(secs, offset);
                     let (y, mo, d, ..) = crate::temporal::components(secs);
                     Value::Str(match call.name.as_str() {
                         "isodate" => format!("{y:04}-{mo:02}-{d:02}"),
@@ -1673,10 +1827,10 @@ fn apply_scalar_inner(
                     calnames,
                 )),
                 other => other
-                    .temporal_reading()
-                    .map(|(s, n)| {
+                    .offset_reading()
+                    .map(|(s, n, offset)| {
                         Value::Str(crate::temporal::strftime_cal(
-                            &fmt, s, n, None, names, calendar, calnames,
+                            &fmt, s, n, offset, names, calendar, calnames,
                         ))
                     })
                     .unwrap_or(Value::Null),
@@ -1684,15 +1838,20 @@ fn apply_scalar_inner(
         }
         "weekday" => vec![
             topic
-                .temporal_reading()
-                .map(|(secs, _)| Value::Int(crate::temporal::weekday(secs) as i64))
+                .offset_reading()
+                .map(|(secs, _, offset)| {
+                    Value::Int(crate::temporal::weekday(Value::wall_secs(secs, offset)) as i64)
+                })
                 .unwrap_or(Value::Null),
         ],
+        // the day of the written offset, as an offset-less date
+        // (ruling 2026-11-10): 23:30 at -05:00 is that day, where the
+        // UTC day answered the next
         "date" => vec![
             topic
-                .temporal_reading()
-                .map(|(secs, _)| Value::Instant {
-                    secs: secs.div_euclid(86400) * 86400,
+                .offset_reading()
+                .map(|(secs, _, offset)| Value::Instant {
+                    secs: Value::wall_secs(secs, offset).div_euclid(86400) * 86400,
                     nanos: 0,
                     offset_min: None,
                     // the day keeps the reading of its instant
@@ -2008,11 +2167,11 @@ fn apply_scalar_inner(
             _ => Value::Null,
         }],
 
-        // Numeric scalars: a value with no numeric coercion is
-        // answered unchanged (ruling 2026-11-01), so a text or null
-        // cell of a table, a field of a record, an item of a list
-        // and a lone text piped in all come back as they were, one
-        // rule at every size. A QUANTITY rounds in its display unit
+        // Numeric scalars: a value with no numeric coercion never
+        // arrives here (`apply_scalar`: a cell of a table, a field
+        // of a record, an item of a list comes back as it was, a
+        // lone one answers null under the run's warning; rulings
+        // 2026-11-01 and 2026-11-10). A QUANTITY rounds in its display unit
         // and stays a quantity — `(::speed | convert('km/h')) |
         // round` is a whole number of km/h, not of base
         // meters-per-second.
@@ -2502,10 +2661,39 @@ fn convert_scalar(
                 base: base.clone(),
                 written: Some((crate::value::quantity::unscale_by(*value, factor), target)),
             },
-            // A unit of another dimension, or one no library
-            // declares: no reading (the recipes rely on a null
-            // here — `bushels = null` beside a weight).
-            _ => Value::Null,
+            // A unit of another dimension: refused (ruling
+            // 2026-11-10; spec: Physical Quantities, the conversion
+            // of unlike dimensions "is refused"), under `convert` as
+            // under `unit(u)` and `magnitude(u)`, which convert the
+            // same way. It answered null.
+            Some((_, tbase)) => {
+                // Two currencies have no fixed rate: the way on is a
+                // rate stated, and the refusal points at it as the
+                // others point at their remedy. The bases differ in
+                // the currency alone (`EUR` and `USD`, `EUR/kg` and
+                // `USD/kg`); the exchange takes the currency for its
+                // target, and the conversion follows it.
+                let currency = |b: &str| {
+                    b.split(|c: char| !c.is_ascii_alphabetic())
+                        .find(|w| crate::value::quantity::CURRENCIES.contains(w))
+                        .map(str::to_string)
+                };
+                let pointer = match (currency(base), currency(&tbase)) {
+                    (Some(a), Some(b)) if a != b && base.replace(&a, &b) == tbase => format!(
+                        ": two currencies have no fixed rate; state one, as in \
+                         exchange(%({a} = 1.08_{b}); {b})"
+                    ),
+                    _ => String::new(),
+                };
+                crate::record_refusal(format!(
+                    "{}({target}): a quantity converts within its own dimension, and these \
+                     are unlike ({base} and {tbase}){pointer}",
+                    call.name
+                ));
+                Value::Null
+            }
+            // one no library declares: no reading
+            None => Value::Null,
         },
         _ => Value::Null,
     }]
@@ -3036,7 +3224,17 @@ fn apply_inner(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
             let k = arg_int(call, 1).unwrap_or(0).max(0) as usize;
             let mut out = Vec::new();
             for start in 0..input.len() {
-                skipgrams_from(&input, start, n, k, &mut Vec::new(), &mut out);
+                // a gram needs n members at rising positions
+                if input.len() - start < n {
+                    break;
+                }
+                skipgrams_from(&input, start, n, k, &mut out);
+                if out.len().saturating_mul(n) > MAX_GRAM_VALUES {
+                    crate::value::ambient::record_refusal(format!(
+                        "skipgrams({n}; {k}): the grams would hold more than {MAX_GRAM_VALUES} values"
+                    ));
+                    return vec![Value::Null];
+                }
             }
             out
         }
@@ -3381,7 +3579,21 @@ fn durational_fold(input: &[Value]) -> DurFold {
     });
     match present.collect() {
         Some(spans) => DurFold::Spans(spans),
-        None => DurFold::Unsound,
+        None => {
+            // A number without a unit among spans is refused, as it
+            // is beside any other quantity (the user, 2026-11-10:
+            // "fold refuse too"): time is a dimension like the
+            // others. (One fold read it as seconds and another
+            // answered null for it.)
+            if input.iter().any(|v| {
+                !v.is_duration()
+                    && !matches!(v, Value::Null | Value::Bool(_))
+                    && v.numeric_reading().is_some()
+            }) {
+                unsound_fold("s and a bare number");
+            }
+            DurFold::Unsound
+        }
     }
 }
 
@@ -3409,7 +3621,7 @@ enum QuantFold {
     /// refuse. A null, a bool or unreadable text is missing, as it
     /// is to the numeric fold (ruling 2026-11-08: a column of
     /// quantities with "NA" cells still has a mean).
-    Unsound,
+    Unsound(String),
 }
 
 fn quantital_fold(input: &[Value], scale: Scale) -> QuantFold {
@@ -3457,21 +3669,21 @@ fn quantital_fold(input: &[Value], scale: Scale) -> QuantFold {
                 },
             },
             Value::Null | Value::Bool(_) => continue,
-            // a number is seconds in a fold of time (the durational
-            // coercion), refused on any other dimension
+            // a number without a unit: refused beside a dimensioned
+            // quantity, time among them (below)
             Value::Int(_) | Value::Float(_) => match v.numeric() {
                 Some(n) => {
                     numbers.push(n);
                     continue;
                 }
-                None => return QuantFold::Unsound,
+                None => return QuantFold::Unsound(String::new()),
             },
-            _ => return QuantFold::Unsound,
+            _ => return QuantFold::Unsound(String::new()),
         };
         match &base {
             None => base = Some(b),
             Some(prev) if *prev == b => {}
-            Some(_) => return QuantFold::Unsound,
+            Some(prev) => return QuantFold::Unsound(format!("{prev} and {b}")),
         }
         // the first value's written unit is the result's, the base
         // when it has none (spec: the display of a computed quantity)
@@ -3490,17 +3702,36 @@ fn quantital_fold(input: &[Value], scale: Scale) -> QuantFold {
         mags.push(value);
     }
     match base {
-        Some(base) if base == "s" || numbers.is_empty() => {
-            mags.extend(numbers);
-            QuantFold::Same { base, unit, mags }
-        }
+        Some(base) if numbers.is_empty() => QuantFold::Same { base, unit, mags },
         // quantities of dimension one (percents, angles) beside bare
         // numbers fold as the numbers they are (ruling 2026-11-09):
         // the numeric fold reads them through their numeric reading
         Some(base) if base == "1" => QuantFold::Absent,
-        Some(_) => QuantFold::Unsound,
+        // a bare number beside a dimensioned quantity: refused, as
+        // the operator refuses `5_km + 5` (ruling 2026-11-10; both
+        // answered null)
+        Some(base) => QuantFold::Unsound(format!("{base} and a bare number")),
         None => QuantFold::Absent,
     }
+}
+
+/// A fold over quantities of unlike dimensions: refused, naming the
+/// two (spec: Physical Quantities, their sum "is refused"; the
+/// operator refuses `5_km + 3_s`, and the fold answered null). A
+/// value that is no quantity at all leaves the fold null as before.
+fn unsound_fold(clash: &str) -> Value {
+    if clash.ends_with("a bare number") {
+        crate::record_refusal(format!(
+            "a fold over a quantity and a number without a unit ({clash}): arithmetic is not \
+             defined for them; give the number its unit, or fold the magnitudes (| magnitude)"
+        ));
+    } else if !clash.is_empty() {
+        crate::record_refusal(format!(
+            "a fold over quantities of unlike dimensions ({clash}): arithmetic is not defined \
+             for them; convert first"
+        ));
+    }
+    Value::Null
 }
 
 /// Mint a fold's result on its base, re-expressed in the shared
@@ -3522,7 +3753,7 @@ fn sum(input: &[Value], scale: Scale) -> Value {
     // mixed units of one dimension welcome (kW + W + BTU/h), unit
     // text lifted alongside; mixed dimensions refused.
     match quantital_fold(input, scale) {
-        QuantFold::Unsound => return Value::Null,
+        QuantFold::Unsound(clash) => return unsound_fold(&clash),
         QuantFold::Same { base, unit, mags } => {
             let value = mags.iter().sum();
             return quantital_result(value, base, unit);
@@ -3833,9 +4064,14 @@ fn clean(call: &FnCall, topic: Value) -> Result<Value, String> {
         })?,
         None => crate::value::number::Decimal::Point,
     };
+    // `--sci`: the scientific reading (ruling 2026-11-10)
+    let sci = call
+        .args
+        .iter()
+        .any(|a| matches!(a, Arg::Opt { name, .. } if name == "--sci"));
     let cell = |v: &Value| -> Value {
         match v {
-            Value::Str(s) => clean_text(s, &nulls, locale),
+            Value::Str(s) => clean_text(s, &nulls, locale, sci),
             other => other.clone(),
         }
     };
@@ -3899,7 +4135,8 @@ fn clean(call: &FnCall, topic: Value) -> Result<Value, String> {
             let header: Option<Vec<String>> = t.header.clone();
             let cleaned = crate::Table::typed(header, rows, declared)?
                 .with_index(t.index)
-                .with_name(t.name.clone());
+                .with_name(t.name.clone())
+                .with_levels(t.levels);
             // the dirt the constructor warned of is cleaned: its
             // warning leaves the run (the document-tables round, F4)
             let cleaned_names: Vec<String> = (0..t.width())
@@ -3935,9 +4172,132 @@ fn clean(call: &FnCall, topic: Value) -> Result<Value, String> {
             Ok(Value::table(cleaned))
         }
         Value::List(items) => Ok(Value::list(items.iter().map(cell).collect())),
-        Value::Str(s) => Ok(clean_text(&s, &nulls, locale)),
+        Value::Str(s) => Ok(clean_text(&s, &nulls, locale, sci)),
         other => Ok(other),
     }
+}
+
+/// A power as it is written: `6.02 × 10^23`, the mantissa by ten to
+/// the exponent, and `10^3`, `2^10`, a number to it. The sign of
+/// multiplication is `×`, `x`, `·`, `⋅` or `*`; the exponent stands
+/// after a caret, which is how a superscript reads here. An integer
+/// where the number is one and the power is whole and fits. A unit
+/// after it makes the quantity (`5.97 × 10^24 kg`).
+pub(crate) fn power(text: &str, locale: crate::value::number::Decimal) -> Option<Value> {
+    use crate::value::number::{canonical, read};
+    let (left, right) = text.trim().rsplit_once('^')?;
+    let right = right.trim_start();
+    let (negative, digits) = match right.chars().next()? {
+        c @ ('-' | '−' | '–') => (true, &right[c.len_utf8()..]),
+        '+' => (false, &right[1..]),
+        _ => (false, right),
+    };
+    let n_digits = digits.bytes().take_while(u8::is_ascii_digit).count();
+    let exp: i32 = digits[..n_digits].parse().ok()?;
+    if exp > 308 {
+        return None;
+    }
+    let exp = if negative { -exp } else { exp };
+    let unit = digits[n_digits..].trim();
+    let left = left.trim_end();
+    let whole = |v: f64| v.is_finite().then_some(Value::Float(v));
+    let times_ten = left
+        .strip_suffix("10")
+        .map(str::trim_end)
+        .and_then(|r| r.strip_suffix(['×', 'x', 'X', '·', '⋅', '*']));
+    let number = match times_ten {
+        // the mantissa by ten to the exponent, read as the one
+        // number it spells (5.1 × 10^8 is 510000000, and no product
+        // of two floats)
+        Some(m) => {
+            let c = canonical(m.trim(), locale)?;
+            let int = c
+                .parse::<i64>()
+                .ok()
+                .filter(|_| exp >= 0)
+                .and_then(|m| 10i64.checked_pow(exp as u32).and_then(|p| m.checked_mul(p)));
+            match int {
+                Some(n) => Value::Int(n),
+                None => whole(format!("{c}e{exp}").parse::<f64>().ok()?)?,
+            }
+        }
+        None => match read(left, locale)? {
+            Value::Int(b) if exp >= 0 => match b.checked_pow(exp as u32) {
+                Some(n) => Value::Int(n),
+                None => whole((b as f64).powi(exp))?,
+            },
+            other => whole(other.numeric()?.powi(exp))?,
+        },
+    };
+    if unit.is_empty() {
+        return Some(number);
+    }
+    // the number written out in full, as the unit reader takes it
+    let spelled = match &number {
+        Value::Float(f) => format!("{f}"),
+        other => other.to_string(),
+    };
+    crate::value::quantity::parse_unit_text(&format!("{spelled} {unit}")).map(
+        |(value, base, wv, wu)| Value::Quantity {
+            value,
+            base,
+            written: Some((wv, wu)),
+        },
+    )
+}
+
+/// The superscript digits and signs of a text written out
+/// (`m²` as `m^2`, `10⁻³` as `10^-3`), each run read as a
+/// document's `sup` is (`tabula::raised`): an exponent written with
+/// its caret, a footnote mark dropped.
+fn written_superscripts(text: &str, sci: bool) -> String {
+    let plain = |c: char| -> Option<char> {
+        Some(match c {
+            '⁰' => '0',
+            '¹' => '1',
+            '²' => '2',
+            '³' => '3',
+            '⁴' => '4',
+            '⁵' => '5',
+            '⁶' => '6',
+            '⁷' => '7',
+            '⁸' => '8',
+            '⁹' => '9',
+            '⁺' => '+',
+            '⁻' => '-',
+            _ => return None,
+        })
+    };
+    if !text.chars().any(|c| plain(c).is_some()) {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut run = String::new();
+    let flush = |out: &mut String, run: &mut String| {
+        if run.is_empty() {
+            return;
+        }
+        match crate::graph::tabula::raised(out, run, sci, false) {
+            crate::graph::tabula::Raised::Exponent(n) => {
+                out.push('^');
+                out.push_str(&n);
+            }
+            crate::graph::tabula::Raised::Footnote => {}
+            crate::graph::tabula::Raised::Other => out.push_str(run),
+        }
+        run.clear();
+    };
+    for c in text.chars() {
+        match plain(c) {
+            Some(p) => run.push(p),
+            None => {
+                flush(&mut out, &mut run);
+                out.push(c);
+            }
+        }
+    }
+    flush(&mut out, &mut run);
+    out
 }
 
 /// `correlate(t; --on=:col?; --inner? --first-wins? --last-wins?
@@ -3956,7 +4316,6 @@ fn clean(call: &FnCall, topic: Value) -> Result<Value, String> {
 /// counts, the repeats taken, the renames.
 fn correlate(call: &FnCall, topic: Value) -> Result<Value, String> {
     use crate::syntax::ast::Operand;
-    use std::collections::HashMap;
     let Value::Table(t) = &topic else {
         return Err(format!("correlate joins a table, not {}", kind_of(&topic)));
     };
@@ -3964,7 +4323,7 @@ fn correlate(call: &FnCall, topic: Value) -> Result<Value, String> {
         Some(Arg::Lit(Value::Table(u))) => u.clone(),
         Some(Arg::Lit(other)) => {
             return Err(format!(
-                "the argument is {}, not a table: correlate($,t2; --on=:col)",
+                "the operand is {}, not a table: correlate($,t2; --on=:col)",
                 kind_of(other)
             ));
         }
@@ -4060,46 +4419,55 @@ fn correlate(call: &FnCall, topic: Value) -> Result<Value, String> {
         None => 0,
     };
     if u.index == 0 {
-        return Err("the argument's index is the key: set it with #(-i=:col)".into());
+        return Err("the operand's index is the key: set it with #(-i=:col)".into());
     }
     if u.index > 1 {
-        return Err("one key column for now: the argument's index has several levels".into());
+        return Err("one key column for now: the operand's index has several levels".into());
     }
-    // the key as `=` reads it: a number by magnitude whatever its
-    // spelling, a quantity in its base, text as itself; null matches
-    // nothing
-    fn key_text(v: &Value) -> Option<String> {
-        match v {
-            Value::Null => None,
-            Value::Quantity { value, base, .. } => Some(format!("q:{base}:{value}")),
-            other => match other.numeric_reading().and_then(|n| n.numeric()) {
-                Some(x) => Some(format!("n:{x}")),
-                None => Some(format!("t:{other}")),
-            },
+    // the key and the operand's index agree on a type first: the
+    // topic's column stands as the declared or undeclared side it is
+    if let Some((ta, ua)) = agreed_keys("correlate", t, &u, &[(key_col, 0)])? {
+        let mut agreed = call.clone();
+        if let Some(slot) = agreed
+            .args
+            .iter_mut()
+            .find(|a| !matches!(a, Arg::Opt { .. }))
+        {
+            *slot = Arg::Lit(Value::table(ua));
         }
+        return correlate(&agreed, Value::table(ta));
     }
-    let mut by_label: HashMap<String, Vec<usize>> = HashMap::new();
-    let mut order: Vec<String> = Vec::new();
+    // The key is matched as `=` compares (spec: Concatenation,
+    // correlated tables): two integers exactly, a number and its
+    // text, one instant under two offsets, one magnitude under two
+    // units; `true` is not "true". A null matches nothing. The
+    // operand's labels are gathered one entry per label `=` tells
+    // apart, each with its rows in order.
+    let unit = |e: &str| crate::value::ambient::unit_scale(e).flatten();
+    let mut labels = crate::stdlib::compare::EqIndex::new(&unit);
+    let mut by_label: Vec<Vec<usize>> = Vec::new();
     for r in 0..u.n_rows() {
-        if let Some(k) = key_text(&u.cell(r, 0)) {
-            let rows = by_label.entry(k.clone()).or_default();
-            if rows.is_empty() {
-                order.push(k);
+        let l = u.cell(r, 0);
+        if matches!(l, Value::Null) {
+            continue;
+        }
+        match labels.matching(&l).first() {
+            Some(&class) => by_label[class].push(r),
+            None => {
+                labels.push(l);
+                by_label.push(vec![r]);
             }
-            rows.push(r);
         }
     }
-    let repeated: Vec<(String, Vec<usize>)> = order
+    let repeated: Vec<(String, Vec<usize>)> = by_label
         .iter()
-        .filter_map(|k| {
-            let rows = &by_label[k];
-            (rows.len() > 1).then(|| (u.cell(rows[0], 0).to_string(), rows.clone()))
-        })
+        .filter(|rows| rows.len() > 1)
+        .map(|rows| (u.cell(rows[0], 0).to_string(), rows.clone()))
         .collect();
     if !repeated.is_empty() && !(first_wins || last_wins || many) {
         let (label, rows) = &repeated[0];
         return Err(format!(
-            "the argument's index is not unique: '{label}' {} (rows {}){}; --first-wins or --last-wins take one row of a repeated label, --many every row",
+            "the operand's index is not unique: '{label}' {} (rows {}){}; --first-wins or --last-wins take one row of a repeated label, --many every row",
             match rows.len() {
                 2 => "twice".to_string(),
                 n => format!("{n} times"),
@@ -4139,9 +4507,18 @@ fn correlate(call: &FnCall, topic: Value) -> Result<Value, String> {
     let (mut matched, mut unmatched) = (0usize, 0usize);
     for i in 0..t.n_rows() {
         let left: Vec<Value> = (0..t.width()).map(|j| t.cell(i, j)).collect();
-        let hits: Vec<usize> = key_text(&t.cell(i, key_col))
-            .and_then(|k| by_label.get(&k).cloned())
-            .unwrap_or_default();
+        let key = t.cell(i, key_col);
+        let hits: Vec<usize> = if matches!(key, Value::Null) {
+            Vec::new()
+        } else {
+            let mut rows: Vec<usize> = labels
+                .matching(&key)
+                .into_iter()
+                .flat_map(|class| by_label[class].iter().copied())
+                .collect();
+            rows.sort_unstable();
+            rows
+        };
         if hits.is_empty() {
             unmatched += 1;
             if !inner {
@@ -4181,7 +4558,7 @@ fn correlate(call: &FnCall, topic: Value) -> Result<Value, String> {
     }
     if !repeated.is_empty() && (first_wins || last_wins) {
         msg.push_str(&format!(
-            "; repeated in the argument's index: {}, the {} row taken",
+            "; repeated in the operand's index: {}, the {} row taken",
             repeated
                 .iter()
                 .map(|(l, r)| format!("'{l}' ×{}", r.len()))
@@ -4208,7 +4585,8 @@ fn correlate(call: &FnCall, topic: Value) -> Result<Value, String> {
     Ok(Value::table(
         crate::Table::typed(Some(header), rows, declared)?
             .with_index(t.index)
-            .with_name(t.name.clone()),
+            .with_name(t.name.clone())
+            .with_levels(t.levels),
     ))
 }
 
@@ -4394,7 +4772,8 @@ fn apply_scopes(
         .collect();
     Ok(crate::Table::typed(t.header.clone(), rows, declared)?
         .with_index(t.index)
-        .with_name(t.name.clone()))
+        .with_name(t.name.clone())
+        .with_levels(t.levels))
 }
 
 /// The title options of `#` and `clean` on a table in hand:
@@ -4547,7 +4926,8 @@ pub(crate) fn title_pass(
         .collect();
     let passed = crate::Table::typed(Some(plan.header.clone()), rows, declared)?
         .with_index(t.index)
-        .with_name(t.name.clone());
+        .with_name(t.name.clone())
+        .with_levels(t.levels);
     if casts.is_empty() {
         Ok(passed)
     } else {
@@ -4558,14 +4938,21 @@ pub(crate) fn title_pass(
 /// One text cell cleaned: trimmed; a footnote mark at its end
 /// (`[1]`, `*`, `†`) dropped; a null word null; `12 %` the ratio
 /// 0.12; `330.5 k` scaled (k, M, G/bn, mn); a number under the
-/// locale; else the text as trimmed.
+/// locale; a power of ten (`6.02 × 10^23`); else the text as
+/// trimmed. Superscript digits are read as a document's are
+/// (`5 m²` five square metres, `10⁻³` a thousandth). `sci` is the
+/// scientific reading (ruling 2026-11-10): a bare superscript digit
+/// right after a plain number is an exponent (`10³` is 1000, a
+/// footnote mark without it), and an uppercase K after a number is
+/// the kelvin (the thousand without it).
 pub(crate) fn clean_text(
     text: &str,
     nulls: &[String],
     locale: crate::value::number::Decimal,
+    sci: bool,
 ) -> Value {
     use crate::value::number::read;
-    let mut t = text.trim().to_string();
+    let mut t = written_superscripts(text.trim(), sci).trim().to_string();
     // footnote marks: `[n]`, `[a]`, trailing daggers and stars
     loop {
         let before = t.len();
@@ -4609,7 +4996,15 @@ pub(crate) fn clean_text(
             written: Some((n, "%".to_string())),
         };
     }
-    // a scale suffix
+    // a power as written, `6.02 × 10^23`, `10^-3`
+    if let Some(v) = power(&t, locale) {
+        return v;
+    }
+    // a scale suffix. An uppercase `K` is the thousand, as the
+    // lowercase is, and under the scientific reading the kelvin and
+    // no scale (the user, 2026-11-10: "with ?sci K is kelvin, without
+    // it it's the current behavior"): there `300 K` goes on to the
+    // unit rung below and reads as any trailing unit does, `300_K`.
     let scaled = [
         ("bn", 1e9),
         ("mn", 1e6),
@@ -4619,6 +5014,7 @@ pub(crate) fn clean_text(
         ("K", 1e3),
     ]
     .iter()
+    .filter(|(suffix, _)| !(sci && *suffix == "K"))
     .find_map(|(suffix, factor)| {
         t.strip_suffix(suffix)
             .map(str::trim_end)
@@ -4780,14 +5176,16 @@ fn describe_table(t: &crate::Table, scale: Scale) -> Result<Value, String> {
         })
         .collect();
     Ok(Value::table(
-        crate::Table::new(Some(header), rows).with_index(1),
+        crate::Table::new(Some(header), rows)
+            .with_index(1)
+            .with_levels(t.levels),
     ))
 }
 
 fn mean(input: &[Value], scale: Scale) -> Value {
     // The mean of same-base quantities is a quantity on that base.
     match quantital_fold(input, scale) {
-        QuantFold::Unsound => return Value::Null,
+        QuantFold::Unsound(clash) => return unsound_fold(&clash),
         QuantFold::Same { base, unit, mags } => {
             let value = mags.iter().sum::<f64>() / mags.len() as f64;
             return quantital_result(value, base, unit);
@@ -4825,7 +5223,7 @@ fn median(input: &[Value], scale: Scale) -> Value {
     // The median of same-base quantities is a quantity on that
     // base; mixed dimensions refuse.
     match quantital_fold(input, scale) {
-        QuantFold::Unsound => return Value::Null,
+        QuantFold::Unsound(clash) => return unsound_fold(&clash),
         QuantFold::Same {
             base,
             unit,
@@ -4890,7 +5288,7 @@ fn quantile(input: &[Value], q: f64, scale: Scale) -> Value {
         Some((v, frac == 0.0))
     }
     match quantital_fold(input, scale) {
-        QuantFold::Unsound => return Value::Null,
+        QuantFold::Unsound(clash) => return unsound_fold(&clash),
         QuantFold::Same { base, unit, mags } => {
             return match at(mags, q) {
                 Some((v, _)) => quantital_result(v, base, unit),
@@ -4913,7 +5311,7 @@ fn quantile(input: &[Value], q: f64, scale: Scale) -> Value {
 }
 
 /// The Levenshtein distance between two texts, in codepoints.
-fn levenshtein(a: &str, b: &str) -> usize {
+pub(crate) fn levenshtein(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
     if a.is_empty() {
@@ -4944,7 +5342,7 @@ fn spread(input: &[Value], finish: impl Fn(f64) -> f64, scale: Scale, ddof: usiz
     // carries the base's unit, a variance its square — typing them
     // is a ruling for the quantital round's next pass).
     let nums: Vec<f64> = match quantital_fold(input, scale) {
-        QuantFold::Unsound => return Value::Null,
+        QuantFold::Unsound(clash) => return unsound_fold(&clash),
         // The engaged fold's magnitudes include lifted unit text,
         // which the numeric path below would silently drop.
         QuantFold::Same { mags, .. } => mags,
@@ -4998,27 +5396,33 @@ fn distribution(input: &[Value], scale: Scale) -> Vec<f64> {
 
 /// The skip-grams starting at `start`: `chosen` so far, `n` to
 /// choose in all, `k` skips still allowed.
-fn skipgrams_from(
-    input: &[Value],
-    start: usize,
-    n: usize,
-    k: usize,
-    chosen: &mut Vec<Value>,
-    out: &mut Vec<Value>,
-) {
-    chosen.push(input[start].clone());
-    if chosen.len() == n {
-        out.push(Value::list(chosen.clone()));
-    } else {
-        for skip in 0..=k {
-            let next = start + 1 + skip;
-            if next >= input.len() {
-                break;
-            }
-            skipgrams_from(input, next, n, k - skip, chosen, out);
+fn skipgrams_from(input: &[Value], start: usize, n: usize, k: usize, out: &mut Vec<Value>) {
+    // A walk with its own stack: the recursion was as deep as the
+    // gram is long, and `skipgrams(200000; 0)` overflowed the stack.
+    // Per depth: the position chosen, the skips left after it, the
+    // next skip to try.
+    let mut chosen: Vec<usize> = vec![start];
+    let mut left: Vec<usize> = vec![k];
+    let mut next_skip: Vec<usize> = vec![0];
+    while let Some(&at) = chosen.last() {
+        let d = chosen.len() - 1;
+        let skip = next_skip[d];
+        let next = at + 1 + skip;
+        if chosen.len() == n {
+            out.push(Value::list(
+                chosen.iter().map(|&i| input[i].clone()).collect(),
+            ));
+        } else if skip <= left[d] && next < input.len() {
+            next_skip[d] += 1;
+            chosen.push(next);
+            left.push(left[d] - skip);
+            next_skip.push(0);
+            continue;
         }
+        chosen.pop();
+        left.pop();
+        next_skip.pop();
     }
-    chosen.pop();
 }
 
 /// The corpus tier's class of a token: a word (a letter in it), a
@@ -5452,9 +5856,11 @@ fn extreme(input: Vec<Value>, want: std::cmp::Ordering, scale: Scale) -> Vec<Val
     // (unit text beside a bare number orders by the unital
     // comparison below; the fold's refusal is for typed quantities)
     if input.iter().any(|v| matches!(v, Value::Quantity { .. }))
-        && matches!(quantital_fold(&input, scale), QuantFold::Unsound)
+        && let QuantFold::Unsound(clash) = quantital_fold(&input, scale)
     {
-        return vec![Value::Null];
+        // refused in the folds' words, where it answered null: two
+        // dimensions, or a number without a unit beside a quantity
+        return vec![unsound_fold(&clash)];
     }
     // NaN is never an extreme: it orders after every other number
     // and a stream's least or greatest is a number.
@@ -5910,13 +6316,10 @@ pub(crate) fn table_order_reading(
 /// `None` for any other command.
 pub(crate) fn record_order_reading(call: &FnCall, r: &crate::value::Record) -> Option<Value> {
     let fields: Vec<(String, Value)> = r.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-    let slice = |s: usize, e: usize| Value::Record(fields[s..e].to_vec().into());
+    // the keys kept as the values they are, and the declarations
+    let slice = |s: usize, e: usize| Value::Record(r.pick(s..e));
     Some(match call.name.as_str() {
-        "reverse" => {
-            let mut f = fields.clone();
-            f.reverse();
-            Value::Record(f.into())
-        }
+        "reverse" => Value::Record(r.pick((0..r.len()).rev())),
         "first" | "last" => {
             let from_end = call.name == "last";
             match call.args.first() {
@@ -6221,6 +6624,23 @@ fn record_concat(
 /// place (the update), under overlapping headers the right side's
 /// values take the shared names.
 fn table_concat(t: &crate::Table, right: Value, overwrite: bool) -> Result<Value, String> {
+    // Rows appended under the header of an indexed table bring their
+    // labels in the columns the index names, and `++!` updates by
+    // them: the two meet as indexes do, and agree on a type first.
+    if let Value::Table(more) = &right
+        && t.index > 0
+        && let (Some(h1), Some(h2)) = (&t.header, &more.header)
+        && h1.len() == h2.len()
+        && h1.iter().all(|c| h2.contains(c))
+    {
+        let pairs: Vec<(usize, usize)> = (0..t.index)
+            .filter_map(|j| h2.iter().position(|c| *c == h1[j]).map(|r| (j, r)))
+            .collect();
+        let command = if overwrite { "++!" } else { "++" };
+        if let Some((ta, ua)) = agreed_keys(command, t, more, &pairs)? {
+            return table_concat(&ta, Value::table(ua), overwrite);
+        }
+    }
     let mut header = t.header.clone();
     let mut rows = t.rows_vec();
     let n = rows.len() + 1;
@@ -6247,17 +6667,20 @@ fn table_concat(t: &crate::Table, right: Value, overwrite: bool) -> Result<Value
                             .map(|&j| r.get(j).cloned().unwrap_or(Value::Null))
                             .collect()
                     };
-                    let mut seen_left: Vec<(Vec<Value>, usize)> = Vec::new();
-                    let mut keys: Vec<(Vec<Value>, usize)> = Vec::new();
+                    // the rows by (label, its n-th occurrence), the
+                    // labels equal as values (spec: Indexed tables)
+                    let mut classes = crate::value::LabelIndex::new();
+                    let mut seen_left = crate::value::Occurrences::new();
+                    let mut at: std::collections::HashMap<(usize, usize), usize> =
+                        std::collections::HashMap::new();
                     if !levels.is_empty() {
                         let own: Vec<usize> = (0..t.index).collect();
-                        for r in &rows {
+                        for (i, r) in rows.iter().enumerate() {
                             let l = label(r, &own);
-                            let n = occurrence(&mut seen_left, &l);
-                            keys.push((l, n));
+                            at.insert(seen_left.next(&mut classes, &l), i);
                         }
                     }
-                    let mut seen_right: Vec<(Vec<Value>, usize)> = Vec::new();
+                    let mut seen_right = crate::value::Occurrences::new();
                     for r in more.rows() {
                         let fields: Vec<(String, Value)> =
                             h2.iter().cloned().zip(r.iter()).collect();
@@ -6268,11 +6691,11 @@ fn table_concat(t: &crate::Table, right: Value, overwrite: bool) -> Result<Value
                             continue;
                         }
                         let l = label(&r.cells(), &levels);
-                        let n = occurrence(&mut seen_right, &l);
-                        match keys.iter().position(|(x, m)| *x == l && *m == n) {
-                            Some(i) => rows[i] = row,
+                        let slot = seen_right.next(&mut classes, &l);
+                        match at.get(&slot) {
+                            Some(&i) => rows[i] = row,
                             None => {
-                                keys.push((l, n));
+                                at.insert(slot, rows.len());
                                 rows.push(row);
                             }
                         }
@@ -6336,24 +6759,9 @@ fn table_concat(t: &crate::Table, right: Value, overwrite: bool) -> Result<Value
     Ok(Value::table(
         crate::Table::typed(header, rows, t.declared.clone())?
             .with_index(t.index)
-            .with_name(t.name.clone()),
+            .with_name(t.name.clone())
+            .with_levels(t.levels),
     ))
-}
-
-/// The n-th time a label is met on one side: the count kept per
-/// label, so a label standing on several rows pairs its n-th row
-/// with the other side's n-th.
-fn occurrence(seen: &mut Vec<(Vec<Value>, usize)>, l: &[Value]) -> usize {
-    match seen.iter_mut().find(|(x, _)| x == l) {
-        Some((_, n)) => {
-            *n += 1;
-            *n
-        }
-        None => {
-            seen.push((l.to_vec(), 1));
-            1
-        }
-    }
 }
 
 /// `t ++ u` with disjoint headers, or `t ++! u` with headers that
@@ -6415,8 +6823,158 @@ fn column_concat(t: &crate::Table, u: &crate::Table, overwrite: bool) -> Result<
     Ok(Value::table(
         crate::Table::typed(Some(header), rows, declared)?
             .with_index(t.index)
-            .with_name(t.name.clone()),
+            .with_name(t.name.clone())
+            .with_levels(t.levels || u.levels),
     ))
+}
+
+/// Two indexes that meet agree on a type, level by level, before
+/// their labels are compared (ruling 2026-11-10). `pairs` names the
+/// key columns that meet, one of `t` with one of `u`:
+///
+/// - a declared one against an undeclared: the declared type wins,
+///   the other side's labels are cast to it, and a label that does
+///   not cast refuses, naming it;
+/// - two undeclared: both are upcast to their common type, the
+///   least type every label of the two reads as (an integer with a
+///   float is a float, anything with text is text);
+/// - two declared: the same type, or an integer with a float, which
+///   meet as floats; any other pair refuses, naming both.
+///
+/// `None` where nothing changes; else the two tables with their key
+/// columns cast, declared where either side declared them. (The
+/// labels were compared as values across the two columns' types, so
+/// 1 against "1" were two labels and a declaration bound its own
+/// side alone.)
+pub(crate) fn agreed_keys(
+    command: &str,
+    t: &crate::Table,
+    u: &crate::Table,
+    pairs: &[(usize, usize)],
+) -> Result<Option<(crate::Table, crate::Table)>, String> {
+    use crate::value::ColumnType as T;
+    let mut out: Option<(crate::Table, crate::Table)> = None;
+    for &(lj, rj) in pairs {
+        let (left, right) = match &out {
+            Some((a, b)) => (a, b),
+            None => (t, u),
+        };
+        let (lcells, rcells) = (left.column_cells(lj), right.column_cells(rj));
+        // what each side was, for the telling
+        let was = |x: &crate::Table, j: usize, cells: &[Value]| -> (bool, String) {
+            match x.declaration(j) {
+                Some(ty) => (true, ty.word()),
+                None => (false, crate::value::type_column(cells.to_vec()).0.word()),
+            }
+        };
+        let (ldecl, lword) = was(left, lj, &lcells);
+        let (rdecl, rword) = was(right, rj, &rcells);
+        let (lname, rname) = (left.column_name(lj), right.column_name(rj));
+        let (target, declared): (T, bool) = match (left.declaration(lj), right.declaration(rj)) {
+            (Some(a), Some(b)) if a == b => continue,
+            (Some(T::Integer), Some(T::Float)) | (Some(T::Float), Some(T::Integer)) => {
+                (T::Float, true)
+            }
+            (Some(a), Some(b)) => {
+                return Err(format!(
+                    "the indexes meet as {} ('{}') and {} ('{}'): two declared indexes align \
+                     where their types are the same, or an integer with a float; cast one \
+                     to the other first (map(<{}>; --to=:::index))",
+                    a.word(),
+                    left.column_name(lj),
+                    b.word(),
+                    right.column_name(rj),
+                    a.word()
+                ));
+            }
+            (Some(a), None) | (None, Some(a)) => (a, true),
+            (None, None) => {
+                let (a, b) = (
+                    crate::value::type_column(lcells.clone()).0,
+                    crate::value::type_column(rcells.clone()).0,
+                );
+                if a == b {
+                    continue;
+                }
+                let both: Vec<Value> = lcells.iter().chain(&rcells).cloned().collect();
+                (crate::value::type_column(both).0, false)
+            }
+        };
+        let cast = |cells: &[Value], name: String| -> Result<Vec<Value>, String> {
+            cells
+                .iter()
+                .map(|c| match crate::value::cast_cell(c, &target) {
+                    Some(v) => Ok(v),
+                    // the common type of two undeclared columns takes
+                    // every label by construction
+                    None if !declared => Ok(c.clone()),
+                    None => Err(format!(
+                        "the indexes meet as {}, the declared one, and the label {} of '{name}' \
+                         does not cast to it: cast that index first (map(<{}>; --to=:::index)), \
+                         or drop the declaration (map(<*>; --to=:::index))",
+                        target.word(),
+                        crate::value::held_text(c),
+                        target.word()
+                    )),
+                })
+                .collect()
+        };
+        let lnew = cast(&lcells, left.column_name(lj))?;
+        let rnew = cast(&rcells, right.column_name(rj))?;
+        let declaration = declared.then(|| target.clone());
+        let changed = lnew != lcells
+            || rnew != rcells
+            || left.declaration(lj) != declaration
+            || right.declaration(rj) != declaration;
+        if !changed {
+            continue;
+        }
+        // The cast is told, once for the command (the user,
+        // 2026-11-10: the upcasting and the merging of indexes are
+        // always relayed): which indexes met, as what, and what they
+        // became.
+        let moved = lnew.iter().zip(&lcells).filter(|(a, b)| a != b).count()
+            + rnew.iter().zip(&rcells).filter(|(a, b)| a != b).count();
+        if moved > 0 {
+            let cast = moved;
+            let labels = if cast == 1 { "label" } else { "labels" };
+            let word = target.word();
+            let told = match (ldecl, rdecl) {
+                (true, true) => format!(
+                    "the declared indexes '{lname}' ({lword}) and '{rname}' ({rword}) met as \
+                     {word}: {cast} {labels} cast"
+                ),
+                (true, false) => format!(
+                    "the index '{rname}' ({rword}) met the declared index '{lname}' ({lword}) \
+                     and was cast to it: {cast} {labels} cast"
+                ),
+                (false, true) => format!(
+                    "the index '{lname}' ({lword}) met the declared index '{rname}' ({rword}) \
+                     and was cast to it: {cast} {labels} cast"
+                ),
+                (false, false) => format!(
+                    "the indexes '{lname}' ({lword}) and '{rname}' ({rword}) met as {word}: \
+                     {cast} {labels} cast"
+                ),
+            };
+            crate::value::ambient::record_info_once(
+                crate::diagnostic::INDEX_CAST,
+                "pipeline",
+                format!("{command}: {told}"),
+            );
+        }
+        // an undeclared side stays undeclared where neither declared
+        let (ld, rd) = if declared {
+            (declaration.clone(), declaration)
+        } else {
+            (None, None)
+        };
+        out = Some((
+            left.with_column(lj, lnew, ld),
+            right.with_column(rj, rnew, rd),
+        ));
+    }
+    Ok(out)
 }
 
 /// The column append of two indexed tables, the rows aligned on the
@@ -6471,6 +7029,11 @@ fn labeled_concat(t: &crate::Table, u: &crate::Table, overwrite: bool) -> Result
             (true, (0..k).collect(), (0..k).collect(), false)
         }
     };
+    let pairs: Vec<(usize, usize)> = lk.iter().copied().zip(rk.iter().copied()).collect();
+    let command = if overwrite { "++!" } else { "++" };
+    if let Some((ta, ua)) = agreed_keys(command, t, u, &pairs)? {
+        return labeled_concat(&ta, &ua, overwrite);
+    }
     let (shape, other, sk, ok) = if shape_left {
         (t, u, &lk, &rk)
     } else {
@@ -6525,44 +7088,48 @@ fn labeled_concat(t: &crate::Table, u: &crate::Table, overwrite: bool) -> Result
             row[to] = r.get(j).cloned().unwrap_or(Value::Null);
         }
     };
-    // the shape side's rows in order, keyed
-    let mut seen: Vec<(Vec<Value>, usize)> = Vec::new();
-    let mut keys: Vec<(Vec<Value>, usize)> = Vec::new();
+    // the shape side's rows in order, keyed: by (label, its n-th
+    // occurrence) for the pairing, by label for the broadcast; the
+    // labels equal as values (spec: Indexed tables)
+    let mut classes = crate::value::LabelIndex::new();
+    let mut seen = crate::value::Occurrences::new();
+    let mut at: std::collections::HashMap<(usize, usize), usize> = std::collections::HashMap::new();
+    let mut of_label: Vec<Vec<usize>> = Vec::new();
+    let place = |of_label: &mut Vec<Vec<usize>>, class: usize, row: usize| {
+        if of_label.len() <= class {
+            of_label.resize(class + 1, Vec::new());
+        }
+        of_label[class].push(row);
+    };
     let mut rows: Vec<Vec<Value>> = Vec::new();
     for r in shape.rows() {
         let l = key(&r.cells(), sk);
-        let n = occurrence(&mut seen, &l);
+        let slot = seen.next(&mut classes, &l);
         let mut row = vec![Value::Null; width];
         for j in 0..k {
             row[j] = r.get(j);
         }
         fill(&mut row, &r.cells(), shape_cols);
-        keys.push((l, n));
+        at.insert(slot, rows.len());
+        place(&mut of_label, slot.0, rows.len());
         rows.push(row);
     }
     // the other side's rows: onto the shape row(s) of the same key,
     // or appended with the key in its level(s) and null elsewhere
-    let mut seen_other: Vec<(Vec<Value>, usize)> = Vec::new();
+    let mut seen_other = crate::value::Occurrences::new();
     for r in other.rows() {
         let l = key(&r.cells(), ok);
-        let n = occurrence(&mut seen_other, &l);
-        if broadcast && n > 1 {
+        let slot = seen_other.next(&mut classes, &l);
+        if broadcast && slot.1 > 1 {
             return Err(format!(
                 "the label {} stands on several rows of the plain index; one row per label aligns with a composite index (aggregate them first)",
                 crate::value::held_text(&l[0])
             ));
         }
         let targets: Vec<usize> = if broadcast {
-            keys.iter()
-                .enumerate()
-                .filter(|(_, (x, _))| *x == l)
-                .map(|(i, _)| i)
-                .collect()
+            of_label.get(slot.0).cloned().unwrap_or_default()
         } else {
-            keys.iter()
-                .position(|(x, m)| *x == l && *m == n)
-                .into_iter()
-                .collect()
+            at.get(&slot).copied().into_iter().collect()
         };
         if targets.is_empty() {
             let mut row = vec![Value::Null; width];
@@ -6570,7 +7137,8 @@ fn labeled_concat(t: &crate::Table, u: &crate::Table, overwrite: bool) -> Result
                 row[lvl] = v.clone();
             }
             fill(&mut row, &r.cells(), other_cols);
-            keys.push((l, n));
+            at.insert(slot, rows.len());
+            place(&mut of_label, slot.0, rows.len());
             rows.push(row);
         } else {
             for i in targets {
@@ -6581,7 +7149,8 @@ fn labeled_concat(t: &crate::Table, u: &crate::Table, overwrite: bool) -> Result
     Ok(Value::table(
         crate::Table::typed(Some(header), rows, declared)?
             .with_index(k)
-            .with_name(t.name.clone()),
+            .with_name(t.name.clone())
+            .with_levels(t.levels || u.levels),
     ))
 }
 
@@ -6701,11 +7270,9 @@ pub(crate) fn concat_row(
             rows.push(cells);
             // a declared column casts the appended cell or refuses
             // naming it; a column the header gained is undeclared
-            Ok(Value::table(crate::Table::typed(
-                header,
-                rows,
-                t.declared.clone(),
-            )?))
+            Ok(Value::table(
+                crate::Table::typed(header, rows, t.declared.clone())?.with_levels(t.levels),
+            ))
         }
         other => {
             // a row literal's bare key reads as the key it spells
@@ -6950,10 +7517,14 @@ pub(crate) fn table_command_shaped(
                 )?)
             }
         };
+        // The bare `| #` drops the index role; an option that is not
+        // `-i` leaves the index as it is (ruling 2026-11-10: `| #(-c=
+        // :A<float>)` cast a column and lost the labels with it).
+        let bare = !call.args.iter().any(|a| matches!(a, Arg::Opt { .. }));
         let t = match &index {
             Some(levels) if levels.is_empty() => t.as_ref().clone().drop_index(),
             Some(levels) => t.indexed_by_levels(levels)?,
-            None if t.index > 0 => t.as_ref().clone().drop_index(),
+            None if t.index > 0 && bare => t.as_ref().clone().drop_index(),
             None => t.as_ref().clone(),
         };
         let t = match &header_name {
@@ -6990,7 +7561,14 @@ pub(crate) fn table_command_shaped(
         Arg::Lit(Value::Int(n)) => return Err(format!("#(--width={n}): a table has at least one column")),
         // a header of projectors, typed or not: the declared build
         Arg::Lit(Value::List(items)) if items.iter().any(|i| matches!(i, Value::Projection { .. })) => {
-            return finish(typed_table(&header_items(items), v)?);
+            let built = typed_table(&header_items(items)?, v)?;
+            // a header written with levels names its columns by path
+            return finish(match built {
+                Value::Table(t) if header_writes_levels(items) => {
+                    Value::table((*t).clone().with_levels(true))
+                }
+                other => other,
+            });
         }
         Arg::Lit(Value::List(names)) => (
             names.len(),
@@ -7104,21 +7682,75 @@ fn retired_header_record(fields: &[(String, Value)]) -> String {
     )
 }
 
+/// Whether a header's items write levels: one holds the level below
+/// it (`:bar:@(:A; :B)`).
+fn header_writes_levels(items: &[Value]) -> bool {
+    items.iter().any(|i| {
+        matches!(
+            i,
+            Value::Projection {
+                typing: Some(crate::value::Typing::Levels(_)),
+                ..
+            }
+        )
+    })
+}
+
 /// The columns a header's items declare: a name undeclared, a
 /// projector by its key, declared where its brackets declare a type
 /// (`:a<int>`), undeclared under the star or bare — the inferred
-/// type a header reports (`<*; float>`) is a report, no request.
-fn header_items(items: &[Value]) -> Vec<(String, Option<crate::value::ColumnType>)> {
-    items
-        .iter()
-        .map(|i| match i {
-            Value::Projection { key, typing, .. } => (
-                key.clone(),
-                typing.as_ref().and_then(crate::value::Typing::declared),
-            ),
-            other => (other.to_string(), None),
-        })
-        .collect()
+/// type a header reports (`<*; float>`) is a report, no request. An
+/// item that holds a level (`:bar:@(:A<int>; :B<int>)`, what `header`
+/// answers for a header with levels) names the columns under it by
+/// their paths, `bar:A` and `bar:B`. A header has levels or names
+/// with colons, not both: beside a level a name that holds a colon
+/// of its own is refused, as the literal refuses it.
+fn header_items(
+    items: &[Value],
+) -> Result<Vec<(String, Option<crate::value::ColumnType>)>, String> {
+    use crate::value::Typing;
+    fn walk(
+        prefix: &str,
+        items: &[Value],
+        out: &mut Vec<(String, Option<crate::value::ColumnType>)>,
+        colon: &mut Option<String>,
+    ) {
+        for i in items {
+            let key = match i {
+                Value::Projection { key, .. } => key.clone(),
+                other => other.to_string(),
+            };
+            if colon.is_none() && key.contains(':') {
+                *colon = Some(key.clone());
+            }
+            match i {
+                Value::Projection {
+                    typing: Some(Typing::Levels(below)),
+                    ..
+                } => walk(&format!("{prefix}{key}:"), below, out, colon),
+                Value::Projection { typing, .. } => out.push((
+                    format!("{prefix}{key}"),
+                    typing.as_ref().and_then(Typing::declared),
+                )),
+                _ => out.push((format!("{prefix}{key}"), None)),
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let mut colon = None;
+    walk("", items, &mut out, &mut colon);
+    if header_writes_levels(items)
+        && let Some(name) = colon
+    {
+        return Err(format!(
+            "#(--header=…): a header that writes levels (:bar:@(:A; :B)) parts its names at \
+             their colons, and the name '{name}' holds one of its own: a table's header has \
+             levels or names with colons, not both; respell that name without its colon (the \
+             constructor's slug option does it for a table's names: | #(--slugs)), or write \
+             no level"
+        ));
+    }
+    Ok(out)
 }
 
 /// `#(--header=@(:a<int>; :b<text>))` (spec: The Table, draft 166):
@@ -7204,8 +7836,9 @@ fn typed_table(
                 .rows()
                 .map(|r| order.iter().map(|(j, _)| r.get(*j)).collect())
                 .collect();
+            // the names are the table's own: paths where its are
             crate::Table::declared(header, rows)
-                .map(Value::table)
+                .map(|built| Value::table(built.with_levels(t.levels)))
                 .map_err(wrap)
         }
         other => Err(wrap(format!("{} lays out no table", kind_of(&other)))),
@@ -7288,7 +7921,8 @@ fn bin_count(call: &FnCall) -> Result<usize, String> {
     });
     match first.transpose()? {
         None => Ok(10),
-        Some(n) if n >= 1 => Ok(n as usize),
+        Some(n) if n >= 1 && n as u64 <= MAX_BINS as u64 => Ok(n as usize),
+        Some(n) if n >= 1 => Err(format!("{}({n}): at most {MAX_BINS} bins", call.name)),
         Some(n) => Err(format!("{}({n}): at least one bin", call.name)),
     }
 }
@@ -7385,8 +8019,8 @@ fn bar(n: i64, max: i64, width: usize) -> String {
     if max <= 0 || n <= 0 {
         return String::new();
     }
-    let eighths =
-        ((n as f64 / max as f64 * width as f64 * 8.0).round() as usize).clamp(1, width * 8);
+    let eighths = ((n as f64 / max as f64 * width as f64 * 8.0).round() as usize)
+        .clamp(1, width.saturating_mul(8).max(1));
     let mut s = "█".repeat(eighths / 8);
     const PARTS: [&str; 8] = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
     s.push_str(PARTS[eighths % 8]);
@@ -7402,11 +8036,14 @@ fn histogram(call: &FnCall, input: Vec<Value>, scale: Scale) -> Result<Value, St
             _ => None,
         })
         .map(|v| match v {
-            Some(crate::syntax::ast::Operand::Lit(Value::Int(w))) if *w >= 1 => Ok(*w as usize),
-            _ => Err(
-                "histogram(--width=n): the longest bar in cells, a number of at least 1"
-                    .to_string(),
-            ),
+            Some(crate::syntax::ast::Operand::Lit(Value::Int(w)))
+                if *w >= 1 && *w as u64 <= MAX_BAR_WIDTH as u64 =>
+            {
+                Ok(*w as usize)
+            }
+            _ => Err(format!(
+                "histogram(--width=n): the longest bar in cells, a number from 1 to {MAX_BAR_WIDTH}"
+            )),
         })
         .transpose()?
         .unwrap_or(40);
@@ -7627,10 +8264,7 @@ pub(crate) fn fields_reading(v: Value) -> Result<Value, String> {
     };
     match v {
         Value::Record(f) => Ok(projections(f.into_iter().map(|(k, _)| k).collect())),
-        Value::Table(t) => Ok(projections(match &t.header {
-            Some(h) => h.clone(),
-            None => (1..=t.width()).map(|i| i.to_string()).collect(),
-        })),
+        Value::Table(t) => Ok(Value::list(t.field_projectors())),
         Value::List(l) if !l.is_empty() && l.iter().all(|v| matches!(v, Value::Record(_))) => {
             let mut names: Vec<String> = Vec::new();
             for r in l.iter() {
@@ -8078,13 +8712,16 @@ pub(crate) fn index_value(
                 return Ok(if one_row {
                     t.row(row_set[0] + 1).unwrap_or(Value::Null)
                 } else {
-                    Value::table(crate::Table::assemble(
-                        t.header.clone(),
-                        row_set.iter().map(|i| t.row_cells(*i)).collect(),
-                        t.declared.clone(),
-                        t.index,
-                        None,
-                    ))
+                    Value::table(
+                        crate::Table::assemble(
+                            t.header.clone(),
+                            row_set.iter().map(|i| t.row_cells(*i)).collect(),
+                            t.declared.clone(),
+                            t.index,
+                            None,
+                        )
+                        .with_levels(t.levels),
+                    )
                 });
             };
             let col_set = column(cols)?;
@@ -8101,7 +8738,8 @@ pub(crate) fn index_value(
                         .map(|j| (keys[*j].clone(), cell(row_set[0], *j)))
                         .collect(),
                 ),
-                (false, false) => Value::table(crate::Table::assemble(
+                (false, false) => Value::table(crate::Table::assemble_levelled(
+                    t.levels,
                     t.header
                         .as_ref()
                         .map(|h| col_set.iter().map(|j| h[*j].clone()).collect()),
@@ -8129,9 +8767,7 @@ pub(crate) fn index_value(
             match rows {
                 IndexSpec::List(_) => {
                     let chosen = listed_positions(rows, fields.len())?;
-                    Ok(Value::Record(
-                        chosen.into_iter().map(|i| fields[i].clone()).collect(),
-                    ))
+                    Ok(Value::Record(fields.pick(chosen)))
                 }
                 IndexSpec::Expr(_) | IndexSpec::Cond(_) | IndexSpec::Coords(_) => {
                     unreachable!("resolved above")
@@ -8141,7 +8777,7 @@ pub(crate) fn index_value(
                     .unwrap_or(Value::Null)),
                 IndexSpec::Range(a, b) => {
                     let (from, to) = span(*a, *b, fields.len());
-                    Ok(Value::Record(fields[from..to].to_vec().into()))
+                    Ok(Value::Record(fields.pick(from..to)))
                 }
                 IndexSpec::Name(n) => Ok(fields
                     .iter()
@@ -8349,9 +8985,44 @@ pub(crate) fn columns_reading(v: Value) -> Result<Value, String> {
 
 /// `transpose` — a list of lists with its rows and columns
 /// exchanged; the rows must be of one length.
+/// A transposition lays each row across the columns, so the cells
+/// of columns of several kinds end in one column and are brought to
+/// their common type (an integer beside a float is a float, anything
+/// beside text is text, a boolean beside a number is 1 or 0). Told
+/// once, as an info, naming the kinds in the columns' order and the
+/// type they were brought to (the user, 2026-11-10).
+fn transpose_cast_told(t: &crate::Table) {
+    let data: Vec<usize> = (t.index..t.width()).collect();
+    if data.len() < 2 || t.n_rows() == 0 {
+        return;
+    }
+    let kinds: Vec<String> = data
+        .iter()
+        .map(|&j| match t.declaration(j) {
+            Some(ty) => ty.word(),
+            None => crate::value::type_column(t.column_cells(j)).0.word(),
+        })
+        .collect();
+    if kinds.iter().all(|k| *k == kinds[0]) {
+        return;
+    }
+    let all: Vec<Value> = data.iter().flat_map(|&j| t.column_cells(j)).collect();
+    let brought = crate::value::type_column(all).0.word();
+    crate::value::ambient::record_info_once(
+        crate::diagnostic::TRANSPOSE_CAST,
+        "pipeline",
+        format!(
+            "transpose: the cells of {} columns ({}) were brought to {brought}",
+            data.len(),
+            kinds.join(", ")
+        ),
+    );
+}
+
 /// A frame transposed: the header as the first column (`column`),
 /// each old row a column numbered by position.
-fn transposed_frame(t: &crate::Table) -> Value {
+fn transposed_frame(t: &crate::Table) -> Result<Value, String> {
+    transpose_cast_told(t);
     let names = t.header.clone().unwrap_or_default();
     // on an indexed table the index and the header exchange (draft
     // 166), with all their levels: the labels name the new columns
@@ -8363,9 +9034,18 @@ fn transposed_frame(t: &crate::Table) -> Value {
     // the index column's name the header's
     let first = t.name.clone().unwrap_or_else(|| "column".to_string());
     if t.index > 0 {
+        // the old names part into the new index's columns where
+        // they are paths; a title is one label, colons and all
+        let parts = |name: &str| -> Vec<Value> {
+            if t.levels {
+                name.split(':').map(|s| Value::Str(s.to_string())).collect()
+            } else {
+                vec![Value::Str(name.to_string())]
+            }
+        };
         let depth = names[t.index..]
             .iter()
-            .map(|n| n.split(':').count())
+            .map(|n| parts(n).len())
             .max()
             .unwrap_or(1);
         let mut header: Vec<String> = (0..depth)
@@ -8377,25 +9057,43 @@ fn transposed_frame(t: &crate::Table) -> Value {
                 }
             })
             .collect();
+        // the labels of a composite index become paths, and the
+        // header then parts every name at its colons: a level that
+        // holds one of its own is refused naming it
+        if t.index > 1
+            && let Some(level) = t.rows().find_map(|r| {
+                (0..t.index)
+                    .map(|j| crate::value::Record::key_text(&r.get(j)))
+                    .find(|l| l.contains(':'))
+            })
+        {
+            return Err(format!(
+                "the labels of a composite index become the paths outer:inner, and \
+                 the label '{level}' holds a colon, which would read as a level: respell \
+                 the labels first (map(…; --to=:::index)), or index by one level"
+            ));
+        }
         header.extend(t.rows().map(|r| t.label_name(&r.cells())));
         let rows: Vec<Vec<Value>> = names
             .iter()
             .enumerate()
             .skip(t.index)
             .map(|(j, name)| {
-                let mut row: Vec<Value> =
-                    name.split(':').map(|s| Value::Str(s.to_string())).collect();
+                let mut row: Vec<Value> = parts(name);
                 row.resize(depth, Value::Null);
                 row.extend(t.rows().map(|r| r.get(j)));
                 row
             })
             .collect();
         let new_name = (t.index == 1).then(|| names[0].clone());
-        return Value::table(
+        return Ok(Value::table(
             crate::Table::new(Some(header), rows)
                 .with_index(depth)
-                .with_name(new_name),
-        );
+                .with_name(new_name)
+                // the labels of a composite index are joined into
+                // paths (`label_name`); one level's labels are names
+                .with_levels(t.index > 1),
+        ));
     }
     let mut header = vec![first];
     header.extend((1..=t.n_rows()).map(|i| i.to_string()));
@@ -8408,7 +9106,7 @@ fn transposed_frame(t: &crate::Table) -> Value {
             row
         })
         .collect();
-    Value::table(crate::Table::new(Some(header), rows))
+    Ok(Value::table(crate::Table::new(Some(header), rows)))
 }
 
 pub(crate) fn transpose_reading(v: Value) -> Result<Value, String> {
@@ -8421,12 +9119,15 @@ pub(crate) fn transpose_reading(v: Value) -> Result<Value, String> {
             ));
         }
         Value::Table(t) => match &t.header {
-            None => t.rows_vec(),
+            None => {
+                transpose_cast_told(&t);
+                t.rows_vec()
+            }
             // A frame transposes to a frame (spec: Tables and
             // Reshapes): the header becomes the first column, named
             // `column`, each old row a column numbered by position;
             // `| values | transpose` is the matrix of the cells alone.
-            Some(_) => return Ok(transposed_frame(&t)),
+            Some(_) => return transposed_frame(&t),
         },
         // A record of lists is a frame's column reading, and a list
         // of records its row reading: both transpose as the frame.
@@ -8434,7 +9135,7 @@ pub(crate) fn transpose_reading(v: Value) -> Result<Value, String> {
             if !fields.is_empty() && fields.iter().all(|(_, v)| matches!(v, Value::List(_))) =>
         {
             match table_reading(Value::Record(fields))? {
-                Value::Table(t) => return Ok(transposed_frame(&t)),
+                Value::Table(t) => return transposed_frame(&t),
                 other => return Err(format!("{} is no table", kind_of(&other))),
             }
         }
@@ -8442,7 +9143,7 @@ pub(crate) fn transpose_reading(v: Value) -> Result<Value, String> {
             if !items.is_empty() && items.iter().all(|v| matches!(v, Value::Record(_))) =>
         {
             match table_reading(Value::List(items))? {
-                Value::Table(t) => return Ok(transposed_frame(&t)),
+                Value::Table(t) => return transposed_frame(&t),
                 other => return Err(format!("{} is no table", kind_of(&other))),
             }
         }
@@ -8749,6 +9450,9 @@ fn pivot_records(
     input: Vec<Value>,
 ) -> Result<Vec<Value>, String> {
     let mut row_names: Vec<String> = Vec::new();
+    // the row keys become the result's index: one row per label,
+    // the labels equal as values (spec: Indexed tables)
+    let mut row_classes = crate::value::LabelIndex::new();
     let mut row_keys: Vec<Vec<Value>> = Vec::new();
     let mut col_keys: Vec<String> = Vec::new();
     let mut cells: std::collections::HashMap<(usize, usize), Value> =
@@ -8788,13 +9492,19 @@ fn pivot_records(
             row_names = rows.iter().map(|(k, _)| k.clone()).collect();
         }
         let key: Vec<Value> = rows.into_iter().map(|(_, v)| v).collect();
-        let r = match row_keys.iter().position(|k| *k == key) {
-            Some(r) => r,
-            None => {
-                row_keys.push(key);
-                row_keys.len() - 1
-            }
-        };
+        let (r, new) = row_classes.intern(&key);
+        if new {
+            row_keys.push(key);
+        }
+        // a column has a title: a null key is refused (ruling
+        // 2026-11-10); it landed under the title ""
+        if matches!(col, Value::Null) {
+            return Err(format!(
+                "pivot: record {} has a null column key, and a column has a title: drop the \
+                 record, or name the key (`?? \"none\"`) before the pivot",
+                i + 1
+            ));
+        }
         let ck = col.to_string();
         let c = match col_keys.iter().position(|k| *k == ck) {
             Some(c) => c,
@@ -8804,6 +9514,11 @@ fn pivot_records(
             }
         };
         if let Some(prev) = cells.get(&(r, c)) {
+            // a null prints as the word, not as nothing
+            let shown = |v: &Value| match v {
+                Value::Null => "null".to_string(),
+                v => v.to_string(),
+            };
             return Err(format!(
                 "pivot: two values for row '{}', column '{}' ({} and {}); aggregate before the pivot",
                 row_keys[r]
@@ -8812,8 +9527,8 @@ fn pivot_records(
                     .collect::<Vec<_>>()
                     .join(", "),
                 col_keys[c],
-                prev,
-                val
+                shown(prev),
+                shown(val)
             ));
         }
         cells.insert((r, c), val.clone());
@@ -8851,13 +9566,21 @@ fn melt(call: &FnCall, input: Vec<Value>) -> Result<Vec<Value>, String> {
         };
         // on an indexed table the index is the id, and the long table
         // is indexed by it with `variable` as the inner level (spec:
-        // The Table, "Levels of the header")
+        // The Table, "Levels of the header"). An id named beside the
+        // index is an id too (ruling 2026-11-10): it was melted as
+        // one more variable, its values among the others'.
         if t.index > 0 {
             let levels: Vec<String> = t.level_names();
             let mut keyed = call.clone();
             let mut args: Vec<Arg> = levels
                 .iter()
-                .map(|n| Arg::Lit(Value::Str(n.clone())))
+                .map(String::as_str)
+                .chain(
+                    ids.iter()
+                        .copied()
+                        .filter(|id| !levels.iter().any(|l| l == id)),
+                )
+                .map(|n| Arg::Lit(Value::Str(n.to_string())))
                 .collect();
             args.extend(
                 keyed
@@ -8928,7 +9651,7 @@ fn arg_int(call: &FnCall, n: usize) -> Option<i64> {
         Some(Arg::Lit(Value::Null)) | None => None,
         Some(other) => {
             crate::value::ambient::record_refusal(format!(
-                "{}: argument {} must be an integer, not {}",
+                "{}: operand {} must be an integer, not {}",
                 call.name,
                 n + 1,
                 arg_kind(other)
@@ -8947,7 +9670,7 @@ fn arg_str<'a>(call: &'a FnCall, n: usize, default: &'a str) -> &'a str {
         Some(Arg::Lit(Value::Null)) | None => default,
         Some(other) => {
             crate::value::ambient::record_refusal(format!(
-                "{}: argument {} must be text, not {}",
+                "{}: operand {} must be text, not {}",
                 call.name,
                 n + 1,
                 arg_kind(other)
@@ -9357,14 +10080,25 @@ mod tests {
             agg("mean", vec![d(2700), d(43200), d(10800)]),
             vec![d(18900)] // PT5H15M
         );
-        // Mixed with span text and numbers-as-seconds: still spans.
-        // the first value has no written unit: the total in seconds
+        // Mixed with span text: still spans. The first value has no
+        // written unit: the total in seconds.
+        assert_eq!(
+            agg("sum", vec![d(60), Value::Str("2min".into())]),
+            vec![d(180)]
+        );
+        // A number without a unit among spans is refused, as beside
+        // any quantity (the user, 2026-11-10: time is a dimension like
+        // the others; it read as seconds). The run voids the answer.
         assert_eq!(
             agg(
                 "sum",
                 vec![d(60), Value::Str("2min".into()), Value::Int(60)]
             ),
-            vec![d(240)]
+            vec![Value::Null]
+        );
+        assert!(
+            crate::value::ambient::take_refusal()
+                .is_some_and(|r| r.contains("s and a bare number"))
         );
         // An unreadable element is missing to the fold, as it is to
         // the numeric one (ruling 2026-11-08): the durations total.
@@ -9376,21 +10110,20 @@ mod tests {
             agg("sum", vec![d(60), Value::Null, Value::Str("NA".into())]),
             vec![d(60)]
         );
-        // Numeric text reads as a bare number does in a fold of time:
-        // seconds (sum over [PT1M, "5"] is PT1M5S, never 5).
-        assert_eq!(agg("sum", vec![d(60), Value::Str("5".into())]), vec![d(65)]);
-        assert_eq!(
-            agg("mean", vec![d(60), Value::Str("10".into())]),
-            vec![d(35)]
-        );
-        assert_eq!(
-            agg("median", vec![d(60), Value::Str("5".into())]),
-            vec![Value::seconds(32, 500_000_000)]
-        );
-        assert_ne!(
-            agg("stddev", vec![d(60), Value::Str("5".into())]),
-            vec![Value::Null]
-        );
+        // Numeric text reads as a bare number does, and is refused
+        // with it, under every fold of time.
+        for reducer in ["sum", "mean", "median", "stddev"] {
+            assert_eq!(
+                agg(reducer, vec![d(60), Value::Str("5".into())]),
+                vec![Value::Null],
+                "{reducer}"
+            );
+            assert!(
+                crate::value::ambient::take_refusal()
+                    .is_some_and(|r| r.contains("s and a bare number")),
+                "{reducer}"
+            );
+        }
     }
 
     #[test]
@@ -9949,13 +10682,43 @@ mod tests {
         assert_eq!(sc("ceil", Value::Float(2.1)), vec![Value::Int(3)]);
         assert_eq!(sc("abs", Value::Int(-4)), vec![Value::Int(4)]);
         assert_eq!(sc("abs", Value::Float(-1.5)), vec![Value::Float(1.5)]);
-        // a value with no numeric coercion comes back unchanged
-        assert_eq!(
-            sc("round", Value::Str("n/a".into())),
-            vec![Value::Str("n/a".into())]
-        );
+        // a lone value with no numeric coercion answers null (ruling
+        // 2026-11-10; the run warns once for the command)
+        assert_eq!(sc("round", Value::Str("n/a".into())), vec![Value::Null]);
         assert_eq!(sc("floor", Value::Null), vec![Value::Null]);
-        assert_eq!(sc("abs", Value::Bool(true)), vec![Value::Bool(true)]);
+        assert_eq!(sc("abs", Value::Bool(true)), vec![Value::Null]);
+        assert_eq!(sc("sqrt", Value::Str("n/a".into())), vec![Value::Null]);
+        // in a structure a cell of another kind stays as it is, and
+        // a cell the command applies to and fails on is null
+        let cells = || {
+            Value::list(vec![
+                Value::Float(2.5),
+                Value::Str("n/a".into()),
+                Value::Bool(true),
+                Value::Null,
+            ])
+        };
+        assert_eq!(
+            sc("round", cells()),
+            vec![Value::list(vec![
+                Value::Int(3),
+                Value::Str("n/a".into()),
+                Value::Bool(true),
+                Value::Null,
+            ])]
+        );
+        assert_eq!(
+            sc(
+                "sqrt",
+                Value::list(vec![Value::Int(-1), Value::Str("n/a".into())])
+            ),
+            vec![Value::list(vec![Value::Null, Value::Str("n/a".into())])]
+        );
+        // every numeric command is a scalar command: the rule is
+        // decided where a scalar command broadcasts
+        for name in NUMERIC_COMMANDS {
+            assert!(crate::syntax::man::is_scalar_kind(name), "{name}");
+        }
     }
 
     fn sc_args(name: &str, args: Vec<Arg>, topic: Value) -> Vec<Value> {
@@ -9989,14 +10752,19 @@ mod tests {
             sc_args("round", d(-1), Value::Float(2568.5)),
             vec![Value::Float(2570.0)]
         );
-        // Numeric reading still applies; no reading comes back unchanged.
+        // Numeric reading still applies; a lone value with no reading
+        // answers null (ruling 2026-11-10), a cell stays as it is.
         assert_eq!(
             sc_args("round", d(1), Value::Str("2.44".into())),
             vec![Value::Float(2.4)]
         );
         assert_eq!(
             sc_args("round", d(2), Value::Str("n/a".into())),
-            vec![Value::Str("n/a".into())]
+            vec![Value::Null]
+        );
+        assert_eq!(
+            sc_args("round", d(2), Value::list(vec![Value::Str("n/a".into())])),
+            vec![Value::list(vec![Value::Str("n/a".into())])]
         );
         // A quantity rounds in its display unit and stays one.
         let q = Value::Quantity {
@@ -10037,11 +10805,21 @@ mod tests {
         };
         assert_eq!(
             sc("isoformat", inst),
-            vec![Value::Str("2024-02-15T13:26:40".into())]
+            vec![Value::Str("2024-02-15T13:26:40Z".into())]
         );
         assert_eq!(
             sc("isoformat", Value::Str("2024-02-15T14:26:40+01:00".into())),
-            vec![Value::Str("2024-02-15T13:26:40".into())]
+            vec![Value::Str("2024-02-15T13:26:40Z".into())]
+        );
+        // ruling 2026-11-10: an instant read with no offset is a
+        // point on the UTC timeline too, and a date is its midnight
+        assert_eq!(
+            sc("isoformat", Value::Str("2024-02-15T10:00:00".into())),
+            vec![Value::Str("2024-02-15T10:00:00Z".into())]
+        );
+        assert_eq!(
+            sc("isoformat", Value::Str("2024-02-15".into())),
+            vec![Value::Str("2024-02-15T00:00:00Z".into())]
         );
     }
 

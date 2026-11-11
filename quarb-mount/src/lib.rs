@@ -401,6 +401,23 @@ impl AstAdapter for MountAdapter {
             .find_map(|a| a.unit_scale(expr))
     }
 
+    /// The names the open mounts add to the table, together: the
+    /// parser judges `convert(U)` against them, and a unit a mounted
+    /// document declares was "no unit 'U'" under a mount's name where
+    /// the same file opened alone read it (`unit_scale` answered, its
+    /// listing twin did not).
+    fn unit_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        for a in (0..self.mounts.len()).filter_map(|m| self.active(m)) {
+            for n in a.unit_names() {
+                if !names.contains(&n) {
+                    names.push(n);
+                }
+            }
+        }
+        names
+    }
+
     fn children(&self, node: NodeId) -> Vec<NodeId> {
         match self.decode(node) {
             // Listing the root reaches every mount: each opens.
@@ -685,6 +702,15 @@ impl AstAdapter for MountAdapter {
         }
     }
 
+    // A mounted source that cannot walk its links back says so
+    // through the mount, for its own nodes alone.
+    fn backlinks_unsupported(&self, node: NodeId, label: Option<&str>) -> bool {
+        match self.decode(node) {
+            None => false,
+            Some((m, inner)) => self.adapter(m).backlinks_unsupported(inner, label),
+        }
+    }
+
     fn link_consumed(&self, source: NodeId, label: &str) -> bool {
         match self.decode(source) {
             None => false,
@@ -707,6 +733,19 @@ impl AstAdapter for MountAdapter {
             return None;
         }
         self.adapter(m).link_property(src, label, tgt, name)
+    }
+
+    /// The names of an edge's properties, from the mount the edge
+    /// lives in: `@| edges` lists a column per name, and under a
+    /// mount's name the columns were gone while `$-::rel` still read
+    /// (`link_property` was forwarded, its listing twin was not).
+    fn link_property_names(&self, source: NodeId, label: &str, target: NodeId) -> Vec<String> {
+        match (self.decode(source), self.decode(target)) {
+            (Some((m, src)), Some((mt, tgt))) if m == mt => {
+                self.adapter(m).link_property_names(src, label, tgt)
+            }
+            _ => Vec::new(),
+        }
     }
 
     fn edge_weights(
@@ -815,6 +854,15 @@ impl AstAdapter for MountAdapter {
     fn row_columns(&self, node: NodeId) -> Option<Vec<String>> {
         let (m, inner) = self.decode(node)?;
         self.adapter(m).row_columns(inner)
+    }
+
+    /// The mounted source's surface, its container named from the
+    /// mount's root (`/db/employees`).
+    fn surface(&self, node: NodeId) -> Option<quarb::Surface> {
+        let (m, inner) = self.decode(node)?;
+        let surface = self.adapter(m).surface(inner)?;
+        let at = self.encode(m, self.adapter(m).root());
+        Some(surface.under(&quarb::name_path(self, at)))
     }
 
     fn intrinsic(&self, node: NodeId) -> NodeId {

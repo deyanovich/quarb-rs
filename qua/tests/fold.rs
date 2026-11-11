@@ -140,9 +140,10 @@ fn a_recall_of_a_name_no_push_made_is_refused() {
 }
 
 /// Several references fold by the tuple of their values (ruling
-/// 2026-11-04): the regulae land on the folded thread in selector
-/// order, a mark among them is the answer's position, and the
-/// refusals are the single form's.
+/// 2026-11-04): the regulae stay on the folded thread where they
+/// were pushed (ruling 2026-11-10: neither is pushed again), a mark
+/// among them is the answer's position, and the refusals are the
+/// single form's.
 #[test]
 fn a_fold_by_several_regulae_partitions_by_the_tuple() {
     assert_eq!(
@@ -161,14 +162,24 @@ fn a_fold_by_several_regulae_partitions_by_the_tuple() {
         rows("/books/* | .g(::genre) | .old(::year < 1800) @|{.old} count"),
         ["2", "2"]
     );
-    // the last reference lands on top
+    // the top is the regula pushed last in the text, whatever order
+    // the selector names them in (the last reference was pushed
+    // again on top, so the selector's order decided it)
     assert_eq!(
         rows("/books/* | .g(::genre) | .old(::year < 1800) @|{.old; .g} count | $."),
-        ["epic", "novel", "tragedy"]
+        ["true", "false", "false"]
     );
     assert_eq!(
         rows("/books/* | .g(::genre) | .old(::year < 1800) @|{.g; .old} count | $."),
         ["true", "false", "false"]
+    );
+    assert_eq!(
+        rows("/books/* | .g(::genre) | .old(::year < 1800) @|{.old; .g} count | @."),
+        [
+            "@(\"epic\"; true)",
+            "@(\"novel\"; false)",
+            "@(\"tragedy\"; false)"
+        ]
     );
     // the members as one list per tuple; no space needed after `;`
     assert_eq!(

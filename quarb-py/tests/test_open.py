@@ -40,10 +40,18 @@ def test_fs_and_code(tmp_path):
     assert c.values("//function_definition @| count") == [2]
 
 
-def test_fs_descend_grafts(tmp_path):
+def test_fs_graft_grafts(tmp_path):
     (tmp_path / "cfg.json").write_text('{"port": 8080}')
-    d = quarb.open(str(tmp_path), descend=True)
+    d = quarb.open(str(tmp_path), graft=True)
     assert d.values("/cfg.json/port::") == [8080]
+
+
+def test_descend_is_retired(tmp_path):
+    # the pre-0.24 spelling refuses with the pointer at graft=
+    import pytest
+
+    with pytest.raises(ValueError, match="graft=True"):
+        quarb.open(str(tmp_path), descend=True)
 
 
 def test_translate():

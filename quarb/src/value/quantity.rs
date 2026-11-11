@@ -384,6 +384,20 @@ pub fn unscale_by(v: f64, factor: f64) -> f64 {
         Some(e) => shift10(v, -e),
         None => v / factor,
     };
+    settled(w)
+}
+
+/// The written magnitude of a computed quantity: rounded to 15
+/// significant digits, which takes the noise of a conversion out of
+/// the print. An exact whole magnitude carries no such noise and is
+/// left alone (ruling 2026-11-10): `1234567890123450_B + 7_B` is
+/// `…457_B`, and `magnitude` hands on the full value (the rounding
+/// answered `…460`, where the difference to `…450_B` is `7_B`).
+pub fn settled(w: f64) -> f64 {
+    // (a double holds every whole number below 2^53)
+    if w.fract() == 0.0 && w.abs() < 9_007_199_254_740_992.0 {
+        return w;
+    }
     round_significant(w, 15)
 }
 
@@ -427,7 +441,12 @@ pub fn builtin_unit_names() -> Vec<String> {
         out.extend(e.names.iter().map(|n| n.to_string()));
     }
     out.extend(CURRENCIES.iter().map(|c| c.to_string()));
-    out.push("%".to_string());
+    for (name, year) in ENGINE_UNITS {
+        out.push(name.to_string());
+        if *year {
+            out.extend(YEAR_PREFIXES.iter().map(|(p, _)| format!("{p}{name}")));
+        }
+    }
     for e in table.entries() {
         for stem in e.names {
             match e.prefixes {
@@ -665,6 +684,16 @@ fn tables() -> &'static (Table, Table) {
 /// currency signs, and the percent sign.
 const SYMBOL_CHARS: &str = "$€£¥₽₴₹₩₺₪₫฿₦₱₡₲₵₸₮¢֏₾₼₭₣₧₨₿%";
 
+/// The prefixes the year takes, each a power of a thousand.
+const YEAR_PREFIXES: &[(&str, u32)] = &[("k", 1), ("M", 2), ("G", 3)];
+
+/// The engine's own units (`with_percent`) and whether each takes
+/// the year's prefixes: what the prefix refusal and the suggestions
+/// read beside quanto's entries, so a prefix on one of these is
+/// refused as on a built-in unit that takes none. (`5_kton` and
+/// `5_k%` minted opaque units in silence.)
+const ENGINE_UNITS: &[(&str, bool)] = &[("%", false), ("a", true), ("yr", true), ("ton", false)];
+
 /// The engine's own units beside quanto's packs, declared table-wide
 /// (they take no prefix): the percent, a unit of dimension one with
 /// factor 1/100 of the ratio (ruling 2026-11-09), so `12_%`, `12 %`,
@@ -681,21 +710,22 @@ fn with_percent(t: Table) -> Table {
     let year = Unit::new(Factor::integer(31_557_600), quanto::Dimension::TIME);
     t.declare("a", year.clone());
     t.declare("yr", year);
+    // the year's thousands, millions and billions (ruling
+    // 2026-11-10): `ka`, `Ma`, `Ga` and `kyr`, `Myr`, `Gyr`
+    for (prefix, thousands) in YEAR_PREFIXES {
+        let unit = Unit::new(
+            Factor::integer(31_557_600u64 * 1000u64.pow(*thousands)),
+            quanto::Dimension::TIME,
+        );
+        for stem in ["a", "yr"] {
+            t.declare(&format!("{prefix}{stem}"), unit.clone());
+        }
+    }
     t.declare(
         "ton",
         Unit::new(Factor::decimal(90_718_474, -5), quanto::Dimension::MASS),
     );
     t
-}
-
-/// The table the moment asks for: opaque units where allowed.
-fn table() -> &'static Table {
-    let (strict, open) = tables();
-    if OPAQUE_ALLOWED.with(|c| c.get()) {
-        open
-    } else {
-        strict
-    }
 }
 
 /// The engine's names in front of the table: a run's declared units
@@ -763,6 +793,27 @@ pub(crate) fn refused_literal(text: &str) -> Option<String> {
 pub(crate) fn misprefixed(unit: &str) -> Option<String> {
     if lookup_strict(unit).is_some() {
         return None;
+    }
+    // the engine's own units first: none takes a prefix but the
+    // year, and the year takes three
+    for (stem, year) in ENGINE_UNITS {
+        let prefixed = BINARY_PREFIXES
+            .iter()
+            .chain(PREFIX_POWERS.iter())
+            .any(|(p, _)| unit.strip_prefix(p) == Some(*stem));
+        if prefixed {
+            return Some(if *year {
+                format!(
+                    "no unit '{unit}': the year takes the prefixes k, M and G \
+                     (k{stem}, M{stem}, G{stem})"
+                )
+            } else {
+                format!(
+                    "no unit '{unit}': '{stem}' takes no prefix (write the quantity in \
+                     '{stem}', or convert)"
+                )
+            });
+        }
     }
     let entry = |stem: &str| tables().0.entries().find(|e| e.names.contains(&stem));
     for (p, _) in BINARY_PREFIXES {

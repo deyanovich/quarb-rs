@@ -245,7 +245,17 @@ impl std::fmt::Debug for NodeRef {
 /// header"): the outer names in first-met order, each holding the
 /// record of what stands under it.
 fn nest_by_levels(fields: Vec<(String, Value)>) -> Value {
-    if !fields.iter().any(|(k, _)| k.contains(':')) {
+    nest_by_levels_from(fields, 0)
+}
+
+/// The deepest nesting a header's levels make. A name is data (a
+/// CSV title): one with thousands of colons recursed a frame per
+/// colon and overflowed the stack. Past the bound the rest of the
+/// name, colons and all, is the innermost key.
+const MAX_HEADER_LEVELS: usize = 64;
+
+fn nest_by_levels_from(fields: Vec<(String, Value)>, depth: usize) -> Value {
+    if depth + 1 >= MAX_HEADER_LEVELS || !fields.iter().any(|(k, _)| k.contains(':')) {
         return Value::record(fields);
     }
     let mut out: Vec<(String, Value)> = Vec::new();
@@ -267,10 +277,53 @@ fn nest_by_levels(fields: Vec<(String, Value)>) -> Value {
             .iter_mut()
             .find(|(k, v)| *k == o && matches!(v, Value::Null))
         {
-            slot.1 = nest_by_levels(g);
+            slot.1 = nest_by_levels_from(g, depth + 1);
         }
     }
     Value::record(out)
+}
+
+/// The columns of a header as projectors nested by level (ruling
+/// 2026-11-10): a name that is a path (`bar:A`) stands under its
+/// outer name, `:bar:@(:A)`, level by level, and a name alone is the
+/// projector it was. A header lists its columns in their order, so
+/// the columns under one outer name are gathered while they stand
+/// side by side: `a:x; b; a:y` keeps two groups of `a`, and the list
+/// flattened gives the names back as they stood.
+pub fn nest_projectors(items: Vec<(String, Option<Typing>)>) -> Vec<Value> {
+    nest_projectors_from(items, 0)
+}
+
+fn nest_projectors_from(items: Vec<(String, Option<Typing>)>, depth: usize) -> Vec<Value> {
+    type Run = Option<(String, Vec<(String, Option<Typing>)>)>;
+    fn close(run: &mut Run, out: &mut Vec<Value>, depth: usize) {
+        if let Some((outer, below)) = run.take() {
+            out.push(Value::typed_projection(
+                1,
+                outer,
+                Some(Typing::Levels(nest_projectors_from(below, depth + 1))),
+            ));
+        }
+    }
+    let mut out: Vec<Value> = Vec::new();
+    let mut run: Run = None;
+    for (name, typing) in items {
+        match name.split_once(':') {
+            Some((outer, inner)) if depth + 1 < MAX_HEADER_LEVELS => match &mut run {
+                Some((o, below)) if o == outer => below.push((inner.to_string(), typing)),
+                _ => {
+                    close(&mut run, &mut out, depth);
+                    run = Some((outer.to_string(), vec![(inner.to_string(), typing)]));
+                }
+            },
+            _ => {
+                close(&mut run, &mut out, depth);
+                out.push(Value::typed_projection(1, name, typing));
+            }
+        }
+    }
+    close(&mut run, &mut out, depth);
+    out
 }
 
 /// The cells nested level by level under their labels (spec: The
@@ -288,21 +341,29 @@ fn nest_levels(levels: &[Vec<Value>], cells: &[Value], depth: usize) -> Value {
                 .collect(),
         ));
     }
+    // the level's values as keys are (spec: Record): one key per
+    // value, in the order first met
+    let mut classes = super::LabelIndex::new();
     let mut keys: Vec<Value> = Vec::new();
+    let mut class_of: Vec<usize> = Vec::with_capacity(levels.len());
     for l in levels {
         let k = l.get(depth).cloned().unwrap_or(Value::Null);
-        if !keys.contains(&k) {
+        let (class, new) = classes.intern(std::slice::from_ref(&k));
+        if new {
             keys.push(k);
         }
+        class_of.push(class);
     }
     Value::Record(Record::keyed(
         keys.into_iter()
-            .map(|k| {
+            .enumerate()
+            .map(|(class, k)| {
                 let (sub_levels, sub_cells): (Vec<Vec<Value>>, Vec<Value>) = levels
                     .iter()
                     .zip(cells)
-                    .filter(|(l, _)| l.get(depth) == Some(&k))
-                    .map(|(l, c)| (l.clone(), c.clone()))
+                    .zip(&class_of)
+                    .filter(|(_, c)| **c == class)
+                    .map(|((l, c), _)| (l.clone(), c.clone()))
                     .unzip();
                 let v = nest_levels(&sub_levels, &sub_cells, depth + 1);
                 (k, v)
@@ -390,13 +451,10 @@ impl Record {
     /// The field whose key equals `k` AS A VALUE (`r[[k]]`): a text
     /// key equals its text, a typed key its value.
     pub fn find_key(&self, k: &Value) -> Option<usize> {
-        // keys are equal as values (the review's Values pass,
-        // 2026-11-06): 1 and 1.0 are one number, 1 and "1" two keys
-        let same = |a: &Value, b: &Value| match (a, b) {
-            (Value::Int(x), Value::Float(y)) | (Value::Float(y), Value::Int(x)) => *x as f64 == *y,
-            _ => a == b,
-        };
-        (0..self.fields.len()).find(|&i| same(&self.key(i), k))
+        // keys are equal as values (spec: Record): 1 and 1.0 are one
+        // number, 1 and "1" two keys, an instant one point of the
+        // timeline and a quantity one magnitude however written
+        (0..self.fields.len()).find(|&i| self.key(i).same_key(k))
     }
 
     /// The field under the text key `k` (`:name`).
@@ -508,6 +566,20 @@ impl Record {
             keys: self.keys.clone(),
             declared: self.declared.clone(),
         }
+    }
+
+    /// The record of the fields at `positions`, in that order, each
+    /// with its key as a value and its declaration: a slice, a
+    /// choice of positions, the fields reversed. (Rebuilding from
+    /// the field vector alone turned a typed key into its text.)
+    pub fn pick(&self, positions: impl IntoIterator<Item = usize>) -> Record {
+        let mut out = Record::default();
+        for i in positions {
+            if let Some((_, v)) = self.fields.get(i) {
+                out.push_keyed(self.key(i), v.clone(), self.declaration(i));
+            }
+        }
+        out
     }
 
     /// The record with the fields `keep(i)` admits, the keys and
@@ -645,6 +717,16 @@ pub struct Table {
     /// both axes, so `transpose` exchanges it with the index
     /// column's name and undoes itself.
     pub name: Option<String>,
+    /// Whether the header's names are paths of levels (spec: The
+    /// Table, "Levels of the header"), `bar:A` the column `A` under
+    /// `bar`. The commands that make levels set it (`unstack` over
+    /// several columns, the transpose of a composite index, a
+    /// literal whose header names such paths) and every rebuild of
+    /// the table carries it. It is false on a table read from a
+    /// source or built from records: a title is one name, colons
+    /// and all (ruling 2026-11-10; any colon was a level, so the
+    /// title `Time (HH:MM)` nested every row under `Time (HH`).
+    pub levels: bool,
 }
 
 impl PartialEq for Table {
@@ -657,6 +739,7 @@ impl PartialEq for Table {
             && self.declared == other.declared
             && self.index == other.index
             && self.name == other.name
+            && self.header_has_levels() == other.header_has_levels()
             && (0..self.width()).all(|j| (0..self.n).all(|i| self.cell(i, j) == other.cell(i, j)))
     }
 }
@@ -1005,10 +1088,6 @@ impl ColumnBuilder {
             declared,
             failed: None,
         }
-    }
-
-    fn len(&self) -> usize {
-        self.raw.len()
     }
 
     /// A text cell: the one-pass path of a row read from its bytes.
@@ -1367,6 +1446,7 @@ impl TableBuilder {
             declared,
             index: 0,
             name: None,
+            levels: false,
         })
     }
 }
@@ -1427,6 +1507,113 @@ pub enum ColumnType {
     /// quantities infers `quantity`). The word is the unit with the
     /// underscore a quantity writes, `_h`.
     Unit(std::sync::Arc<str>),
+    /// An OFFSET column (spec: Projectors, the offset trait, ruling
+    /// 2026-11-10), declared only: `at<+02:00>` holds instants
+    /// written at that offset from UTC, in minutes east. An instant
+    /// written with no offset is declared at it (its wall time
+    /// stays, its point on the timeline moves); one that has an
+    /// offset or `Z` is displayed at it, the point untouched. Never
+    /// inferred (a column of instants infers `instant`). The word is
+    /// the offset as an instant writes it, `+02:00`, and `Z` for UTC.
+    Offset(i16),
+}
+
+/// The widest offset from UTC an instant is written at, in minutes:
+/// eighteen hours either way.
+pub const MAX_OFFSET_MIN: i16 = 18 * 60;
+
+/// An offset as an instant writes it: `Z` for UTC, else `±hh:mm`.
+pub fn offset_spelling(minutes: i16) -> String {
+    if minutes == 0 {
+        return "Z".to_string();
+    }
+    let sign = if minutes < 0 { '-' } else { '+' };
+    let m = minutes.unsigned_abs();
+    format!("{sign}{:02}:{:02}", m / 60, m % 60)
+}
+
+/// The offset a word names: `Z` and `UTC` and a zero are UTC; a
+/// signed count of hours, `+2`, `-5`, `+02`; hours and minutes,
+/// `+02:00`, `+05:30`. `None` for a word of another shape; an error
+/// for a word of this shape that names no offset (minutes past 59,
+/// an offset beyond eighteen hours).
+pub fn offset_word(word: &str) -> Option<Result<i16, String>> {
+    let w = word.trim();
+    if w == "Z" || w.eq_ignore_ascii_case("utc") {
+        return Some(Ok(0));
+    }
+    let (sign, rest) = match w.chars().next()? {
+        '+' => (1i32, &w[1..]),
+        '-' => (-1i32, &w[1..]),
+        '−' => (-1i32, &w['−'.len_utf8()..]),
+        _ => return None,
+    };
+    let (h, m) = match rest.split_once(':') {
+        Some((h, m)) => (h, Some(m)),
+        None => (rest, None),
+    };
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if !digits(h) || m.is_some_and(|m| !digits(m)) {
+        return None;
+    }
+    if h.len() > 2 || m.is_some_and(|m| m.len() != 2) {
+        return Some(Err(format!(
+            "'{w}' names no offset: the hours are one or two digits and the minutes two \
+             ('+2', '+02:00', '+05:30')"
+        )));
+    }
+    let hours: i32 = h.parse().ok()?;
+    let minutes: i32 = m.map_or(Some(0), |m| m.parse().ok())?;
+    if minutes > 59 {
+        return Some(Err(format!(
+            "'{w}' names no offset: the minutes run to 59 ('+05:30')"
+        )));
+    }
+    let total = sign * (hours * 60 + minutes);
+    if total.abs() > i32::from(MAX_OFFSET_MIN) {
+        return Some(Err(format!(
+            "'{w}' names no offset: an offset from UTC is at most eighteen hours either way \
+             ('+02:00', '-05:00', '+05:30'; 'Z' for UTC)"
+        )));
+    }
+    Some(Ok(total as i16))
+}
+
+/// A value under an offset trait (ruling 2026-11-10): an instant
+/// written with no offset is DECLARED at it, the wall time kept and
+/// the point of the timeline moved (10:00 under `+02:00` is 08:00
+/// UTC); one written with an offset or `Z` is DISPLAYED at it, the
+/// point kept. A date is an offset-less midnight, so it reads as its
+/// midnight there. Text is read as the instant it spells. `None` for
+/// a value that is no instant: a number is no instant here (the
+/// `<instant>` cast reads an epoch, and what it answers is `Z`).
+pub fn cast_offset(v: &Value, minutes: i16) -> Option<Value> {
+    let at = |secs: i64, nanos: u32, written: Option<i16>, calendar| {
+        let secs = match written {
+            // declared: the wall time stays
+            None => secs.saturating_sub(i64::from(minutes) * 60),
+            // displayed: the point stays
+            Some(_) => secs,
+        };
+        Value::Instant {
+            secs,
+            nanos,
+            offset_min: Some(minutes),
+            calendar,
+        }
+    };
+    match v {
+        Value::Null => Some(Value::Null),
+        Value::Instant {
+            secs,
+            nanos,
+            offset_min,
+            calendar,
+        } => Some(at(*secs, *nanos, *offset_min, *calendar)),
+        Value::Str(s) => crate::temporal::parse_iso(s)
+            .map(|(secs, nanos, written)| at(secs, nanos, written, Default::default())),
+        _ => None,
+    }
 }
 
 impl ColumnType {
@@ -1435,6 +1622,15 @@ impl ColumnType {
     pub fn unit(&self) -> Option<&str> {
         match self {
             ColumnType::Unit(u) => Some(u),
+            _ => None,
+        }
+    }
+
+    /// The offset an offset column is declared at, in minutes east
+    /// of UTC; `None` for every other type.
+    pub fn offset(&self) -> Option<i16> {
+        match self {
+            ColumnType::Offset(m) => Some(*m),
             _ => None,
         }
     }
@@ -1453,6 +1649,7 @@ impl ColumnType {
             ColumnType::Node => "node".to_string(),
             ColumnType::Text => "text".to_string(),
             ColumnType::Unit(u) => format!("_{u}"),
+            ColumnType::Offset(m) => offset_spelling(*m),
             ColumnType::Tuple(items) => {
                 format!(
                     "({})",
@@ -1475,6 +1672,11 @@ impl ColumnType {
         // the unit is one the run knows is the parser's check
         if let Some(u) = word.strip_prefix('_') {
             return unit_shaped(u).then(|| ColumnType::Unit(u.into()));
+        }
+        // `+02:00`, `+2`, `Z`, `UTC` — the offset trait's word (ruling
+        // 2026-11-10): the offset an instant is written at
+        if let Some(m) = offset_word(word) {
+            return m.ok().map(ColumnType::Offset);
         }
         if let Some(inner) = word.strip_prefix('(').and_then(|w| w.strip_suffix(')')) {
             let items: Option<Vec<ColumnType>> = inner
@@ -1534,10 +1736,18 @@ impl ColumnType {
 /// declares nothing, and `<*; float>` is the star beside the type a
 /// header reports for an undeclared column, a report and no request
 /// (ignored where the header is applied).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Levels` is no trait: it is the level below an outer name in a
+/// header's nested reading, `:bar:@(:A<int>; :B<int>)` (ruling
+/// 2026-11-10), the projectors of the columns that stand under the
+/// name, each typed as a flat header's are or holding a level of its
+/// own. A projector takes brackets or a level, never both: the types
+/// are the columns', and a column is a leaf.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Typing {
     Declared(ColumnType),
     Star(Option<ColumnType>),
+    Levels(Vec<Value>),
 }
 
 impl Typing {
@@ -1547,6 +1757,14 @@ impl Typing {
             Typing::Declared(t) => format!("<{}>", t.word()),
             Typing::Star(None) => "<*>".to_string(),
             Typing::Star(Some(t)) => format!("<*; {}>", t.word()),
+            Typing::Levels(below) => format!(
+                ":@({})",
+                below
+                    .iter()
+                    .map(Value::to_quarb)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
         }
     }
 
@@ -1554,7 +1772,7 @@ impl Typing {
     pub fn declared(&self) -> Option<ColumnType> {
         match self {
             Typing::Declared(t) => Some(t.clone()),
-            Typing::Star(_) => None,
+            Typing::Star(_) | Typing::Levels(_) => None,
         }
     }
 
@@ -1617,10 +1835,15 @@ pub(crate) fn cast_unit(v: &Value, unit: &str) -> Option<Value> {
             match crate::value::number::read(s, crate::value::number::Decimal::Point) {
                 Some(Value::Int(n)) => Some(minted(n as f64)),
                 Some(Value::Float(x)) => Some(minted(x)),
-                _ => {
-                    let (value, held, _, _) = parse_unit_text(s)?;
-                    converted(value, &held)
-                }
+                _ => match parse_unit_text(s) {
+                    Some((value, held, _, _)) => converted(value, &held),
+                    // a time unit reads ISO duration text, as
+                    // `<duration>` does (ruling 2026-11-10: `<_h>`
+                    // refused "PT1H" and took "90 min")
+                    None if base == "s" => crate::temporal::parse_span(s)
+                        .and_then(|(secs, nanos)| converted(secs as f64 + nanos as f64 / 1e9, "s")),
+                    None => None,
+                },
             }
         }
         _ => None,
@@ -1642,6 +1865,23 @@ pub(crate) fn unit_reading(v: Value, unit: &str) -> Value {
     }
 }
 
+/// A value's reading under an offset trait in value position (ruling
+/// 2026-11-10): [`cast_offset`] with null where the value is no
+/// instant, a list item by item, as [`unit_reading`] reads a column
+/// of quantities: a column of instants is converted to another
+/// offset as a unit column is to another unit.
+pub fn offset_reading_at(v: Value, minutes: i16) -> Value {
+    match v {
+        Value::List(items) => Value::list(
+            items
+                .iter()
+                .map(|i| offset_reading_at(i.clone(), minutes))
+                .collect(),
+        ),
+        other => cast_offset(&other, minutes).unwrap_or(Value::Null),
+    }
+}
+
 /// `v` cast to the declared column type `t`, `None` where it does
 /// not cast: the coercion of [`coerce_cell`], a whole-valued float
 /// under a declared integer (the cast is lossless), and under a
@@ -1656,19 +1896,38 @@ pub const EPOCH_MILLIS_FROM: f64 = 1e11;
 /// nanoseconds under the one epoch rule (seconds; milliseconds from
 /// [`EPOCH_MILLIS_FROM`] up).
 pub fn epoch_split(x: f64) -> (i64, u32) {
-    let secs_f = if x.abs() >= EPOCH_MILLIS_FROM {
-        x / 1000.0
-    } else {
-        x
-    };
-    let secs = secs_f.floor();
-    let nanos = ((secs_f - secs) * 1e9).round().clamp(0.0, 999_999_999.0) as u32;
+    if x.abs() >= EPOCH_MILLIS_FROM {
+        // Milliseconds: the whole seconds first, then what is left
+        // of the milliseconds as nanoseconds. (Dividing by 1000 in
+        // a double first left the nanoseconds as noise:
+        // 1700000000123 read as …20.122999907.)
+        let secs = (x / 1000.0).floor();
+        let nanos = ((x - secs * 1000.0) * 1e6)
+            .round()
+            .clamp(0.0, 999_999_999.0) as u32;
+        return (secs as i64, nanos);
+    }
+    let secs = x.floor();
+    let nanos = ((x - secs) * 1e9).round().clamp(0.0, 999_999_999.0) as u32;
     (secs as i64, nanos)
+}
+
+/// [`epoch_split`] of an integer, in integers: a count of
+/// milliseconds splits exactly, whatever its size.
+pub fn epoch_split_int(n: i64) -> (i64, u32) {
+    if (n as f64).abs() >= EPOCH_MILLIS_FROM {
+        (n.div_euclid(1000), (n.rem_euclid(1000) * 1_000_000) as u32)
+    } else {
+        (n, 0)
+    }
 }
 
 pub(crate) fn cast_cell(v: &Value, t: &ColumnType) -> Option<Value> {
     if let ColumnType::Unit(u) = t {
         return cast_unit(v, u);
+    }
+    if let ColumnType::Offset(m) = t {
+        return cast_offset(v, *m);
     }
     if let ColumnType::Tuple(items) = t {
         if matches!(v, Value::Null) {
@@ -1689,17 +1948,24 @@ pub(crate) fn cast_cell(v: &Value, t: &ColumnType) -> Option<Value> {
         (Value::Float(f), ColumnType::Integer) if f.fract() == 0.0 && f.abs() < 9.0e15 => {
             Some(Value::Int(*f as i64))
         }
+        // the text of a whole-valued float, as the float itself
+        // (ruling 2026-11-10: `<int>` cast 3.0, "3" and " 3 " and
+        // refused "3.0"); inference never does, so a column of such
+        // text is a float column
+        (Value::Str(s), ColumnType::Integer) => {
+            match crate::value::number::read(s, crate::value::number::Decimal::Point) {
+                Some(Value::Float(f)) if f.fract() == 0.0 && f.abs() < 9.0e15 => {
+                    Some(Value::Int(f as i64))
+                }
+                _ => None,
+            }
+        }
         // the <instant> cast reads a number since the epoch as
         // `datetime` does (ruling 2026-11-08); inference never does,
         // so a column of numbers stays numeric
-        (Value::Int(n), ColumnType::Instant) => Some(Value::from_epoch(*n as f64)),
+        (Value::Int(n), ColumnType::Instant) => Some(Value::from_epoch_int(*n)),
         (Value::Float(f), ColumnType::Instant) if f.is_finite() => Some(Value::from_epoch(*f)),
-        (Value::Str(s), ColumnType::Instant) => s
-            .trim()
-            .parse::<f64>()
-            .ok()
-            .filter(|f| f.is_finite())
-            .map(Value::from_epoch),
+        (Value::Str(s), ColumnType::Instant) => Value::from_epoch_text(s),
         _ => None,
     })
 }
@@ -1726,6 +1992,7 @@ pub(crate) fn coerce_text(s: &str, t: &ColumnType) -> Option<Value> {
     match t {
         T::Tuple(_) => None,
         T::Unit(u) => cast_unit(&Value::Str(s.to_string()), u),
+        T::Offset(m) => cast_offset(&Value::Str(s.to_string()), *m),
         T::Boolean => match s {
             "true" => Some(Value::Bool(true)),
             "false" => Some(Value::Bool(false)),
@@ -1786,6 +2053,7 @@ fn coerce_cell(v: &Value, t: &ColumnType) -> Option<Value> {
         // a tuple is cast, never coerced: see `cast_cell`
         T::Tuple(_) => None,
         T::Unit(u) => cast_unit(v, u),
+        T::Offset(m) => cast_offset(v, *m),
         T::Boolean => match v {
             Value::Bool(_) => Some(v.clone()),
             Value::Str(s) if s == "true" => Some(Value::Bool(true)),
@@ -1992,7 +2260,21 @@ impl Table {
             declared,
             index,
             name,
+            levels: false,
         }
+    }
+
+    /// [`Table::assemble`] with the levels mark of the table the
+    /// parts are taken from.
+    pub fn assemble_levelled(
+        levels: bool,
+        header: Option<Vec<String>>,
+        rows: Vec<Vec<Value>>,
+        declared: Vec<Option<ColumnType>>,
+        index: usize,
+        name: Option<String>,
+    ) -> Table {
+        Table::assemble(header, rows, declared, index, name).with_levels(levels)
     }
 
     /// How many rows the table holds.
@@ -2039,6 +2321,7 @@ impl Table {
             declared: self.declared.clone(),
             index: self.index,
             name: self.name.clone(),
+            levels: self.levels,
         }
     }
 
@@ -2053,6 +2336,7 @@ impl Table {
             self.index,
             self.name.clone(),
         )
+        .with_levels(self.levels)
     }
 
     /// `-c|--cast=:col<type>` (ruling 2026-11-06): the named columns
@@ -2126,7 +2410,33 @@ impl Table {
             declared: decl,
             index: 0,
             name: self.name.clone(),
+            levels: self.levels,
         }
+    }
+
+    /// The table with column `j` holding `cells`, one per row, kept
+    /// as they are, and declared as `declared` says; the other
+    /// columns untouched.
+    pub(crate) fn with_column(
+        &self,
+        j: usize,
+        cells: Vec<Value>,
+        declared: Option<ColumnType>,
+    ) -> Table {
+        let mut t = self.clone();
+        let mut col = Column::Null(0);
+        for c in cells {
+            col.push(c);
+        }
+        t.columns[j] = col;
+        if t.declared.len() < t.width() {
+            t.declared.resize(t.width(), None);
+        }
+        t.declared[j] = declared;
+        if t.declared.iter().all(Option::is_none) {
+            t.declared.clear();
+        }
+        t
     }
 
     /// `autocast` (ruling 2026-11-06): the undeclared columns typed
@@ -2258,8 +2568,11 @@ impl Table {
     /// — a declared column casts the new cells or refuses naming it,
     /// an undeclared one re-types by its cells.
     pub fn rebuild(&self, rows: Vec<Vec<Value>>) -> Result<Table, String> {
-        Table::typed(self.header.clone(), rows, self.declared.clone())
-            .map(|t| t.with_index(self.index).with_name(self.name.clone()))
+        Table::typed(self.header.clone(), rows, self.declared.clone()).map(|t| {
+            t.with_index(self.index)
+                .with_name(self.name.clone())
+                .with_levels(self.levels)
+        })
     }
 
     /// The table with `n` leading columns as its index (0 none).
@@ -2326,7 +2639,9 @@ impl Table {
             .rows()
             .map(|r| order.iter().map(|k| r.get(*k)).collect())
             .collect();
-        Ok(Table::typed(header, rows, declared)?.with_index(n))
+        Ok(Table::typed(header, rows, declared)?
+            .with_index(n)
+            .with_levels(self.levels))
     }
 
     /// The labels (`:::index`): the index column's cells, or under a
@@ -2384,7 +2699,7 @@ impl Table {
             .collect();
         self.rows()
             .enumerate()
-            .filter(|(_, r)| wanted.iter().enumerate().all(|(j, w)| r.get(j) == *w))
+            .filter(|(_, r)| wanted.iter().enumerate().all(|(j, w)| r.get(j).same_key(w)))
             .map(|(i, _)| i)
             .collect()
     }
@@ -2394,6 +2709,9 @@ impl Table {
     /// header `bar:A`, `bar:B`, `baz:A` is the table of `A` and `B`
     /// under the index; `None` where no column stands under the name.
     pub fn sub_columns(&self, prefix: &str) -> Option<Table> {
+        if !self.levels {
+            return None;
+        }
         let h = self.header.as_ref()?;
         let lead = format!("{prefix}:");
         let under: Vec<usize> = (self.index..self.width())
@@ -2422,15 +2740,26 @@ impl Table {
         Some(
             Table::typed(Some(header), rows, declared)
                 .unwrap_or_else(|_| Table::new(None, Vec::new()))
-                .with_index(self.index),
+                .with_index(self.index)
+                .with_levels(true),
         )
     }
 
-    /// Whether the header has levels: a column name with a colon.
+    /// Whether the header has levels: its names are paths
+    /// ([`Table::levels`]) and one of them has a colon.
     pub fn header_has_levels(&self) -> bool {
-        self.header
-            .as_ref()
-            .is_some_and(|h| h[self.index..].iter().any(|n| n.contains(':')))
+        self.levels
+            && self
+                .header
+                .as_ref()
+                .is_some_and(|h| h[self.index..].iter().any(|n| n.contains(':')))
+    }
+
+    /// The table with its header's names read as paths of levels, or
+    /// as names ([`Table::levels`]).
+    pub fn with_levels(mut self, levels: bool) -> Table {
+        self.levels = levels;
+        self
     }
 
     /// `stack` (spec: The Table, "Levels of the header"): the innermost
@@ -2450,7 +2779,7 @@ impl Table {
         // the innermost level of each data column's name, and what
         // stands before it
         let split = |name: &str| -> (Option<String>, String) {
-            match name.rsplit_once(':') {
+            match name.rsplit_once(':').filter(|_| self.levels) {
                 Some((outer, inner)) => (Some(outer.to_string()), inner.to_string()),
                 None => (None, name.to_string()),
             }
@@ -2494,7 +2823,9 @@ impl Table {
                 rows.push(row);
             }
         }
-        Ok(Table::new(Some(header), rows).with_index(self.index + 1))
+        Ok(Table::new(Some(header), rows)
+            .with_index(self.index + 1)
+            .with_levels(self.levels))
     }
 
     /// `unstack`: the innermost level of the index moved into the
@@ -2511,26 +2842,70 @@ impl Table {
             .unwrap_or_else(|| (1..=self.width()).map(|j| j.to_string()).collect());
         let k = self.index - 1;
         let data: Vec<usize> = (self.index..self.width()).collect();
+        // the level's values, the outer labels and the whole labels
+        // as labels are (spec: Indexed tables): equal as values, each
+        // class in the order first met
+        let mut value_classes = super::LabelIndex::new();
         let mut values: Vec<Value> = Vec::new();
+        let mut value_of: Vec<usize> = Vec::with_capacity(self.n_rows());
         for r in self.rows() {
             let v = r.get(k);
-            if !values.contains(&v) {
+            let (class, new) = value_classes.intern(std::slice::from_ref(&v));
+            if new {
                 values.push(v);
             }
+            value_of.push(class);
         }
         // a label standing on several rows has no one cell to put
         // under its column: refused naming it, as a column read is
         // (ruling 2026-11-05)
-        let mut seen: Vec<Vec<Value>> = Vec::with_capacity(self.n_rows());
+        let mut seen = super::LabelIndex::new();
         for r in self.rows() {
             let key: Vec<Value> = (0..self.index).map(|j| r.get(j)).collect();
-            if seen.contains(&key) {
+            if !seen.intern(&key).1 {
                 return Err(format!(
                     "the label {} stands on several rows, so it has no one cell to put under its column: aggregate the rows first (| mean(--by=:col)), or read them with | @",
                     self.label_name(&r.cells())
                 ));
             }
-            seen.push(key);
+        }
+        // Several data columns make the paths `column:value`, and
+        // the header then parts every name at its colons: a title or
+        // a label that holds one of its own would be parted there
+        // (ruling 2026-11-10: a title is one name). Refused naming it.
+        if data.len() > 1 {
+            // the way out the refusal names: the constructor's slug
+            // option respells a table's titles without their colons
+            // (the user, 2026-11-10); a label is a cell, which the
+            // slugs do not touch, and is mapped
+            let titled = data
+                .iter()
+                .map(|&j| h[j].as_str())
+                .find(|n| !self.levels && n.contains(':'))
+                .map(|n| {
+                    (
+                        format!("the title '{n}'"),
+                        "respell the titles first with the constructor's slug option \
+                         (| #(--slugs))",
+                    )
+                });
+            let labelled = values
+                .iter()
+                .map(Record::key_text)
+                .find(|v| v.contains(':'))
+                .map(|v| {
+                    (
+                        format!("the label '{v}'"),
+                        "respell the labels first (map(…; --to=:::index))",
+                    )
+                });
+            if let Some((what, remedy)) = titled.or(labelled) {
+                return Err(format!(
+                    "over several columns the header takes the paths column:value, and {what} \
+                     holds a colon, which would read as a level: {remedy}, or unstack one \
+                     column"
+                ));
+            }
         }
         let mut header: Vec<String> = h[..k].to_vec();
         for &j in &data {
@@ -2543,31 +2918,39 @@ impl Table {
             }
         }
         // one row per distinct outer label, in first-met order
+        let mut key_classes = super::LabelIndex::new();
         let mut keys: Vec<Vec<Value>> = Vec::new();
-        for r in self.rows() {
+        // (outer label, level value) → the row that holds the cell:
+        // one row at most, the repeated label refused above
+        let mut at: std::collections::HashMap<(usize, usize), usize> =
+            std::collections::HashMap::new();
+        for (i, r) in self.rows().enumerate() {
             let key: Vec<Value> = (0..k).map(|j| r.get(j)).collect();
-            if !keys.contains(&key) {
+            let (class, new) = key_classes.intern(&key);
+            if new {
                 keys.push(key);
             }
+            at.insert((class, value_of[i]), i);
         }
         let rows: Vec<Vec<Value>> = keys
             .iter()
-            .map(|key| {
+            .enumerate()
+            .map(|(class, key)| {
                 let mut row = key.clone();
                 for &j in &data {
-                    for v in &values {
-                        let cell = self
-                            .rows()
-                            .find(|r| (0..k).all(|i| r.get(i) == key[i]) && r.get(k) == *v)
-                            .map(|r| r.get(j))
-                            .unwrap_or(Value::Null);
-                        row.push(cell);
+                    for v in 0..values.len() {
+                        row.push(match at.get(&(class, v)) {
+                            Some(&i) => self.cell(i, j),
+                            None => Value::Null,
+                        });
                     }
                 }
                 row
             })
             .collect();
-        Ok(Table::new(Some(header), rows).with_index(k))
+        Ok(Table::new(Some(header), rows)
+            .with_index(k)
+            .with_levels(data.len() > 1))
     }
 
     /// The sub-table under the first `k` levels dropped: the rows
@@ -2591,6 +2974,7 @@ impl Table {
                 )
             })
             .with_index(self.index.saturating_sub(k))
+            .with_levels(self.levels)
     }
 
     /// The rows carrying `label`, compared as a value against the
@@ -2607,7 +2991,7 @@ impl Table {
         labels
             .iter()
             .enumerate()
-            .filter(|(_, l)| **l == wanted)
+            .filter(|(_, l)| l.same_key(&wanted))
             .map(|(i, _)| i)
             .collect()
     }
@@ -2627,16 +3011,15 @@ impl Table {
         let Some(labels) = self.labels() else {
             return Ok(list);
         };
-        let mut seen: Vec<&Value> = Vec::with_capacity(labels.len());
+        let mut seen = super::LabelIndex::new();
         for l in &labels {
-            if seen.contains(&l) {
+            if !seen.intern(std::slice::from_ref(l)).1 {
                 return Err(format!(
                     "the label {} stands on several rows, so the column '{name}' is no record keyed by it: read the rows with | @, or look the label up with [[{}]]",
                     l.to_quarb(),
                     l.to_quarb()
                 ));
             }
-            seen.push(l);
         }
         let cells = list.into_items().unwrap_or_default();
         if self.index == 1 {
@@ -2657,16 +3040,17 @@ impl Table {
     /// back undeclared (the callers: a filter keeping rows, an
     /// ordering, a walk that cannot change a cell's type).
     pub fn with_rows(&self, rows: Vec<Vec<Value>>) -> Table {
+        let kept = |t: Table| {
+            t.with_index(self.index)
+                .with_name(self.name.clone())
+                .with_levels(self.levels)
+        };
         if self.declared.is_empty() {
-            return Table::new(self.header.clone(), rows)
-                .with_index(self.index)
-                .with_name(self.name.clone());
+            return kept(Table::new(self.header.clone(), rows));
         }
         match Table::typed(self.header.clone(), rows.clone(), self.declared.clone()) {
-            Ok(t) => t.with_index(self.index).with_name(self.name.clone()),
-            Err(_) => Table::new(self.header.clone(), rows)
-                .with_index(self.index)
-                .with_name(self.name.clone()),
+            Ok(t) => kept(t),
+            Err(_) => kept(Table::new(self.header.clone(), rows)),
         }
     }
 
@@ -2695,18 +3079,37 @@ impl Table {
     /// undeclared one with the star and the type inferred
     /// (`:A<*; float>`); by position on a headerless table
     /// (`:1<int>`). The list is a structured projector: applied to
-    /// another table it narrows and casts it.
+    /// another table it narrows and casts it. A header with levels
+    /// nests by level (ruling 2026-11-10), the columns under an outer
+    /// name in a list of their own, `:bar:@(:A<int>; :B<int>)`.
     pub fn header_projectors(&self) -> Vec<Value> {
         let types = self.types();
-        (0..self.width())
+        let columns: Vec<(String, Option<Typing>)> = (0..self.width())
             .map(|j| {
                 let typing = match self.declaration(j) {
                     Some(t) => Typing::Declared(t),
                     None => Typing::Star(Some(types[j].clone())),
                 };
-                Value::typed_projection(1, self.column_name(j), Some(typing))
+                (self.column_name(j), Some(typing))
             })
+            .collect();
+        if self.header_has_levels() {
+            return nest_projectors(columns);
+        }
+        columns
+            .into_iter()
+            .map(|(name, typing)| Value::typed_projection(1, name, typing))
             .collect()
+    }
+
+    /// `| fields`: the columns as bare projectors, by position on the
+    /// array face, nested by level as `header` nests them.
+    pub fn field_projectors(&self) -> Vec<Value> {
+        let names: Vec<String> = (0..self.width()).map(|j| self.column_name(j)).collect();
+        if self.header_has_levels() {
+            return nest_projectors(names.into_iter().map(|n| (n, None)).collect());
+        }
+        names.into_iter().map(|n| Value::projection(1, n)).collect()
     }
 
     /// A matrix from rows of one width: every cell coerced TOGETHER
@@ -2856,7 +3259,13 @@ impl Table {
                     (name, v)
                 })
                 .collect();
-            return nest_by_levels(fields);
+            // an indexed table's columns keyed by its names: nested
+            // by level only where the names are paths
+            return if self.levels {
+                nest_by_levels(fields)
+            } else {
+                Value::record(fields)
+            };
         }
         let cols: Vec<Value> = (0..self.width()).map(|j| self.column_at(j)).collect();
         let keys: Vec<String> = match &self.header {
@@ -2866,9 +3275,26 @@ impl Table {
         Value::Record(keys.into_iter().zip(cols).collect())
     }
 
-    /// The header as a list of names; null on the array face.
+    /// The header as a list of names; null on the array face. Under
+    /// a header with levels the outer names, each once in the order
+    /// first met, as the keys of the nested record `| %` gives.
     pub fn header_value(&self) -> Value {
         match &self.header {
+            Some(h) if self.header_has_levels() => {
+                let mut outer: Vec<&str> = Vec::new();
+                for name in h {
+                    let o = name.split_once(':').map_or(name.as_str(), |(o, _)| o);
+                    if !outer.contains(&o) {
+                        outer.push(o);
+                    }
+                }
+                Value::list(
+                    outer
+                        .into_iter()
+                        .map(|o| Value::Str(o.to_string()))
+                        .collect(),
+                )
+            }
             Some(h) => Value::list(h.iter().cloned().map(Value::Str).collect()),
             None => Value::Null,
         }
@@ -2892,6 +3318,7 @@ impl Table {
             declared: self.declared.clone(),
             index: self.index,
             name: self.name.clone(),
+            levels: self.levels,
         }
     }
 
@@ -2900,8 +3327,7 @@ impl Table {
     pub fn to_quarb_lines(&self) -> String {
         let mut parts: Vec<String> = Vec::with_capacity(self.n_rows() + 1);
         if let Some(h) = &self.header {
-            let names: Vec<String> = h.iter().map(|k| quarb_key(k)).collect();
-            parts.push(format!("@({})", names.join("; ")));
+            parts.push(format!("@({})", self.header_spellings(h).join("; ")));
         }
         // a headerless table is the matrix: its rows print as lists
         // (spec: Table Construction, draft 166); a frame's as records
@@ -2957,14 +3383,22 @@ impl Table {
         )
     }
 
+    /// The header's names as the literal writes them: a column
+    /// under levels as its path, any other name as a key.
+    fn header_spellings(&self, h: &[String]) -> Vec<String> {
+        h.iter()
+            .enumerate()
+            .map(|(j, k)| header_spelling(k, self.levels && j >= self.index))
+            .collect()
+    }
+
     /// The literal that reads back: `#(@(name; age); %("Braund";
     /// 22))` for a frame, `#(%(1; 2); %(3; 4))` for an array: every row a
     /// record, the header the one list.
     pub fn to_quarb(&self) -> String {
         let mut parts: Vec<String> = Vec::with_capacity(self.n_rows() + 1);
         if let Some(h) = &self.header {
-            let names: Vec<String> = h.iter().map(|k| quarb_key(k)).collect();
-            parts.push(format!("@({})", names.join("; ")));
+            parts.push(format!("@({})", self.header_spellings(h).join("; ")));
         }
         let sigil = if self.header.is_some() { '%' } else { '@' };
         for r in self.rows() {
@@ -3150,15 +3584,18 @@ impl Value {
     }
 
     pub fn projection_spelling(ladder: u8, key: &str) -> String {
-        // an identifier, a position (`:1`, `::0`), or a path of
-        // identifiers (`:bar:A`, a header level) stands bare
-        let ident = |k: &str| {
-            let mut cs = k.chars();
+        // an identifier or a position (`:1`, `::0`) stands bare. A
+        // key that holds a colon is quoted, the one name it is
+        // (`:'bar:A'`): a header with levels answers its columns
+        // nested by level (`:bar:@(:A)`, ruling 2026-11-10), so a
+        // path spelled bare (`:bar:A`, which no position read back
+        // as this key) is no projector's spelling.
+        let bare = {
+            let mut cs = key.chars();
             (matches!(cs.next(), Some(c) if c.is_alphabetic() || c == '_')
                 && cs.all(|c| c.is_alphanumeric() || c == '_' || c == '-'))
-                || (!k.is_empty() && k.bytes().all(|b| b.is_ascii_digit()))
+                || (!key.is_empty() && key.bytes().all(|b| b.is_ascii_digit()))
         };
-        let bare = ident(key) || (key.contains(':') && key.split(':').all(ident));
         let key = if bare {
             key.to_string()
         } else {
@@ -3241,25 +3678,89 @@ impl Value {
             Value::Instant { secs, nanos, .. } => Some((*secs, *nanos)),
             // A period reads as its first instant.
             Value::Period { start, .. } => Some((*start, 0)),
-            Value::Int(n) => Some(epoch_split(*n as f64)),
+            Value::Int(n) => Some(epoch_split_int(*n)),
             Value::Float(f) if f.is_finite() => Some(epoch_split(*f)),
             Value::Str(s) => crate::temporal::parse_iso(s).map(|(s, n, _)| (s, n)),
             _ => None,
         }
     }
 
+    /// The temporal reading with the offset it is written in: the
+    /// timeline point, and `None` for an instant written with no
+    /// offset, `Some(0)` for `Z`, `Some(m)` for `±hh:mm`. A number is
+    /// an epoch, a point of the timeline, and so `Z` (ruling
+    /// 2026-11-10); a period reads as its first instant, written
+    /// with none.
+    pub fn offset_reading(&self) -> Option<(i64, u32, Option<i16>)> {
+        match self {
+            Value::Instant {
+                secs,
+                nanos,
+                offset_min,
+                ..
+            } => Some((*secs, *nanos, *offset_min)),
+            Value::Period { start, .. } => Some((*start, 0, None)),
+            Value::Int(n) => {
+                let (s, n) = epoch_split_int(*n);
+                Some((s, n, Some(0)))
+            }
+            Value::Float(f) if f.is_finite() => {
+                let (s, n) = epoch_split(*f);
+                Some((s, n, Some(0)))
+            }
+            Value::Str(s) => crate::temporal::parse_iso(s),
+            _ => None,
+        }
+    }
+
+    /// The seconds of the wall clock an instant is written on: the
+    /// timeline's, moved by the written offset. The components of an
+    /// instant are read here (ruling 2026-11-10: in the written
+    /// offset, no longer in UTC); with no offset the two agree.
+    pub fn wall_secs(secs: i64, offset_min: Option<i16>) -> i64 {
+        secs.saturating_add(i64::from(offset_min.unwrap_or(0)) * 60)
+    }
+
     /// An instant from a number since the epoch under the one epoch
     /// rule (ruling 2026-11-08): seconds, or milliseconds from 10^11
     /// up — what `datetime`, the `<instant>` cast and the `_at`/`_on`
-    /// suffixes all read. UTC, no written offset.
+    /// suffixes all read. An epoch is a point of the timeline, so the
+    /// instant is `Z` (ruling 2026-11-10: an instant written with no
+    /// offset is the one an offset can be declared on, and an epoch
+    /// is none of those).
     pub fn from_epoch(x: f64) -> Value {
         let (secs, nanos) = epoch_split(x);
         Value::Instant {
             secs,
             nanos,
-            offset_min: None,
+            offset_min: Some(0),
             calendar: Default::default(),
         }
+    }
+
+    /// [`Value::from_epoch`] of an integer, split in integers.
+    pub fn from_epoch_int(n: i64) -> Value {
+        let (secs, nanos) = epoch_split_int(n);
+        Value::Instant {
+            secs,
+            nanos,
+            offset_min: Some(0),
+            calendar: Default::default(),
+        }
+    }
+
+    /// The instant a number written as text stands for since the
+    /// epoch: an integer form in integers, any other finite number
+    /// as a double; `None` for text that is no number.
+    pub fn from_epoch_text(s: &str) -> Option<Value> {
+        let t = s.trim();
+        if let Ok(n) = t.parse::<i64>() {
+            return Some(Value::from_epoch_int(n));
+        }
+        t.parse::<f64>()
+            .ok()
+            .filter(|f| f.is_finite())
+            .map(Value::from_epoch)
     }
 
     /// The *calendar reading* (spec: The Calendar Reading): the
@@ -3510,33 +4011,38 @@ impl Value {
         }
     }
 
-    /// The numeric value, for numeric comparison and aggregation.
-    /// `Int` and `Float` coerce, and so does a string that parses as a
-    /// finite number\,---\,without which numeric work would silently
-    /// fail over text adapters, where every value is a string (an HTML
-    /// attribute like `rank="3"`, a CSV cell). Non-numeric strings,
-    /// booleans, lists, and null do not coerce.
     /// The key under which a value may be indexed for equality
     /// (`=`, the value match `=>`): two values with keys compare
     /// equal only if their keys are equal — the numeric reading
     /// when there is one (so `1`, `1.0` and `"1"` share a key, as
     /// they compare equal), else the text, booleans and null apart.
-    /// `None` for values compared under another reading (instants,
-    /// durations, quantities, lists, records): a search for one, or
-    /// among them, takes the scan.
+    /// The key is necessary, not sufficient: two integers a double
+    /// cannot tell apart share one, and every candidate is still
+    /// tested. `None` for values compared under another reading
+    /// (instants, durations, quantities, lists, records, and text
+    /// that reads as a quantity, `"1 km"`, which equals `"1000 m"`):
+    /// a search for one, or among them, takes the scan.
     pub fn equality_key(&self) -> Option<String> {
         match self {
-            Value::Int(_) | Value::Float(_) | Value::Str(_) => Some(match self.numeric_reading() {
-                // An integer keys as itself (exact past 2^53); a
-                // whole double keys as that integer, so `1`, `1.0`
-                // and `"1"` still share a key, and -0.0 is 0.
-                Some(Value::Int(n)) => format!("n:{n}"),
-                Some(Value::Float(f)) if f.fract() == 0.0 && f.abs() < 9.2e18 => {
-                    format!("n:{}", f as i64)
+            Value::Int(_) | Value::Float(_) | Value::Str(_) => {
+                // The number as the comparison reads a mixed pair,
+                // by magnitude: a double's bits, -0.0 as 0. (An
+                // integer keyed as itself and a float as its text,
+                // so 9007199254740993 and the float …992.0, equal
+                // under `=`, missed each other.)
+                if let Some(n) = self.numeric_reading().and_then(|n| n.numeric()) {
+                    let n = if n == 0.0 { 0.0 } else { n };
+                    return Some(format!("n:{:x}", n.to_bits()));
                 }
-                Some(Value::Float(f)) => format!("n:{f}"),
-                _ => format!("s:{self}"),
-            }),
+                // unit text compares by magnitude in its dimension
+                if let Value::Str(s) = self {
+                    let unit = |e: &str| crate::value::ambient::unit_scale(e).flatten();
+                    if crate::value::quantity::parse_unit_text_with(s, &unit).is_some() {
+                        return None;
+                    }
+                }
+                Some(format!("s:{self}"))
+            }
             Value::Bool(b) => Some(format!("b:{b}")),
             Value::Null => Some("0:".to_string()),
             Value::Node(n) => Some(format!("node:{}", n.id)),
@@ -3547,6 +4053,12 @@ impl Value {
         }
     }
 
+    /// The numeric value, for numeric comparison and aggregation.
+    /// `Int` and `Float` coerce, and so does a string that parses as a
+    /// finite number\,---\,without which numeric work would silently
+    /// fail over text adapters, where every value is a string (an HTML
+    /// attribute like `rank="3"`, a CSV cell). Non-numeric strings,
+    /// booleans, lists, and null do not coerce.
     pub fn numeric(&self) -> Option<f64> {
         match self {
             Value::Int(n) => Some(*n as f64),
@@ -3674,8 +4186,20 @@ impl std::hash::Hash for SortKey {
             SortKey::Bool(b) => b.hash(state),
             SortKey::Line(f, i, dim) => {
                 dim.hash(state);
-                // -0.0 and 0.0 are one point of the line.
-                (if *f == 0.0 { 0.0f64 } else { *f }).to_bits().hash(state);
+                // -0.0 and 0.0 are one point of the line, and every
+                // NaN one: `cmp_key` calls two NaNs equal whatever
+                // their bits (`0 div 0` mints the negative one), so
+                // they hash alike (ruling 2026-11-10: two NaNs dedup
+                // under `unique` and group together; `=` between
+                // them stays false).
+                let point = if f.is_nan() {
+                    f64::NAN
+                } else if *f == 0.0 {
+                    0.0
+                } else {
+                    *f
+                };
+                point.to_bits().hash(state);
                 i.hash(state);
             }
             SortKey::Period(start, grain) => {
@@ -3723,7 +4247,7 @@ impl SortKey {
             // The dimensionless line first, then the dimensions in
             // text order; magnitudes meet only within one line.
             (Line(a, i, da), Line(b, j, db)) => {
-                da.cmp(db).then_with(|| match (a.is_nan(), b.is_nan()) {
+                let magnitude = || match (a.is_nan(), b.is_nan()) {
                     (true, true) => i.cmp(j),
                     (true, false) => std::cmp::Ordering::Greater,
                     (false, true) => std::cmp::Ordering::Less,
@@ -3734,7 +4258,19 @@ impl SortKey {
                             a.total_cmp(b).then(i.cmp(j))
                         }
                     }
-                })
+                };
+                // A ratio and a bare number order in the base, as
+                // `<` orders them (ruling 2026-11-09: `5_% < 0.5`):
+                // the number line and dimension one meet by
+                // magnitude, the line breaking a tie, so the two
+                // stay unequal. (Dimension one stood after every
+                // number: `@(0.5; 5_%) | sort` left 5_% last.)
+                let meet = |d: &str| d.is_empty() || d == "1";
+                if meet(da) && meet(db) {
+                    magnitude().then_with(|| da.cmp(db))
+                } else {
+                    da.cmp(db).then_with(magnitude)
+                }
             }
             (Period(a, g), Period(b, h)) => a.cmp(b).then(g.cmp(h)),
             (Text(a), Text(b)) | (ListText(a), ListText(b)) | (RecordText(a), RecordText(b)) => {
@@ -4235,8 +4771,11 @@ pub fn quarb_string(s: &str) -> String {
                 out.push('\\');
                 out.push('$');
             }
-            // `(,` opens the rounded hole; `\(` is the literal.
-            '(' if chars.peek() == Some(&',') => {
+            // `(_` opens the rounded hole; `\(` is the literal. (The
+            // opener was `(,` before draft 166, and this arm still
+            // escaped that one: a printed "n(_1 + 1)" read back as an
+            // interpolation.)
+            '(' if chars.peek() == Some(&'_') => {
                 out.push('\\');
                 out.push('(');
             }
@@ -4255,6 +4794,18 @@ pub fn quarb_key(k: &str) -> String {
     } else {
         quarb_string(k)
     }
+}
+
+/// A header name as the table literal writes it (ruling
+/// 2026-11-10). Where the names are paths of levels, the path, its
+/// segments glued by colons and each written as a key, `bar:A`,
+/// `sales:"2019"`; else the one name as a key, so a title with a
+/// colon is quoted, `"Time (HH:MM)"`, and reads back as one name.
+pub fn header_spelling(name: &str, levels: bool) -> String {
+    if !levels || !name.contains(':') {
+        return quarb_key(name);
+    }
+    name.split(':').map(quarb_key).collect::<Vec<_>>().join(":")
 }
 
 /// Whether the constructor reads `k` unquoted as the text key `k`:

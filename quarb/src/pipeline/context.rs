@@ -323,7 +323,6 @@ pub(crate) fn threads_command<H: Host>(
     }
     match host.render_threads(&caps, &spec) {
         Ok(text) => vec![Thread::<H::Ext> {
-            window: None,
             prov: Prov::leaf(origins),
             register: shared_register(&caps),
             topic: Some(Value::Str(text)),
@@ -378,7 +377,6 @@ pub(crate) fn tree_command<H: Host>(
     }
     match host.render_tree(&starts, &spec, &column) {
         Ok(text) => vec![Thread::<H::Ext> {
-            window: None,
             prov: Prov::leaf(origins),
             register: shared_register(&caps),
             topic: Some(Value::Str(text)),
@@ -405,12 +403,12 @@ pub(crate) fn graph_table_command<H: Host>(
 ) -> Vec<Thread<H::Ext>> {
     // The positions are tabled whatever the topic: a thread in
     // value mode still stands on its node (spec: The graph as a
-    // table); only a thread standing nowhere (after an aggregate)
+    // table); only a thread standing nowhere (after the aggregation pipe)
     // has nothing to table.
     if caps.iter().any(|c| host.node_ref(&c.ext).is_none()) {
         record_refusal(format!(
             "{} draws the context's nodes, and a thread of the context stands nowhere \
-             (after an aggregate): navigate to the nodes before tabling them",
+             (after the aggregation pipe): navigate to the nodes before tabling them",
             call.name
         ));
         return Vec::new();
@@ -429,7 +427,6 @@ pub(crate) fn graph_table_command<H: Host>(
     }
     match host.graph_table(&starts, &what, trace) {
         Ok(table) => vec![Thread::<H::Ext> {
-            window: None,
             prov: Prov::leaf(origins),
             register: shared_register(&caps),
             topic: Some(Value::Table(std::sync::Arc::new(table))),
@@ -464,7 +461,7 @@ pub(crate) fn graph_library_command<H: Host>(
     if caps.iter().any(|c| host.node_ref(&c.ext).is_none()) {
         record_refusal(format!(
             "graph:{name} reads the context's nodes, and a thread of the context stands nowhere \
-             (after an aggregate): navigate to the nodes before ranking them"
+             (after the aggregation pipe): navigate to the nodes before ranking them"
         ));
         return Vec::new();
     }
@@ -520,7 +517,7 @@ pub(crate) fn graph_library_command<H: Host>(
     let seeds: Vec<<H::Ext as Attachment>::Key> = match &what {
         GraphTable::Distance { from, .. } | GraphTable::Route { from, .. } => {
             let seed = seed_capsa(&caps, host);
-            let scope = seed.scope(None, peers, outer);
+            let scope = seed.scope(Some(crate::pipeline::run::group_ordinal()), peers, outer);
             let root = host.unplaced_ext();
             discard(|| host.operand_keys(&root, from, trace, scope))
         }
@@ -563,7 +560,6 @@ pub(crate) fn graph_library_command<H: Host>(
             },
         };
         return vec![Thread::<H::Ext> {
-            window: None,
             prov: Prov::leaf(origins),
             register: shared_register(&caps),
             topic: Some(Value::Table(table)),
@@ -605,7 +601,6 @@ pub(crate) fn graph_library_command<H: Host>(
         let part: Vec<usize> = part_of.into_iter().map(|p| p.unwrap_or(0)).collect();
         return match host.graph_reduce(&starts, &what, &part, trace) {
             Ok(value) => vec![Thread::<H::Ext> {
-                window: None,
                 prov: Prov::leaf(origins),
                 register: shared_register(&caps),
                 topic: Some(value),
@@ -706,7 +701,7 @@ fn scope_keys<H: Host>(
         return Err("a scope is one path".to_string());
     };
     let seed = seed_capsa(caps, host);
-    let scope = seed.scope(None, peers, outer);
+    let scope = seed.scope(Some(crate::pipeline::run::group_ordinal()), peers, outer);
     let root = host.unplaced_ext();
     Ok(discard(|| host.operand_keys(&root, &op, trace, scope)))
 }
@@ -1068,9 +1063,11 @@ pub(crate) fn association_command<H: Host>(
     // Pipe)
     let node = host.unplaced_ext();
     vec![Thread::<H::Ext> {
-        window: None,
         prov: Prov::leaf(origins),
-        register: Vec::new(),
+        // the regulae every capsa shares, as every other reduction
+        // keeps them (`| .n(1) @| corr(…) | $.n` answered null where
+        // `@| sum(…) | $.n` answers 1)
+        register: shared_register(&caps),
         topic: Some(value),
         members: Vec::new(),
         captures: Vec::new(),

@@ -316,11 +316,13 @@ class Session:
     # -- mounting ------------------------------------------------
     def mount(self, line: str) -> str:
         args = shlex.split(line)
-        # --descend is the pre-0.24 spelling of --graft, kept as
-        # an alias.
-        graft = "--graft" in args or "--descend" in args
+        # --descend, the pre-0.24 spelling of --graft, is refused
+        # with the pointer, as qua refuses it.
+        if "--descend" in args:
+            raise ValueError("--descend is retired: write --graft")
+        graft = "--graft" in args
         no_graft = "--no-graft" in args
-        flags = {"--graft", "--descend", "--no-graft"}
+        flags = {"--graft", "--no-graft"}
         paths = [a for a in args if a not in flags]
         if graft and no_graft:
             raise ValueError("--graft and --no-graft conflict")

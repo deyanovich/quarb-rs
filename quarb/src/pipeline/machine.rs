@@ -30,7 +30,6 @@ pub(crate) fn eval_bare<H: Host>(
     for _ in &query.branches {
         let t = Thread {
             register: outer.map(|s| s.register.to_vec()).unwrap_or_default(),
-            window: None,
             topic: None,
             prov: Prov::default(),
             members: Vec::new(),
@@ -60,7 +59,7 @@ pub(crate) fn eval_bare<H: Host>(
     // Modes): a projected branch in value mode, plain navigation in
     // navigation mode; the join's tail continues where the head left
     let start = if query.branches.iter().any(|b| b.projection.is_some()) {
-        crate::syntax::parser::PipeMode::Scalar
+        crate::syntax::parser::PipeMode::Value
     } else {
         crate::syntax::parser::PipeMode::Nav
     };

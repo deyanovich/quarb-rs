@@ -70,7 +70,7 @@ fn strict_hole_refuses() {
     let a = doc();
     // the refusal surfaces as run()'s Refused error
     let e = quarb::run(r#"= "${/items/1::missing:?}""#, &a).unwrap_err();
-    assert!(e.to_string().contains("produced nothing"), "{e}");
+    assert!(e.to_string().contains("is null"), "{e}");
     let e = quarb::run(r#"= "${/items/1::missing:?no gz name}""#, &a).unwrap_err();
     assert!(e.to_string().contains("no gz name"), "{e}");
     // a present value splices with no refusal
@@ -150,7 +150,7 @@ fn record_sigil_refusals() {
         other => panic!("{other:?}"),
     }
     let e = quarb::run("/items/* | %%()", &doc()).unwrap_err();
-    assert!(e.to_string().contains("the register view is %."), "{e}");
+    assert!(e.to_string().contains("the capsa record is %."), "{e}");
     // the duplicate-name check covers the sigil spellings too
     let e = quarb::run(r#"/items/* | %(a = 1; a = 2)"#, &doc()).unwrap_err();
     assert!(e.to_string().contains("twice"), "{e}");

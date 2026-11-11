@@ -100,11 +100,14 @@ pub(crate) struct Reg {
     pub(crate) name: Option<String>,
     pub(crate) value: Value,
     pub(crate) prov: Prov,
-    /// Where the push happened. Unread: the node read goes by the
-    /// node a regula is attached to (spec: Attached Regulae), not
-    /// by where its push stood.
-    #[allow(dead_code)]
+    /// Where the push happened: what `&$.x#` returns to (spec:
+    /// Quarqs, the held quarq's appliers). The node read goes by the
+    /// node a regula is attached to (spec: Attached Regulae), not by
+    /// where its push stood.
     pub(crate) site: Origin,
+    /// Whether the push stood on a node: false after a reduction and
+    /// at the calculator, where the site's position names nothing.
+    pub(crate) placed: bool,
 }
 
 /// One execution path: its topic, its register, the members of a
@@ -113,11 +116,6 @@ pub(crate) struct Reg {
 #[derive(Clone)]
 pub(crate) struct Thread<X: Attachment> {
     pub(crate) register: Vec<Reg>,
-    /// The register's visible prefix for the thread's reads (spec:
-    /// Quarqs, the held quarq's appliers): under `&$.x!` and `&$.x#`
-    /// the body's recalls and marks resolve against the regulae
-    /// before the one holding `x`; pushes append past it as always.
-    pub(crate) window: Option<usize>,
     pub(crate) topic: Option<Value>,
     /// Where the topic's value was read (per field for a record).
     pub(crate) prov: Prov,
@@ -139,7 +137,6 @@ impl<X: Attachment> Thread<X> {
     pub(crate) fn bare(ext: X, topic: Option<Value>) -> Thread<X> {
         Thread {
             register: Vec::new(),
-            window: None,
             topic,
             prov: Prov::default(),
             members: Vec::new(),

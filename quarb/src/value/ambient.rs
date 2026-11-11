@@ -132,6 +132,95 @@ pub(crate) struct Ambient {
     pub(crate) keying: u32,
     /// The warnings and infos raised, in raising order.
     pub(crate) diagnostics: Vec<Diagnostic>,
+    /// Whether the value in front of a command is a cell of a
+    /// structure `map` runs its body on: a numeric command leaves a
+    /// cell of a kind it does not take as it is, where a lone value
+    /// of that kind answers null (ruling 2026-11-10). It holds for
+    /// one run of commands ([`cells_ground`]).
+    pub(crate) cells: bool,
+    /// The mark `map` leaves for the run of commands it starts next
+    /// ([`mark_cells`]), taken by that run.
+    pub(crate) cells_next: bool,
+    /// The lone values a numeric command could not take, per
+    /// command: one warning each when the run ends, counting them.
+    pub(crate) untaken: Vec<Untaken>,
+    /// The names already put to a declared surface this run, by the
+    /// container asked and the name (a label apart from a property):
+    /// such a source is asked once per name, and told of once. A
+    /// source that declares nothing is not recorded, its containers
+    /// being as many as its nodes.
+    pub(crate) surfaced: std::collections::HashMap<u64, Vec<(String, bool)>>,
+    /// How deep the run stands in a test of presence (`[::name]`,
+    /// `[!::name]`): a name a surface lacks is the answer there, and
+    /// a mistake only when nothing asked has it.
+    pub(crate) presence: u32,
+    /// What the run's tests of presence met, by name, in the order
+    /// first tested: the verdict falls when the run ends.
+    pub(crate) tested: Vec<Tested>,
+}
+
+/// One name the run tested for presence.
+#[derive(Default)]
+pub(crate) struct Tested {
+    name: String,
+    /// Whether anything asked has the property: a declared surface
+    /// that lists it, or a node that read it.
+    found: bool,
+    /// The declared containers asked, each once.
+    asked: Vec<u64>,
+    /// The warnings kept for the containers that lack it.
+    lacking: Vec<Diagnostic>,
+}
+
+impl Ambient {
+    fn tested(&mut self, name: &str) -> &mut Tested {
+        match self.tested.iter().position(|t| t.name == name) {
+            Some(i) => &mut self.tested[i],
+            None => {
+                self.tested.push(Tested {
+                    name: name.to_string(),
+                    ..Tested::default()
+                });
+                self.tested.last_mut().expect("just pushed")
+            }
+        }
+    }
+}
+
+/// The lone values of a kind one numeric command does not take.
+pub(crate) struct Untaken {
+    command: String,
+    /// What the command takes: "a number", "a number or a quantity".
+    takes: &'static str,
+    count: usize,
+    /// The first of them, kind and value, as the warning shows it.
+    first: String,
+}
+
+impl Untaken {
+    fn warning(&self) -> Diagnostic {
+        let Untaken {
+            command,
+            takes,
+            count,
+            first,
+        } = self;
+        Diagnostic::warning(
+            crate::diagnostic::NOT_NUMERIC,
+            "pipeline",
+            if *count == 1 {
+                format!(
+                    "{command} takes {takes}: 1 value is of another kind ({first}) and answers \
+                     null"
+                )
+            } else {
+                format!(
+                    "{command} takes {takes}: {count} values are of another kind (the first: \
+                     {first}) and answer null"
+                )
+            },
+        )
+    }
 }
 
 /// Open an ambient for a run; it closes when the guard drops, and
@@ -150,6 +239,28 @@ impl Drop for AmbientGuard {
             // run already refused for the same reason
             if done.omitted {
                 omitted_warning(&mut done);
+            }
+            // one warning per numeric command for the lone values it
+            // could not take: one line for the stream, not one per
+            // thread
+            let untaken: Vec<Diagnostic> = done.untaken.iter().map(Untaken::warning).collect();
+            done.diagnostics.extend(untaken);
+            // the verdict of the tests of presence: a name nothing
+            // asked has is told of, container by container; one that
+            // something has was the question the test put
+            for t in std::mem::take(&mut done.tested) {
+                if t.found {
+                    continue;
+                }
+                for d in t.lacking {
+                    if !done
+                        .diagnostics
+                        .iter()
+                        .any(|k| k.code == d.code && k.message == d.message)
+                    {
+                        done.diagnostics.push(d);
+                    }
+                }
             }
             FINISHED.with(|f| *f.borrow_mut() = done);
         }
@@ -237,6 +348,55 @@ pub fn with_keying<R>(f: impl FnOnce() -> R) -> R {
     with_ambient(|a| a.keying = a.keying.saturating_sub(1));
     out
 }
+/// Run `f` as a test of presence: a predicate that is a property
+/// alone asks whether it is there, so a declared surface that lacks
+/// the name is not told of at once. The warning is kept, and raised
+/// when the run ends only if nothing the test asked has the name
+/// (ruling 2026-11-11): `//*[::name]` over a database tells the
+/// tables that have the column from those that lack it in silence,
+/// and `/employees/*[::manger_id]` is still a misspelling.
+pub(crate) fn with_presence<R>(f: impl FnOnce() -> R) -> R {
+    with_ambient(|a| a.presence += 1);
+    let out = f();
+    with_ambient(|a| a.presence = a.presence.saturating_sub(1));
+    out
+}
+/// Whether the run stands in a test of presence.
+pub(crate) fn in_presence() -> bool {
+    with_ambient(|a| a.presence > 0)
+}
+/// Whether a test of presence already put `name` to the declared
+/// surface of `container`.
+pub(crate) fn presence_asked(container: u64, name: &str) -> bool {
+    with_ambient(|a| {
+        a.tested
+            .iter()
+            .any(|t| t.name == name && t.asked.contains(&container))
+    })
+}
+/// A test of presence put `name` to the declared surface of
+/// `container`: it has the property, or the warning that it lacks
+/// it is kept for the verdict.
+pub(crate) fn presence_ask(container: u64, name: &str, lacking: Option<Diagnostic>) {
+    with_ambient(|a| {
+        let t = a.tested(name);
+        t.asked.push(container);
+        match lacking {
+            Some(d) => t.lacking.push(d),
+            None => t.found = true,
+        }
+    });
+}
+/// A test of presence read `name` on a node: something has it.
+pub(crate) fn presence_found(name: &str) {
+    with_ambient(|a| {
+        // the common case first: the name already found
+        match a.tested.iter_mut().find(|t| t.name == name) {
+            Some(t) => t.found = true,
+            None => a.tested(name).found = true,
+        }
+    });
+}
 /// The refusal a key over omitted values raises.
 pub fn refuse_omitted() {
     record_refusal_coded(
@@ -247,6 +407,111 @@ pub fn refuse_omitted() {
 }
 pub fn record_diagnostic(d: Diagnostic) {
     with_ambient(|a| a.diagnostics.push(d));
+}
+
+/// Mark the run of commands started next as standing on a cell of a
+/// structure (`map`'s body on a cell of a table, an item of a list,
+/// a field of a record) or, with `false`, on a lone value (its body
+/// on a scalar topic).
+pub(crate) fn mark_cells(cells: bool) {
+    with_ambient(|a| a.cells_next = cells);
+}
+
+/// A nested pipeline's own ground: its commands stand on a cell
+/// where `map` marked the run ([`mark_cells`]), on lone values
+/// otherwise, whatever the enclosing run stands on, until the guard
+/// drops. So the mark reaches the commands of `map`'s body and no
+/// further: a path piped inside the body
+/// (`map((^/books/* | ::title | sqrt @| first))`) runs its commands
+/// on threads, each a lone value.
+pub(crate) struct CellsGround(bool);
+
+pub(crate) fn cells_ground() -> CellsGround {
+    CellsGround(with_ambient(|a| {
+        let here = std::mem::take(&mut a.cells_next);
+        std::mem::replace(&mut a.cells, here)
+    }))
+}
+
+impl Drop for CellsGround {
+    fn drop(&mut self) {
+        let before = self.0;
+        with_ambient(|a| a.cells = before);
+    }
+}
+
+/// Whether the value in front of a command is a cell
+/// ([`cells_ground`]).
+pub(crate) fn in_cells() -> bool {
+    with_ambient(|a| a.cells)
+}
+
+/// A lone value the numeric command `command` could not take: the
+/// answer is null, and the run warns once for the command when it
+/// ends, counting them and showing the first.
+pub(crate) fn record_untaken(command: &str, takes: &'static str, first: impl FnOnce() -> String) {
+    with_ambient(
+        |a| match a.untaken.iter_mut().find(|u| u.command == command) {
+            Some(u) => u.count += 1,
+            None => a.untaken.push(Untaken {
+                command: command.to_string(),
+                takes,
+                count: 1,
+                first: first(),
+            }),
+        },
+    );
+}
+
+/// Whether `name` was already put to the declared surface of
+/// `container` this run (`label` tells a label from a property). A
+/// lookup and no more: every null read of a property passes here,
+/// on any source, and one that declares nothing is never recorded.
+pub(crate) fn surface_asked(container: u64, name: &str, label: bool) -> bool {
+    with_ambient(|a| {
+        a.surfaced
+            .get(&container)
+            .is_some_and(|seen| seen.iter().any(|(n, l)| n == name && *l == label))
+    })
+}
+
+/// Record that `name` was put to the declared surface of
+/// `container`: such a source is asked once per name, its containers
+/// being few.
+pub(crate) fn surface_ask(container: u64, name: &str, label: bool) {
+    with_ambient(|a| {
+        a.surfaced
+            .entry(container)
+            .or_default()
+            .push((name.to_string(), label));
+    });
+}
+
+/// Raise a warning beside the answer, once per run for one text.
+pub(crate) fn record_warning_once(code: &str, site: &str, message: String) {
+    with_ambient(|a| {
+        if !a
+            .diagnostics
+            .iter()
+            .any(|d| d.code == code && d.message == message)
+        {
+            a.diagnostics.push(Diagnostic::warning(code, site, message));
+        }
+    });
+}
+
+/// Raise an info beside the answer, once per run for one text: a
+/// command that runs on every thread tells what it did once.
+pub(crate) fn record_info_once(code: &str, site: &str, message: String) {
+    with_ambient(|a| {
+        if !a
+            .diagnostics
+            .iter()
+            .any(|d| d.code == code && d.message == message)
+        {
+            a.diagnostics.push(Diagnostic::info(code, site, message));
+        }
+    });
 }
 
 /// Drop the diagnostics raised so far in the run that `drop` names:

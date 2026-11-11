@@ -754,13 +754,13 @@ impl<A: AstAdapter> ComposeAdapter<A> {
                         ("text", Some(inner)) => inner,
                         _ if self.string_reader.is_none() => {
                             return Err(format!(
-                                "graft({shown}): the {r} reading of a string is not available \
+                                "graft({shown}): the '{r}:' reading of a string is not available \
                                  in this host"
                             ));
                         }
                         _ => {
                             return Err(format!(
-                                "graft({shown}): the {r} reading does not read {notation}"
+                                "graft({shown}): the '{r}:' reading does not read {notation}"
                             ));
                         }
                     },
@@ -1796,6 +1796,21 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
         }
     }
 
+    /// A grafted document's surface, its container named from the
+    /// leaf it is grafted on.
+    fn surface(&self, node: NodeId) -> Option<quarb::Surface> {
+        match self.split(node) {
+            Some((g, inner)) => {
+                let (surface, outer) = {
+                    let grafts = self.grafts.borrow();
+                    (grafts[g].inner.adapter().surface(inner)?, grafts[g].outer)
+                };
+                Some(surface.under(&quarb::name_path(self, outer)))
+            }
+            None => self.outer.surface(node),
+        }
+    }
+
     fn intrinsic(&self, node: NodeId) -> NodeId {
         match self.split(node) {
             Some((g, inner)) => {
@@ -1933,6 +1948,21 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
                     .collect()
             }
             None => self.outer.backlink_rows(node),
+        }
+    }
+
+    // A grafted level that cannot walk its links back says so for
+    // its own nodes, the outer source for the rest.
+    fn backlinks_unsupported(&self, node: NodeId, label: Option<&str>) -> bool {
+        match self.split(node) {
+            Some((g, inner)) => {
+                let grafts = self.grafts.borrow();
+                grafts[g]
+                    .inner
+                    .adapter()
+                    .backlinks_unsupported(inner, label)
+            }
+            None => self.outer.backlinks_unsupported(node, label),
         }
     }
 

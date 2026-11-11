@@ -212,6 +212,7 @@ pub(crate) fn mark_reg(adapter: &impl AstAdapter, node: NodeId, name: Option<Str
             position: node.into(),
             command: command_now(),
         },
+        placed: true,
     }
 }
 

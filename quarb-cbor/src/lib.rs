@@ -126,16 +126,17 @@ fn time_instant(tag: u64, inner: &Cbor) -> Option<Value> {
                 calendar: Default::default(),
             })
         }
+        // tag 1 is an epoch, a point of the timeline: `Z`
         (1, Cbor::Integer(i)) => Some(Value::Instant {
             secs: i128::from(*i) as i64,
             nanos: 0,
-            offset_min: None,
+            offset_min: Some(0),
             calendar: Default::default(),
         }),
         (1, Cbor::Float(f)) => Some(Value::Instant {
             secs: f.floor() as i64,
             nanos: ((f - f.floor()) * 1e9) as u32,
-            offset_min: None,
+            offset_min: Some(0),
             calendar: Default::default(),
         }),
         _ => None,

@@ -1118,7 +1118,7 @@ fn trait_negation() {
 }
 
 #[test]
-fn map_pipe() {
+fn iteration_pipe() {
     // deep is reached by two weighted crossings: qty [12, 5].
     let t = MockTree::converging();
     // map: transform each element, capsae unchanged (the two
@@ -1675,11 +1675,18 @@ fn a_budget_sums_an_edge_weight_along_the_walk() {
     assert_eq!(run("//a(->e){3_km;7_km}", &t), vec![2, 6, 2]);
     // The unit converts: 5000 m is 5 km.
     assert_eq!(run("//a(->e){;5000_m}", &t), vec![1, 2, 3, 6]);
-    // The lightest walks: the start, then y at 1 km, deep at 3 km
-    // (by y), x at 4 km — each node once at its least total, the
-    // proximal reach.
-    assert_eq!(run("//a(->e){;100_km}?", &t), vec![1, 3, 6, 2]);
+    // The lightest walk, the proximal reach under a budget: the
+    // survivors of least total, the tie set (ruling 2026-11-10; every
+    // node was answered at its own least total, `[1, 3, 6, 2]`). The
+    // start stands at zero, so it is the lightest where the guard
+    // admits it; past it, y at 1 km alone.
+    assert_eq!(run("//a(->e){;100_km}?", &t), vec![1]);
+    assert_eq!(run("//a(->e){;100_km}[:name != \"a\"]?", &t), vec![3]);
     assert_eq!(run("//a(->e){;100_km}[:name = \"deep\"]?", &t), vec![6]);
+    // a count brace beside the budget takes the exact walk, and the
+    // lightest of what it admits: two hops are deep by y (3 km) and
+    // deep by x (16 km)
+    assert_eq!(run("//a(->e){2}{;100_km}?", &t), vec![6]);
     // The heaviest within the budget: x by y, deep at 6 km.
     assert_eq!(run("//a(->e){;7_km}!", &t), vec![2]);
     // The total, read by the one command after the group, in the
@@ -1735,7 +1742,9 @@ fn a_budget_sums_an_edge_weight_along_the_walk() {
         (6, "e".to_string(), 2),
         vec![("len".into(), Value::Str("-3 km".into()))],
     );
-    let _ = run("//a(->e){;100_km}?", &neg);
+    // (the search for x crosses deep→x on its way; the bare `?`
+    // answers the start at zero and crosses nothing)
+    let _ = run("//a(->e){;100_km}[:name = \"x.rs\"]?", &neg);
     assert!(take_refusal().unwrap().contains("negative weight"));
     // The exact form has no meaning for a sum.
     assert!(lex("//a(->e){5_km}").is_err());
@@ -2570,7 +2579,7 @@ fn outer_correlation() {
 fn outer_correlation_indirect_ctx() {
     let t = MockTree::sample();
     // A correlated reference reached *indirectly* — through a
-    // value match's arm, or a nested step predicate — is still
+    // switch's arm, or a nested step predicate — is still
     // part of the entry's ON clause, skipped under the outer
     // join's null binding exactly as a bare one is. Otherwise
     // the unmatched rows (z.rs, w.rs) are wrongly dropped, and
@@ -2723,7 +2732,7 @@ fn nav_command_resumes_navigation() {
         "first column is the ancestor's push"
     );
     assert_eq!(fields[1], ("file".to_string(), Value::Str("x.rs".into())));
-    // A trailing projection ends the command in scalar mode,
+    // A trailing projection ends the command in value mode,
     // exactly like a branch projection.
     assert_eq!(
         vals("/a | /*:name", &t),
@@ -2737,7 +2746,7 @@ fn nav_command_resumes_navigation() {
     assert_eq!(run("/a | .m | /x.rs | $$.m/y.txt", &t), vec![3]);
     // Arrows hop crosslinks as commands too.
     assert_eq!(run("/a/x.rs | ->ref", &t), vec![7]);
-    // File-first: a projection enters scalar mode, the push
+    // File-first: a projection enters value mode, the push
     // returns to navigation mode, and the hop is legal again.
     assert_eq!(run("/a | :name | . | /*", &t), vec![2, 3]);
 }
@@ -2749,12 +2758,12 @@ fn nav_command_mode_discipline() {
             .expect_err("should refuse")
             .to_string()
     };
-    // Scalar mode: a hop would drop the live topic.
+    // Value mode: a hop would drop the live topic.
     assert!(refuse("/a:name | /b").contains("value mode"));
     assert!(refuse("/a | :name | /b").contains("value mode"));
     // Hops are per-thread: neither `@|` nor `$|` takes them.
     assert!(refuse("/a @| /b").contains("per-thread"));
-    assert!(refuse("/a | ... $| /b").contains("map pipe"));
+    assert!(refuse("/a | ... $| /b").contains("iteration pipe"));
 }
 
 #[test]
@@ -3201,7 +3210,7 @@ fn predicate_reads_are_not_origins() {
 }
 
 #[test]
-fn group_and_ungroup_carry_origins() {
+fn a_fold_by_a_regula_carries_origins() {
     let t = MockTree::sample();
     // Files grouped by their directory's name: the key was read
     // at the parent (one origin, deduplicated on join); the
@@ -4809,6 +4818,16 @@ fn round_leaves_what_it_cannot_round() {
         s("#(@(a; b); %(\"x\"; 1.23); %(\"y\"; 2.5))")
     );
     assert_eq!(s("@(\"n/a\"; 2.5; null) | floor"), s("@(\"n/a\"; 2; null)"));
-    assert_eq!(s("\"n/a\" | round(2)"), s("\"n/a\""));
     assert_eq!(s("@(-1; \"x\") | abs"), s("@(1; \"x\")"));
+    // a lone value it cannot round answers null (ruling 2026-11-10:
+    // it answered the text), and the run warns of it
+    assert_eq!(s("\"n/a\" | round(2)"), s("null"));
+    // the elementary functions leave a cell as the rounders do (the
+    // same ruling: they made it null)
+    assert_eq!(s("@(\"n/a\"; 16; null) | sqrt"), s("@(\"n/a\"; 4.0; null)"));
+    assert_eq!(
+        s("#(@(a; b); %(\"x\"; 16); %(\"y\"; 25)) | sqrt"),
+        s("#(@(a; b); %(\"x\"; 4.0); %(\"y\"; 5.0))")
+    );
+    assert_eq!(s("%(a = \"x\"; b = 3) | pow(2)"), s("%(a = \"x\"; b = 9)"));
 }

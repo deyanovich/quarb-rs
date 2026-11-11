@@ -127,7 +127,8 @@ pub struct Snapshot {
     /// reaches it — which nodes the walk reached by that round, not
     /// which walks reached them (corpus NOTES 004).
     pub iter: Option<i64>,
-    /// navigation | scalar
+    /// navigation | value (the spec's execution modes; `scalar`
+    /// through 0.0-draft.1)
     pub mode: String,
     pub size: i64,
 }
@@ -206,7 +207,7 @@ pub struct Payload {
 }
 
 pub const CONTRACT: &str = "quarb/trace";
-pub const VERSION: &str = "0.0-draft.1";
+pub const VERSION: &str = "0.0-draft.2";
 
 // ---------------------------------------------------------------
 // kaiv writer

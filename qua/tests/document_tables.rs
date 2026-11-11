@@ -195,12 +195,15 @@ fn the_options_apply_on_the_node() {
         ok(&d, &["//table[1] | #(-i=null) | :::header", "ports.html"]),
         "@(:Port<*; text>; :2022<*; text>; :2023<*; text>; :Country<*; text>)"
     );
+    // an option that is not `-i` leaves the row headers the index, as
+    // the bare `| #` reads them (ruling 2026-11-10: the cast dropped
+    // the labels, and the column read as a list)
     assert_eq!(
         ok(
             &d,
             &["//table[1] | #(-c=:Country<text>) | :Country", "ports.html"]
         ),
-        r#"@("Greece"; "Slovenia"; null; "Montenegro (Crna Gora)")"#
+        r#"%(Piraeus = "Greece"; Koper = "Slovenia"; Rijeka = null; Bar = "Montenegro (Crna Gora)")"#
     );
     // --width has no meaning on a node
     let err = refused(&d, &["//table[1] | #(--width=2)", "ports.html"]);

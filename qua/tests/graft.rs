@@ -215,7 +215,10 @@ fn readings_refuse_what_they_do_not_read() {
     let (ok, _, err) = cli("/md:: | graft(code) | //function");
     assert!(!ok && err.contains("name the language"), "{err}");
     let (ok, _, err) = cli("/md:: | graft(lit:markdown) | //paragraph");
-    assert!(!ok && err.contains("lit reading reads TEI"), "{err}");
+    assert!(
+        !ok && err.contains("the literary reading (lit:) reads TEI"),
+        "{err}"
+    );
 }
 
 #[test]

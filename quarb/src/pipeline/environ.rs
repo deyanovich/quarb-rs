@@ -189,7 +189,9 @@ fn lib_command<H: Host>(
                         anchor,
                         projection: None,
                     }) => {
-                        let reached = host.rel_threads(&c.ext, steps, anchor, None, trace, scope);
+                        let reached = crate::pipeline::run::out_of_row_reach(|| {
+                            host.rel_threads(&c.ext, steps, anchor, None, trace, scope)
+                        });
                         let forms: Vec<Value> = reached
                             .iter()
                             .filter_map(|(x, _, _)| host.node_form(x).map(Value::quarq_form))
@@ -275,7 +277,7 @@ fn lib_agg_command<H: Host>(
         }
     };
     let seed = seed_capsa(&caps, host);
-    let scope = seed.scope(None, peers, outer);
+    let scope = seed.scope(Some(crate::pipeline::run::group_ordinal()), peers, outer);
     let ((operands, options), o) = capture(|| lib_values(call, host, &seed.ext, trace, scope));
     let mut origins = o;
     for c in &caps {
@@ -328,7 +330,6 @@ fn lib_agg_command<H: Host>(
     items
         .into_iter()
         .map(|v| Thread::<H::Ext> {
-            window: None,
             prov: Prov::leaf(origins.clone()),
             register: register.clone(),
             topic: Some(v),
@@ -434,7 +435,7 @@ pub(crate) fn env_agg_command<H: Host>(
         return Vec::new();
     };
     let seed = seed_capsa(&caps, host);
-    let scope = seed.scope(None, peers, outer);
+    let scope = seed.scope(Some(crate::pipeline::run::group_ordinal()), peers, outer);
     let ((operands, options), o) = capture(|| words(call, host, &seed.ext, trace, scope));
     let argv = Environment::argv(&operands, &options);
     let mut origins = o;
@@ -460,7 +461,6 @@ pub(crate) fn env_agg_command<H: Host>(
     let node = seed.ext.bare();
     text.lines()
         .map(|line| Thread::<H::Ext> {
-            window: None,
             prov: Prov::leaf(origins.clone()),
             register: register.clone(),
             topic: Some(Value::Str(line.trim_end_matches('\r').to_string())),

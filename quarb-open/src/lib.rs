@@ -599,7 +599,7 @@ pub fn string_reader(ctx: &SourceCtx) -> quarb_compose::StringReader {
                 };
                 let Some(kind) = kind else {
                     return Some(Err(format!(
-                        "the lit reading reads TEI, USX, OSIS, USFM, FictionBook, RNC, \
+                        "the literary reading (lit:) reads TEI, USX, OSIS, USFM, FictionBook, RNC, \
                          OpenCorpora and PROIEL, not {notation}"
                     )));
                 };
@@ -2080,10 +2080,23 @@ pub fn open_mount(p: &Path, cli: &OpenOpts) -> anyhow::Result<Mounted> {
     // the autounits option; ruling 2026-11-08): the source opens as
     // it is, and the convention wraps whatever opened
     let (p, suffixes, slugs, units) = take_units_option(&p)?;
+    // `?sci` comes off beside them (spec: Text Readings, the
+    // scientific reading; ruling 2026-11-10): the source opens as it
+    // is, and every table the mount builds is read scientifically
+    let (p, sci) = take_sci_option(&p)?;
     let ctx = &SourceCtx::default();
     let p = take_encoding_option(&p, ctx)?;
     let _ = ctx.take_record();
     let m = open_mount_inner(&p, cli, ctx)?;
+    let m = if sci {
+        Mounted {
+            adapter: Box::new(quarb::Scientific { inner: m.adapter }),
+            render: m.render,
+            family: m.family,
+        }
+    } else {
+        m
+    };
     let m = match (suffixes, slugs) {
         (None, None) if units.is_empty() => m,
         (suffixes, slugs) => {
@@ -2171,6 +2184,42 @@ fn take_units_option(
         format!("{path}?{}", rest.join("&"))
     };
     Ok((PathBuf::from(target), suffixes, slugs, units))
+}
+
+/// The `sci` flag off a target's query, and the target without it;
+/// a path that exists on disk, or one with no query, is taken as is.
+/// The flag takes no value.
+fn take_sci_option(p: &Path) -> anyhow::Result<(PathBuf, bool)> {
+    let Some(s) = p.to_str() else {
+        return Ok((p.to_path_buf(), false));
+    };
+    if p.exists() || !s.contains('?') {
+        return Ok((p.to_path_buf(), false));
+    }
+    let (path, query) = s.rsplit_once('?').unwrap();
+    let mut sci = false;
+    let mut rest = Vec::new();
+    for pair in query.split('&').filter(|x| !x.is_empty()) {
+        match pair.split_once('=') {
+            None if pair == "sci" => sci = true,
+            Some(("sci", v)) => {
+                anyhow::bail!(
+                    "{path}: sci={v}: sci takes no value (it reads the tables scientifically: \
+                     a superscript digit after a number an exponent, K the kelvin)"
+                );
+            }
+            _ => rest.push(pair),
+        }
+    }
+    if !sci {
+        return Ok((p.to_path_buf(), false));
+    }
+    let target = if rest.is_empty() {
+        path.to_string()
+    } else {
+        format!("{path}?{}", rest.join("&"))
+    };
+    Ok((PathBuf::from(target), true))
 }
 
 /// The target as written, without its options: what a message
@@ -3165,6 +3214,7 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
     if cli.stream_rows
         && p.is_file()
         && ctx.encoding().is_none()
+        && !has_wide_bom(p)
         && let Some(delim) = csv_delimiter(Some(p))
     {
         let a = Rc::new(quarb_csv::CsvStream::open(p, delim, ctx.csv()).context("parsing CSV")?);
@@ -3183,6 +3233,7 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
         && p.extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+        && !has_wide_bom(p)
         && std::fs::metadata(p)
             .map(|m| m.len() >= 256 * 1024)
             .unwrap_or(false)
@@ -3225,6 +3276,7 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
         && p.extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("jsonl") || e.eq_ignore_ascii_case("ndjson"))
+        && !has_wide_bom(p)
     {
         let a = Rc::new(
             quarb_json::JsonLines::open(p, quarb_json::Reading::Node).context("parsing JSONL")?,
@@ -3334,4 +3386,17 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
         let r = a.clone();
         Ok(Mounted::of(a, Box::new(move |n| r.pointer(n))))
     }
+}
+
+/// Whether the file opens with a UTF-16 byte-order mark. The whole
+/// reader decodes such a file; a stream reads UTF-8 alone and would
+/// refuse what the whole reading answers, so the file takes the
+/// whole door.
+fn has_wide_bom(p: &Path) -> bool {
+    use std::io::Read;
+    let mut head = [0u8; 2];
+    std::fs::File::open(p)
+        .and_then(|mut f| f.read_exact(&mut head))
+        .is_ok()
+        && matches!(head, [0xFF, 0xFE] | [0xFE, 0xFF])
 }

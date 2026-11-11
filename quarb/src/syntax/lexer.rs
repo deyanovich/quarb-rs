@@ -53,7 +53,7 @@ pub enum Token {
     /// previous-sibling hop or a trait's opener.
     Lt { spaced: bool, before: bool },
     /// `<<`, `<<?`, `<<!` — all / proximal / distal preceding
-    /// siblings. The payload is the reach mark (' ', '?', '!').
+    /// siblings. The payload is the reach selector (' ', '?', '!').
     PrecedingSiblings(char),
     /// `?` — the proximal suffix, glued to its axis; or, `spaced`
     /// on both sides, the conditional's test marker.
@@ -152,7 +152,7 @@ pub enum Token {
     /// Star).
     Tilde,
     /// `~~` — the deep navop star: the walk over every edge ending
-    /// at a matching one; the reach marks follow as after `//`.
+    /// at a matching one; the reach selectors follow as after `//`.
     TildeTilde,
     /// A lone `-` glued to a `::` / `:::` projection (`-::fare`):
     /// the descending marker on a sort key.
@@ -459,16 +459,168 @@ fn paren_unit(chars: &[char], i: usize) -> Option<(Vec<Token>, usize)> {
     Some((toks, j + 1))
 }
 
-/// Whether the next token sits in name position — right after a
-/// navigation axis (or its reach mark), where a regex literal names
-/// the hop and takes no trailing modifiers.
-/// Whether char position `i` follows whitespace (or is the start
-/// of the input): the constructor sigils `%(`, `@(`, `*(` stand
-/// only there, or after a push dot. Char-indexed, as
-/// the lexer is — a byte slice would misread after any non-ASCII
-/// character.
-fn after_whitespace(chars: &[char], i: usize) -> bool {
-    i == 0 || chars[i - 1].is_whitespace()
+/// The length of a compound unit word at `j`, `_km/h`, `_m/s^2`: the
+/// underscore, then unit names joined by `/`, `*` and `^` with their
+/// exponents, at least one operator among them. `None` for a simple
+/// unit (a name already) and for anything else.
+fn compound_unit_len(chars: &[char], j: usize) -> Option<usize> {
+    if chars.get(j) != Some(&'_') {
+        return None;
+    }
+    let part = |c: char| {
+        c.is_alphanumeric() || matches!(c, '_' | '%' | '°' | 'µ' | '/' | '*' | '^' | '-' | '.')
+    };
+    let len = chars[j..].iter().take_while(|c| part(**c)).count();
+    let word = &chars[j..j + len];
+    (len > 1 && word.iter().any(|c| matches!(c, '/' | '*' | '^'))).then_some(len)
+}
+
+impl Token {
+    /// The token as a reader wrote it, for a message: its spelling
+    /// in quotes, a name by its text. (A message printed the token's
+    /// Rust form, `Some(RBracket)`, `Name { text: "s", … }`.)
+    pub fn written(&self) -> String {
+        let spelled = |s: &str| format!("'{s}'");
+        match self {
+            Token::Slash => spelled("/"),
+            Token::SlashSlash => spelled("//"),
+            Token::Backslash => spelled("\\"),
+            Token::BackslashBackslash => spelled("\\\\"),
+            Token::Gt { .. } => spelled(">"),
+            Token::NextSibling => spelled(";-"),
+            Token::PrevSibling => spelled("-;"),
+            Token::FollowingSiblings(m) => spelled(format!(">>{m}").trim_end()),
+            Token::Lt { .. } => spelled("<"),
+            Token::PrecedingSiblings(m) => spelled(format!("<<{m}").trim_end()),
+            Token::Question { .. } => spelled("?"),
+            Token::QuestionEq => spelled("?="),
+            Token::Coalesce => spelled("??"),
+            Token::Bang => spelled("!"),
+            Token::Caret => spelled("^"),
+            Token::Hash => spelled("#("),
+            Token::Dollar => spelled("$"),
+            Token::ColonColon => spelled("::"),
+            Token::ColonColonColon => spelled(":::"),
+            Token::Pipe => spelled("|"),
+            Token::PipePipe => spelled("||"),
+            Token::LBracket => spelled("["),
+            Token::RBracket => spelled("]"),
+            Token::LParen => spelled("("),
+            Token::MarkOpen => spelled("$$."),
+            Token::IdAnchorOpen => spelled("((!"),
+            Token::Driver => spelled("$$0"),
+            Token::Position => spelled("$$_"),
+            Token::Cursor => spelled("_"),
+            Token::Invoking => spelled("$$__"),
+            Token::RParen => spelled(")"),
+            Token::Comma => spelled(","),
+            Token::Eq | Token::OptEq => spelled("="),
+            Token::Ne => spelled("!="),
+            Token::Le => spelled("<="),
+            Token::Ge => spelled(">="),
+            Token::Within => spelled("<<="),
+            Token::Encloses => spelled(">>="),
+            Token::MatchEq => spelled("=="),
+            Token::NotMatchEq => spelled("!=="),
+            Token::Contains => spelled("*="),
+            Token::ArrowOut => spelled("->"),
+            Token::ArrowIn { .. } => spelled("<-"),
+            Token::DashDash => spelled("--"),
+            Token::Tilde => spelled("~"),
+            Token::TildeTilde => spelled("~~"),
+            Token::Desc => spelled("-"),
+            Token::ProjectColon | Token::Colon { .. } => spelled(":"),
+            Token::At | Token::PushAt => spelled("@"),
+            Token::AtAt => spelled("@@"),
+            Token::Topics => spelled("@_"),
+            Token::Positions => spelled("@@_"),
+            Token::Matrix { full: false } => spelled("#."),
+            Token::Matrix { full: true } => spelled("#.*"),
+            Token::NodeMatrix { full: false } => spelled("##."),
+            Token::NodeMatrix { full: true } => spelled("##.*"),
+            Token::CtxTable => spelled("#_"),
+            Token::Percent => spelled("%"),
+            Token::Amp => spelled("&"),
+            Token::AmpAmp => spelled("&&"),
+            Token::Field => spelled(":"),
+            Token::Capsa(name) => spelled(&format!(":{name}")),
+            Token::PercentPlus => spelled("%+"),
+            Token::Semi => spelled(";"),
+            Token::Correlate => spelled("<=>"),
+            Token::Resolve => spelled("-->"),
+            Token::ValueMatch => spelled("=>"),
+            Token::ReverseResolve => spelled("<--"),
+            Token::Quant { .. } => "a quantifier".to_string(),
+            Token::FoldSel { text, .. } => spelled(&format!("{{{text}}}")),
+            Token::Budget { .. } => "a budget quantifier".to_string(),
+            Token::Regex(body) => spelled(&format!("~({body})")),
+            Token::Subst { .. } => "a substitution".to_string(),
+            Token::Name {
+                text, quoted: true, ..
+            } => format!("\"{text}\""),
+            Token::Name { text, .. } => spelled(text),
+            Token::Interp(_) => "an interpolated string".to_string(),
+            Token::Expansion(body) => spelled(&format!("${{{body}}}")),
+        }
+    }
+}
+
+/// The length of an offset word at `j`, if one stands there: a
+/// sign, one or two digits of hours, and two digits of minutes after
+/// a colon where they are written (`+2`, `-05`, `+02:00`, `+05:30`).
+/// What follows it is the caller's to check.
+fn offset_word_len(chars: &[char], j: usize) -> Option<usize> {
+    let digit = |k: usize| chars.get(k).is_some_and(char::is_ascii_digit);
+    if !matches!(chars.get(j), Some('+' | '-')) || !digit(j + 1) {
+        return None;
+    }
+    let mut len = if digit(j + 2) { 3 } else { 2 };
+    // a third digit, or a decimal point, is a number and no offset
+    if digit(j + len) || chars.get(j + len) == Some(&'.') {
+        return None;
+    }
+    // the minutes, whatever their count: a wrong one is the
+    // parser's to refuse by name
+    if chars.get(j + len) == Some(&':') && digit(j + len + 1) {
+        len += 1;
+        while digit(j + len) {
+            len += 1;
+        }
+    }
+    Some(len)
+}
+
+/// Whether the tokens end in a push name the aggregate push's sigil
+/// glues to: `.n`, or a quoted name glued to its dot (`."n"`, the
+/// names a pivot writes; ruling 2026-11-10: a quoted name is allowed
+/// on an aggregate push as on a plain one), and not a recall's
+/// (`$.n`, `@.n`).
+fn ends_in_push_name(tokens: &[Token]) -> bool {
+    let n = tokens.len();
+    let dot = match tokens.last() {
+        Some(Token::Name {
+            text,
+            quoted: false,
+            ..
+        }) if text.starts_with('.') => n - 1,
+        Some(Token::Name {
+            quoted: true,
+            glued: true,
+            ..
+        }) if n >= 2
+            && matches!(
+                &tokens[n - 2],
+                Token::Name { text, quoted: false, .. } if text == "."
+            ) =>
+        {
+            n - 2
+        }
+        _ => return false,
+    };
+    !matches!(
+        dot.checked_sub(1).map(|k| &tokens[k]),
+        Some(Token::Dollar | Token::At | Token::AtAt)
+    )
 }
 
 /// Whether char position `i` follows a push dot — `.` or `.name` —
@@ -871,6 +1023,67 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
         let opens = i > 0 && chars[i - 1] == '(';
         spaced = false;
         match c {
+            // `<+02:00>`, `<+2>`, `<-5>` — the offset trait's word
+            // (ruling 2026-11-10), glued to what it declares: a sign,
+            // the hours, the minutes after a colon, closed by `>`. One
+            // name token, so the sign is no operator, the colon no
+            // projection, and `<-` no incoming link.
+            '<' if glued
+                && let Some(len) = offset_word_len(&chars, i + 1)
+                && at(i + 1 + len) == Some('>') =>
+            {
+                tokens.push(Token::Lt {
+                    spaced: false,
+                    before: false,
+                });
+                tokens.push(Token::Name {
+                    text: chars[i + 1..i + 1 + len].iter().collect(),
+                    quoted: false,
+                    glued: true,
+                });
+                i += 1 + len;
+            }
+            // `<_km/h>`, `<_m/s^2>`, `<_t/a>` — a compound unit as the
+            // unit trait's word (the review of 2026-11-10, syntax B13):
+            // one name token, so the slash is no hop and the caret no
+            // anchor. `header` answers `:Speed<_km/h>`, and that text
+            // was refused ("close with '>': '<_km>'"). A simple unit,
+            // `<_km>`, is a name already.
+            '<' if glued
+                && at(i + 1) == Some('_')
+                && let Some(len) = compound_unit_len(&chars, i + 1)
+                && at(i + 1 + len) == Some('>') =>
+            {
+                tokens.push(Token::Lt {
+                    spaced: false,
+                    before: false,
+                });
+                tokens.push(Token::Name {
+                    text: chars[i + 1..i + 1 + len].iter().collect(),
+                    quoted: false,
+                    glued: true,
+                });
+                i += 1 + len;
+            }
+            // `offset(+02:00)`, `offset(-5)` — the same word as the
+            // operand of the `offset` command.
+            '+' | '-'
+                if matches!(
+                    tokens.as_slice(),
+                    [.., Token::Name { text, quoted: false, .. }, Token::LParen] if text == "offset"
+                ) && let Some(len) = offset_word_len(&chars, i)
+                    && chars[i + len..]
+                        .iter()
+                        .find(|c| !c.is_whitespace())
+                        .is_some_and(|c| matches!(c, ')' | ';' | ',')) =>
+            {
+                tokens.push(Token::Name {
+                    text: chars[i..i + len].iter().collect(),
+                    quoted: false,
+                    glued: true,
+                });
+                i += len;
+            }
             // A `/.../` regex literal on the right of `=~` / `!~`,
             // where `/` cannot be a hop. Elsewhere `/` is navigation.
             // `s/pat/repl/mods` directly after a pipe — the
@@ -1004,7 +1217,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             // whitespace (rulings #52/#53), so after an axis the star
             // is the wildcard (`/*(?…)`) and glued to anything it is
             // what it was.
-            '*' if at(i + 1) == Some('(') && after_whitespace(&chars, i) => {
+            '*' if at(i + 1) == Some('(') && !glued => {
                 tokens.push(Token::At);
                 i += 1;
             }
@@ -1061,15 +1274,8 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             // `.n@(body)` / `.n@{.x}(body)` — the aggregate push's
             // sigil, glued to the push name (ruling 2026-11-04)
             '@' if !matches!(at(i + 1), Some('@' | '_' | '.' | '*' | '|'))
-                && !after_whitespace(&chars, i)
-                && matches!(
-                    tokens.last(),
-                    Some(Token::Name { text, quoted: false, .. }) if text.starts_with('.')
-                )
-                && !matches!(
-                    tokens.len().checked_sub(2).map(|k| &tokens[k]),
-                    Some(Token::Dollar | Token::At | Token::AtAt)
-                ) =>
+                && glued
+                && ends_in_push_name(&tokens) =>
             {
                 tokens.push(Token::PushAt);
                 i += 1;
@@ -1078,7 +1284,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             '@' if at(i + 1) == Some('(') => {
                 // The node-id anchor's opener glues to its list
                 // (`((!@(2; 3)))`), as whitespace would.
-                if !after_whitespace(&chars, i)
+                if glued
                     && !matches!(
                         tokens.last(),
                         Some(
@@ -1113,7 +1319,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 // literal does; the record array's `@%(` glues to
                 // its `@`; an option's value to its `=`
                 // (`#(--header=%(a = "int"))`).
-                if !after_whitespace(&chars, i)
+                if glued
                     && !after_push_dot(&chars, i)
                     && !matches!(
                         tokens.last(),
@@ -1915,8 +2121,13 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             // `sh(cmd)` — retired (ruling 2026-11-02): the shell joins a
             // query only as an environment mount, `sh=shell:`, its
             // programs the commands `sh:tr(a-z; A-Z)`.
+            // (a command only: `sh` as a hop's name, `/bin/sh(/b|/c)`,
+            // and as a fragment's, `&sh($x)`, is a name like any
+            // other; the review of 2026-11-10, syntax B12)
             '(' if after_call_head(&tokens, glued)
-                && matches!(tokens.last(), Some(Token::Name { text, quoted: false, .. }) if text == "sh") =>
+                && matches!(tokens.last(), Some(Token::Name { text, quoted: false, .. }) if text == "sh")
+                && !after_axis(&tokens[..tokens.len() - 1])
+                && !matches!(tokens.get(tokens.len().wrapping_sub(2)), Some(Token::Amp)) =>
             {
                 return Err(QuarbError::lex(
                     "the sh(cmd) command is retired: mount the shell, sh=shell:, and write sh:tr(a-z; A-Z)",
@@ -2095,7 +2306,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             }
             ';' if at(i + 1) == Some(';') && at(i + 2) == Some(';') => {
                 return Err(QuarbError::lex(
-                    "';;;' is retired: adapter metadata is '::::'",
+                    "';;;' is retired: adapter metadata is ':::'",
                 ));
             }
             // `;;-` / `;-` — the following-siblings reach and the
@@ -2124,7 +2335,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             }
             // The navop star: the wildcard of the operator slot, as
             // the glob star is of the name slot. `~~` is its deep
-            // form; the reach marks lex on their own, as after `//`.
+            // form; the reach selectors lex on their own, as after `//`.
             '~' if at(i + 1) == Some('~') => {
                 tokens.push(Token::TildeTilde);
                 i += 2;
@@ -2169,7 +2380,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 i = next;
             }
             // `../` / `..//` — the file-system idiom for the
-            // ascending hops `\` / `\\` (the reach marks `?` / `!`
+            // ascending hops `\` / `\\` (the reach selectors `?` / `!`
             // follow as their own tokens, as after `\\`). A dot run
             // is otherwise a name (`..3` in a range, `...` the
             // spread), so only `..` directly before `/` is the hop;
@@ -2602,8 +2813,11 @@ fn read_quantifier(
     };
     let mut i = start;
     // Optional whitespace, optional digit run, optional whitespace.
-    // Returns `None` when no digits were present.
-    let number = |i: &mut usize| -> Option<usize> {
+    // `None` when no digits were present; a run of digits too long
+    // for a count is refused. (It read as absent, so
+    // `{99999999999999999999999;3}` was `{0;3}` and
+    // `{1;99999999999999999999999}` was `+`.)
+    let number = |i: &mut usize| -> Result<Option<usize>> {
         while chars.get(*i).is_some_and(|c| c.is_whitespace()) {
             *i += 1;
         }
@@ -2615,10 +2829,17 @@ fn read_quantifier(
         while chars.get(*i).is_some_and(|c| c.is_whitespace()) {
             *i += 1;
         }
-        digits.parse().ok()
+        if digits.is_empty() {
+            return Ok(None);
+        }
+        digits.parse().map(Some).map_err(|_| {
+            QuarbError::lex(format!(
+                "a quantifier's bound is a count, and {digits} is past any count a walk can make"
+            ))
+        })
     };
     // An absent floor before `;` is zero: the ceiling-only form.
-    let min = match number(&mut i) {
+    let min = match number(&mut i)? {
         Some(m) => m,
         None if chars.get(i) == Some(&';') => 0,
         None => return Err(malformed()),
@@ -2631,7 +2852,7 @@ fn read_quantifier(
         // `;` separates the bounds.
         Some(';') => {
             i += 1;
-            let max = number(&mut i);
+            let max = number(&mut i)?;
             match chars.get(i) {
                 // `{m,}` (max `None`) is the open-ended form.
                 Some(&c) if c == close => Ok((min, max, i + 1)),
@@ -2644,7 +2865,7 @@ fn read_quantifier(
 
 /// Read a double-quoted, interpolated string after the opening quote
 /// at `start`: `${...}` opens a hole holding an expression (lexed and
-/// parsed later, at parse time); `\$`, `\"`, and `\\` escape. Returns
+/// parsed later, at parse time); `\$`, `\"`, `\(` and `\\` escape. Returns
 /// the alternating text/hole parts and the index past the closing
 /// quote.
 fn read_interpolated(chars: &[char], start: usize) -> Result<(Vec<InterpPart>, usize)> {
@@ -2923,7 +3144,11 @@ fn read_interpolated_until(
                 }
                 return Ok((parts, i + 1));
             }
-            '\\' if matches!(chars.get(i + 1), Some('$' | '"' | '`' | '\\' | '(')) => {
+            // Four escapes (ruling 2026-11-10): `\$`, `\"`, `\(`, `\\`.
+            // Every other backslash stays as written, the one before
+            // a backtick included (it escaped the retired backtick
+            // command's quote).
+            '\\' if matches!(chars.get(i + 1), Some('$' | '"' | '\\' | '(')) => {
                 text.push(chars[i + 1]);
                 i += 2;
             }

@@ -37,13 +37,20 @@ fn is_cell(adapter: &impl AstAdapter, node: NodeId) -> bool {
         || matches!(local_name(adapter, node).as_str(), "th" | "td" | "cell")
 }
 
-fn span_of(adapter: &impl AstAdapter, node: NodeId, names: &[&str]) -> usize {
+/// The widest column span and the tallest row span a cell is read
+/// with, the clamps of the HTML standard that browsers apply. A
+/// span is data: `colspan="30000000"` pushed that many cells and
+/// aborted the process on the allocation.
+const MAX_COLSPAN: usize = 1000;
+const MAX_ROWSPAN: usize = 65534;
+
+fn span_of(adapter: &impl AstAdapter, node: NodeId, names: &[&str], max: usize) -> usize {
     names
         .iter()
         .find_map(|n| adapter.property(node, n))
         .and_then(|v| v.to_string().trim().parse::<usize>().ok())
         .filter(|n| *n >= 1)
-        .unwrap_or(1)
+        .map_or(1, |n| n.min(max))
 }
 
 /// How a document's table is read (spec: The Table, `| #` on a
@@ -71,6 +78,11 @@ pub struct ReadOptions {
     /// `#(--slugs)` / `#(--slugs="-")`: the titles slugged, with the
     /// separator.
     pub slugs: Option<String>,
+    /// `#(--sci)`, or `?sci` on the mount: the scientific reading of
+    /// the cells (ruling 2026-11-10). A bare digit set in superscript
+    /// right after a plain number is an exponent, where it is a
+    /// footnote mark without it.
+    pub sci: bool,
     /// The column-scoped options and the word dictionary (the
     /// header-units round, ruling 2026-11-09).
     pub scopes: ReadScopes,
@@ -190,9 +202,147 @@ impl Default for ReadOptions {
             th_index: true,
             autounits: None,
             slugs: None,
+            sci: false,
             scopes: ReadScopes::default(),
         }
     }
+}
+
+/// The adapter of a mount opened under the scientific reading
+/// (`?sci`, ruling 2026-11-10): it forwards everything and answers
+/// `:::sci` true on every node, so each table the mount builds is
+/// read as `#(--sci)` reads it and `clean` over its nodes as
+/// `clean(--sci)` does.
+pub struct Scientific<A: AstAdapter> {
+    pub inner: A,
+}
+
+impl<A: AstAdapter> AstAdapter for Scientific<A> {
+    crate::forward_ast_adapter!(inner; except metadata);
+    fn metadata(&self, node: NodeId, key: &str) -> Option<Value> {
+        if key == "sci" {
+            return Some(Value::Bool(true));
+        }
+        self.inner.metadata(node, key)
+    }
+}
+
+/// Whether `node` stands in a mount opened under the scientific
+/// reading.
+pub(crate) fn scientific_at(adapter: &impl AstAdapter, node: NodeId) -> bool {
+    matches!(adapter.metadata(node, "sci"), Some(Value::Bool(true)))
+}
+
+/// What a superscript says (ruling 2026-11-10).
+#[derive(Debug, PartialEq)]
+pub(crate) enum Raised {
+    /// A footnote mark: dropped.
+    Footnote,
+    /// An exponent: its digits, signed where a minus was written.
+    Exponent(String),
+    /// Neither (`5<sup>th</sup>`): the text as written.
+    Other,
+}
+
+/// A superscript read against the text it follows. Under either
+/// reading: a letter, a symbol and a bracketed number are footnote
+/// marks; a signed number, a number after a unit's letter (`5 m²`,
+/// `9.8 m/s²`, a title's `(km²)`) and a number after `× 10` are
+/// exponents. The one case the text does not settle is a bare number
+/// right after a plain number (`10³`): a footnote mark, and an
+/// exponent under the scientific reading. A bare number after
+/// anything else (a name, a year in a phrase) is a footnote mark.
+/// `title` says the text is a column's title, where a unit stands
+/// alone or after a bracket, a comma or a slash.
+pub(crate) fn raised(before: &str, mark: &str, sci: bool, title: bool) -> Raised {
+    let m = mark.trim();
+    if m.is_empty() {
+        return Raised::Other;
+    }
+    let inner = m.strip_prefix('[').and_then(|r| r.strip_suffix(']'));
+    if let Some(i) = inner {
+        return if !i.is_empty()
+            && (i.chars().all(|c| c.is_ascii_digit())
+                || (i.chars().count() == 1 && i.chars().all(|c| c.is_ascii_lowercase())))
+        {
+            Raised::Footnote
+        } else {
+            Raised::Other
+        };
+    }
+    if (m.chars().count() == 1 && m.chars().all(|c| c.is_ascii_lowercase()))
+        || m.chars().all(|c| matches!(c, '*' | '†' | '‡' | '§' | '¶'))
+    {
+        return Raised::Footnote;
+    }
+    // a signed number is an exponent wherever it stands
+    let (sign, digits) = match m.chars().next() {
+        Some('-' | '−' | '–') => ("-", &m[m.chars().next().map_or(0, char::len_utf8)..]),
+        Some('+') => ("+", &m[1..]),
+        _ => ("", m),
+    };
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return Raised::Other;
+    }
+    if !sign.is_empty() {
+        let sign = if sign == "-" { "-" } else { "" };
+        return Raised::Exponent(format!("{sign}{digits}"));
+    }
+    let exponent = || Raised::Exponent(digits.to_string());
+    // right after: glued to the text before it
+    let Some(last) = before.chars().last() else {
+        return Raised::Footnote;
+    };
+    if last.is_alphabetic() {
+        // the unit's letter: the word the superscript is glued to
+        // names a unit, in a quantity (`5 m`, `9.8 m/s`) or in a
+        // title's unit (`Area (km`, `Density, kg/m`, `km`)
+        let start = before
+            .char_indices()
+            .rev()
+            .find(|(_, c)| !c.is_alphabetic())
+            .map_or(0, |(i, c)| i + c.len_utf8());
+        let (head, word) = before.split_at(start);
+        let is_unit = crate::value::quantity::scale_expr(word).is_some();
+        // an exponent of one is never written: a 1 is a mark
+        if !is_unit || digits == "1" {
+            return Raised::Footnote;
+        }
+        let quantity = crate::value::quantity::parse_unit_text(before.trim()).is_some();
+        let titled = title
+            && matches!(
+                head.trim_end().chars().last(),
+                None | Some('(' | '[' | ',' | '/' | '·' | '⋅')
+            );
+        return if quantity || titled {
+            exponent()
+        } else {
+            Raised::Footnote
+        };
+    }
+    if last.is_ascii_digit() {
+        // after `× 10`
+        if let Some(rest) = before.strip_suffix("10")
+            && matches!(
+                rest.trim_end().chars().last(),
+                Some('×' | 'x' | 'X' | '·' | '⋅' | '*')
+            )
+        {
+            return exponent();
+        }
+        // right after a plain number: the scientific reading's case
+        let plain = crate::value::number::read(before.trim(), crate::value::number::Decimal::Point)
+            .or_else(|| {
+                crate::value::number::read(before.trim(), crate::value::number::Decimal::Comma)
+            })
+            .is_some();
+        return if plain && sci {
+            exponent()
+        } else {
+            Raised::Footnote
+        };
+    }
+    Raised::Footnote
 }
 
 struct Cell {
@@ -262,24 +412,6 @@ fn rows_under(
     Ok(())
 }
 
-/// Whether `text` is a footnote mark as a `sup` carries it: `[1]`,
-/// `1`, `[a]`, `*`, `†`.
-fn is_footnote_mark(text: &str) -> bool {
-    let t = text.trim();
-    if t.is_empty() {
-        return false;
-    }
-    let inner = t
-        .strip_prefix('[')
-        .and_then(|r| r.strip_suffix(']'))
-        .unwrap_or(t);
-    inner.chars().all(|c| c.is_ascii_digit())
-        || (inner.chars().count() == 1 && inner.chars().all(|c| c.is_ascii_lowercase()))
-        || inner
-            .chars()
-            .all(|c| matches!(c, '*' | '†' | '‡' | '§' | '¶'))
-}
-
 /// A trailing `[n]` of a cell's text, as a Markdown cell carries a
 /// footnote mark: the text without it.
 fn strip_trailing_mark(text: &str) -> &str {
@@ -297,9 +429,18 @@ fn strip_trailing_mark(text: &str) -> &str {
 
 /// A cell's text as the table reads it: the lowered table's `body`
 /// or the element's text, the lemma prefix dropped, every `sup`
-/// child that is a footnote mark removed, a trailing `[n]` removed,
-/// trimmed. A break already reads as a space in the text.
-fn cell_text(adapter: &impl AstAdapter, cell: NodeId, label: Option<&str>) -> String {
+/// child read as what it says ([`raised`]: a footnote mark removed,
+/// an exponent written with its caret, `m^2`, `10^-3`), a trailing
+/// `[n]` removed, trimmed. A break already reads as a space in the
+/// text. (Every superscript that was a number was dropped as a mark:
+/// `5 m<sup>2</sup>` read five metres.)
+fn cell_text(
+    adapter: &impl AstAdapter,
+    cell: NodeId,
+    label: Option<&str>,
+    sci: bool,
+    title: bool,
+) -> String {
     let mut text = adapter
         .property(cell, "body")
         .or_else(|| adapter.default_value(cell))
@@ -310,14 +451,28 @@ fn cell_text(adapter: &impl AstAdapter, cell: NodeId, label: Option<&str>) -> St
     {
         text = rest.to_string();
     }
-    for c in adapter.children(cell) {
-        if local_name(adapter, c) == "sup"
-            && let Some(mark) = adapter.default_value(c).map(|v| v.to_string())
-            && is_footnote_mark(&mark)
-            && let Some(at) = text.rfind(mark.as_str())
-        {
-            text.replace_range(at..at + mark.len(), "");
+    // The superscripts from the last to the first, each found as the
+    // last occurrence of its text before the one after it: the cell
+    // hands its text whole, and a mark stands at the end of what it
+    // marks (`12<sup>2</sup>` is "122", the mark its last 2).
+    let sups: Vec<String> = adapter
+        .children(cell)
+        .into_iter()
+        .filter(|&c| local_name(adapter, c) == "sup")
+        .filter_map(|c| adapter.default_value(c).map(|v| v.to_string()))
+        .filter(|m| !m.is_empty())
+        .collect();
+    let mut limit = text.len();
+    for mark in sups.iter().rev() {
+        let Some(at) = text[..limit].rfind(mark.as_str()) else {
+            continue;
+        };
+        match raised(&text[..at], mark, sci, title) {
+            Raised::Footnote => text.replace_range(at..at + mark.len(), ""),
+            Raised::Exponent(n) => text.replace_range(at..at + mark.len(), &format!("^{n}")),
+            Raised::Other => {}
         }
+        limit = at;
     }
     strip_trailing_mark(&text).trim().to_string()
 }
@@ -340,6 +495,8 @@ fn cells_under(
     node: NodeId,
     out: &mut Vec<Cell>,
     nested: &mut Option<usize>,
+    // the scientific reading, and whether the row is a header row
+    reading: (bool, bool),
 ) {
     for c in adapter.children(node) {
         if is_cell(adapter, c) {
@@ -354,16 +511,19 @@ fn cells_under(
             let role_label = adapter
                 .property(c, "role")
                 .is_some_and(|v| v.to_string() == "label");
-            let text = cell_text(adapter, c, label.as_deref());
+            let head = name == "th" || role_label;
+            let (sci, head_row) = reading;
+            // a title is a header row's cell, or a head cell
+            let text = cell_text(adapter, c, label.as_deref(), sci, head_row || head);
             out.push(Cell {
                 label,
-                head: name == "th" || role_label,
+                head,
                 text,
-                colspan: span_of(adapter, c, &["colspan", "cols"]),
-                rowspan: span_of(adapter, c, &["rowspan", "rows"]),
+                colspan: span_of(adapter, c, &["colspan", "cols"], MAX_COLSPAN),
+                rowspan: span_of(adapter, c, &["rowspan", "rows"], MAX_ROWSPAN),
             });
         } else if !is_row(adapter, c) {
-            cells_under(adapter, c, out, nested);
+            cells_under(adapter, c, out, nested, reading);
         }
     }
 }
@@ -421,11 +581,6 @@ pub(crate) fn is_table_or_section(adapter: &impl AstAdapter, node: NodeId) -> bo
             .is_some_and(|p| has_trait(adapter, p, "tabula")))
 }
 
-/// The table a `tabula` node holds, read under the default options.
-pub(crate) fn node_table(adapter: &impl AstAdapter, node: NodeId) -> Result<Table, String> {
-    node_table_with(adapter, node, &ReadOptions::default())
-}
-
 /// The table a `tabula` node holds — or the rows of its `thead`,
 /// `tbody` or `tfoot` — under `opts`. The body rows stand under the
 /// header the format declares (a first row of head cells, a
@@ -461,6 +616,19 @@ pub(crate) fn node_table_with(
             }
         }
     };
+    // the scientific reading: the constructor's option, or the
+    // mount's (`?sci`)
+    let sci = opts.sci || scientific_at(adapter, table);
+    let scientific;
+    let opts = if sci && !opts.sci {
+        scientific = ReadOptions {
+            sci: true,
+            ..opts.clone()
+        };
+        &scientific
+    } else {
+        opts
+    };
     let mut rows: Vec<(NodeId, Place)> = Vec::new();
     rows_under(adapter, table, table, &mut rows, Place::Body)?;
     let mut nested: Option<(usize, usize)> = None;
@@ -470,7 +638,7 @@ pub(crate) fn node_table_with(
         .map(|(i, (r, place))| {
             let mut cells = Vec::new();
             let mut at = None;
-            cells_under(adapter, r, &mut cells, &mut at);
+            cells_under(adapter, r, &mut cells, &mut at, (sci, place == Place::Head));
             if let Some(col) = at
                 && nested.is_none()
             {
@@ -737,10 +905,18 @@ fn nearly(text: &str, opts: &ReadOptions) -> Option<&'static str> {
     if let Some((num, suffix)) = t
         .rsplit_once(|c: char| c.is_ascii_digit())
         .map(|(_, s)| (t[..t.len() - s.len()].to_string(), s))
-        && matches!(suffix.trim(), "k" | "K" | "M" | "G" | "m" | "bn" | "mn")
+        && (matches!(suffix.trim(), "k" | "M" | "G" | "m" | "bn" | "mn")
+            || (suffix.trim() == "K" && !opts.sci))
         && read(num.trim(), Decimal::Point).is_some()
     {
         return Some("a scale suffix");
+    }
+    if crate::stdlib::power(t, Decimal::Point).is_some() {
+        return Some(if t.contains("10^") {
+            "a power of ten"
+        } else {
+            "a power"
+        });
     }
     if read(t, Decimal::Comma).is_some()
         || t.contains(' ') && read(&t.replace(' ', ""), Decimal::Comma).is_some()
@@ -806,10 +982,12 @@ fn warn_text_columns(t: &Table, rows: &[Vec<String>], opts: &ReadOptions, site: 
         if near.iter().any(|(_, _, w)| *w == "a footnote mark") {
             cleanup.push(format!("map(s/\\[\\d+\\]$//; --to=:{})", t.column_name(j)));
         }
-        if near
-            .iter()
-            .any(|(_, _, w)| matches!(*w, "a percent" | "a scale suffix" | "a quantity"))
-        {
+        if near.iter().any(|(_, _, w)| {
+            matches!(
+                *w,
+                "a percent" | "a scale suffix" | "a quantity" | "a power of ten" | "a power"
+            )
+        }) {
             cleanup.push(format!(
                 "map(number; --to=:{}) after the suffix is split off",
                 t.column_name(j)

@@ -50,6 +50,32 @@ fn secs_nanos(unit: duckdb::types::TimeUnit, v: i64) -> (i64, u32) {
     )
 }
 
+/// A cell of a column declared `TIMESTAMP WITH TIME ZONE` is a
+/// point of the timeline, `Z`; a plain `TIMESTAMP` is wall time and
+/// stays written with no offset (ruling 2026-11-10: an instant with
+/// no offset is the one an offset can be declared on). The value
+/// reference hands both alike, so the column's declared type says.
+fn with_zone(v: Value, declared: Option<&String>) -> Value {
+    let zoned = declared.is_some_and(|t| {
+        let t = t.to_ascii_uppercase();
+        t.contains("WITH TIME ZONE") || t.contains("TIMESTAMPTZ")
+    });
+    match v {
+        Value::Instant {
+            secs,
+            nanos,
+            offset_min: None,
+            calendar,
+        } if zoned => Value::Instant {
+            secs,
+            nanos,
+            offset_min: Some(0),
+            calendar,
+        },
+        other => other,
+    }
+}
+
 fn cell(row: &duckdb::Row<'_>, i: usize) -> Value {
     use duckdb::types::ValueRef;
     match row.get_ref(i) {
@@ -320,7 +346,9 @@ fn fetch_rows(
         i += 1;
         out.push(RowSpec {
             rowid: Some(i),
-            values: (0..spec.columns.len()).map(|c| cell(r, c)).collect(),
+            values: (0..spec.columns.len())
+                .map(|c| with_zone(cell(r, c), spec.column_types.get(c)))
+                .collect(),
         });
     }
     Ok(out)

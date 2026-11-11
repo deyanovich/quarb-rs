@@ -3,7 +3,7 @@
 //! operators run. Above the syntax (a call is an AST node) and the
 //! value space, below the thread and the pipeline that run them.
 pub(crate) mod functions;
-pub use crate::syntax::registry::{known_agg, known_keyed, known_scalar};
+pub use crate::syntax::registry::{known_agg, known_keyed, known_scalar, names_columns};
 pub use functions::*;
 pub(crate) mod arith;
 pub(crate) use arith::UnitScale;

@@ -152,7 +152,7 @@ fn a_repeated_label_in_the_argument_refuses_unless_told_how() {
     );
     assert!(
         err.contains(
-            "the argument's index is not unique: 'Koper' twice (rows 2 and 3); --first-wins or \
+            "the operand's index is not unique: 'Koper' twice (rows 2 and 3); --first-wins or \
              --last-wins take one row of a repeated label, --many every row"
         ),
         "{err}"
@@ -164,7 +164,7 @@ fn a_repeated_label_in_the_argument_refuses_unless_told_how() {
     );
     let (_, _, err) = qua(&d, &["--info", &first, "t1.csv"]);
     assert!(
-        err.contains("repeated in the argument's index: 'Koper' ×2, the first row taken"),
+        err.contains("repeated in the operand's index: 'Koper' ×2, the first row taken"),
         "{err}"
     );
     assert_eq!(
@@ -239,12 +239,12 @@ fn the_refusals_name_what_is_missing() {
         ],
     );
     assert!(
-        err.contains("the argument's index is the key: set it with #(-i=:col)"),
+        err.contains("the operand's index is the key: set it with #(-i=:col)"),
         "{err}"
     );
     let err = refused(&d, &["/row @| # | correlate(12; --on=:Port)", "t1.csv"]);
     assert!(
-        err.contains("the argument is a number, not a table: correlate($,t2; --on=:col)"),
+        err.contains("the operand is a number, not a table: correlate($,t2; --on=:col)"),
         "{err}"
     );
     let err = refused(

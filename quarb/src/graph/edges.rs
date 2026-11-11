@@ -29,7 +29,7 @@ pub enum Collect {
     In,
     /// `--label`: the stored edges either way, `directed` false.
     Both,
-    /// `~label`: every edge the navop star walks, tree edges
+    /// `~label`: every edge the navop wildcard walks, tree edges
     /// included, `directed` false.
     Any,
 }
@@ -107,11 +107,10 @@ pub struct EdgesSpec {
     pub weight: Option<Weight>,
 }
 
-/// `--weight=…` (spec: The graph as a table), two forms: a UNIT
-/// selects the edge property of that unit's dimension and converts
-/// it, as a budget does; `::prop` names the property and takes its
-/// values as they stand — the way a dimensionless weight is chosen
-/// (a unit never starts with the sigil, a property always does).
+/// `--weight=UNIT` (spec: The graph as a table): the unit selects
+/// the edge weight of that unit's dimension, as the model declares
+/// it, and converts it, as a budget does. The `::prop` form is
+/// retired (the edge model, ruling 2026-11-07) and refused.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Weight {
     /// `--weight=UNIT`: the edges' declared weight of that unit's
@@ -420,7 +419,7 @@ impl GraphTable {
                 Arg::Opt { name: opt, .. } => {
                     return Err(if distance {
                         format!(
-                            "graph:distance: '{opt}' is no option; the options are '--from=NODES' and '--weight=UNIT | ::prop'"
+                            "graph:distance: '{opt}' is no option; the options are '--from=NODES' and '--weight=UNIT'"
                         )
                     } else if kcore {
                         format!("graph:kcore: '{opt}' is no option; it takes the hop alone")
@@ -428,25 +427,25 @@ impl GraphTable {
                         format!("graph:conncomp: '{opt}' is no option; it takes the hop alone")
                     } else if betweenness {
                         format!(
-                            "graph:betweenness: '{opt}' is no option; the options are '--normalized', '--edges' and '--weight=UNIT | ::prop'"
+                            "graph:betweenness: '{opt}' is no option; the options are '--normalized', '--edges' and '--weight=UNIT'"
                         )
                     } else if undirected {
                         format!("{shown}: '{opt}' is no option; it takes the hop alone")
                     } else if route {
                         format!(
-                            "graph:route: '{opt}' is no option; the options are '--from=NODES' and '--weight=UNIT | ::prop'"
+                            "graph:route: '{opt}' is no option; the options are '--from=NODES' and '--weight=UNIT'"
                         )
                     } else if closeness {
                         format!(
-                            "graph:closeness: '{opt}' is no option; the options are '--harmonic' and '--weight=UNIT | ::prop'"
+                            "graph:closeness: '{opt}' is no option; the options are '--harmonic' and '--weight=UNIT'"
                         )
                     } else if communities {
                         format!(
-                            "graph:communities: '{opt}' is no option; the options are '--resolution=g' and '--weight=UNIT | ::prop'"
+                            "graph:communities: '{opt}' is no option; the options are '--resolution=g' and '--weight=UNIT'"
                         )
                     } else if modularity {
                         format!(
-                            "graph:modularity: '{opt}' is no option; the options are '--by=:.name', '--resolution=g' and '--weight=UNIT | ::prop'"
+                            "graph:modularity: '{opt}' is no option; the options are '--by=:.name', '--resolution=g' and '--weight=UNIT'"
                         )
                     } else if triangles {
                         format!(
@@ -454,12 +453,10 @@ impl GraphTable {
                         )
                     } else if ranks {
                         format!(
-                            "graph:pagerank: '{opt}' is no option; the options are '--damping=d', '--rounds=n' and '--weight=UNIT | ::prop'"
+                            "graph:pagerank: '{opt}' is no option; the options are '--damping=d', '--rounds=n' and '--weight=UNIT'"
                         )
                     } else {
-                        format!(
-                            "edges: '{opt}' is no option; the option is '--weight=UNIT | ::prop' (-w=…)"
-                        )
+                        format!("edges: '{opt}' is no option; the option is '--weight=UNIT' (-w=…)")
                     });
                 }
                 Arg::Expr(Operand::Rel {
@@ -668,7 +665,7 @@ impl GraphTable {
 fn hop_message() -> String {
     "edges takes the collecting hop as its operand: edges(->road) the outgoing road edges, \
      edges(<-road) the incoming, edges(--road) either way, edges(~*) every edge the navop \
-     star walks; bare edges is edges(->*)"
+     wildcard walks; bare edges is edges(->*)"
         .to_string()
 }
 
@@ -727,8 +724,38 @@ fn collect_rows(
     };
     let mut directed = true;
     for hop in &spec.hops {
+        // The edges into a node, over a source that cannot walk its
+        // links back, are read off the forward links of the set (the
+        // user, 2026-11-10): the table holds the edges among the
+        // nodes given, and every such edge leaves one of them, so
+        // nothing is short. (The collection was refused, as the walk
+        // forms `<-x`, `--x` are and stay: a walk leaves the set.)
+        let incoming: Option<HashMap<NodeId, Vec<(String, NodeId, Option<NodeId>)>>> = {
+            let named = if hop.labels.is_empty() {
+                hop.label.as_deref()
+            } else {
+                None
+            };
+            (matches!(hop.collect, Collect::In | Collect::Both | Collect::Any)
+                && nodes
+                    .iter()
+                    .any(|&n| adapter.backlinks_unsupported(n, named)))
+            .then(|| {
+                let mut into: HashMap<NodeId, Vec<(String, NodeId, Option<NodeId>)>> =
+                    HashMap::new();
+                for &s in nodes {
+                    for (label, t, row) in adapter.edge_rows(s) {
+                        if inside.contains(&t) {
+                            into.entry(t).or_default().push((label, s, row));
+                        }
+                    }
+                }
+                into
+            })
+        };
         let mut found: Vec<(Row, NodeId)> = Vec::new();
         for &n in nodes {
+            let from_here = found.len();
             if matches!(hop.collect, Collect::Out | Collect::Both | Collect::Any) {
                 let rows = adapter.edge_rows(n);
                 for (label, t, row) in hop.select(&rows).into_iter().cloned() {
@@ -747,7 +774,10 @@ fn collect_rows(
                 }
             }
             if matches!(hop.collect, Collect::In | Collect::Both | Collect::Any) {
-                let rows = adapter.backlink_rows(n);
+                let rows = match &incoming {
+                    Some(into) => into.get(&n).cloned().unwrap_or_default(),
+                    None => adapter.backlink_rows(n),
+                };
                 for (label, s, row) in hop.select(&rows).into_iter().cloned() {
                     if inside.contains(&s) && !(hop.wild() && adapter.link_consumed(s, &label)) {
                         found.push((
@@ -799,30 +829,35 @@ fn collect_rows(
                     ));
                 }
             }
-        }
-        // the hop's predicate and traits, as a walk applies them: the
-        // node arrived at is the topic, `$-` the edge (spec: The graph
-        // library, draft.191)
-        if let Some(step) = &hop.filter {
-            found.retain(|(_, at)| {
-                crate::graph::steps::trait_clauses_ok(adapter, *at, &step.traits)
-            });
-            if !step.predicates.is_empty() {
-                let state = crate::graph::navigate::GraphExt::at(
-                    nodes.first().copied().unwrap_or(NodeId(0)),
-                );
-                found = crate::graph::steps::apply_predicates(
-                    adapter,
-                    found,
-                    step,
-                    trace,
-                    None,
-                    &[],
-                    &state,
-                    &[],
-                    |(_, at)| *at,
-                    |(r, _)| Some(r.ctx()),
-                );
+            // The hop's predicate and traits, as a walk applies them
+            // from this node: the node arrived at is the topic, `$-`
+            // the edge (spec: The graph library, draft.191), and a
+            // positional predicate counts among this node's edges
+            // (ruling 2026-11-10: `edges(->*[..2])` keeps two edges
+            // per source node, as the hop keeps them in a path; the
+            // predicates ran once over the edges of all the nodes
+            // together, so it kept two edges in all).
+            if let Some(step) = &hop.filter {
+                let mut here = found.split_off(from_here);
+                here.retain(|(_, at)| {
+                    crate::graph::steps::trait_clauses_ok(adapter, *at, &step.traits)
+                });
+                if !step.predicates.is_empty() {
+                    let state = crate::graph::navigate::GraphExt::at(n);
+                    here = crate::graph::steps::apply_predicates(
+                        adapter,
+                        here,
+                        step,
+                        trace,
+                        None,
+                        &[],
+                        &state,
+                        &[],
+                        |(_, at)| *at,
+                        |(r, _)| Some(r.ctx()),
+                    );
+                }
+                found.extend(here);
             }
         }
         for (r, _) in found {
@@ -1192,9 +1227,7 @@ pub(crate) fn graph_size(
 /// The weight of every row under `--weight` (spec: The graph as a
 /// table): the cell the table shows and the number the algorithms
 /// take — a UNIT selects the property of its dimension and converts
-/// it (a tree edge has none: null, and no weight), `::prop` the
-/// property as it stands (its number, or a quantity's base value;
-/// a cell that is no number weighs nothing).
+/// it (a tree edge has none: null, and no weight).
 pub(crate) fn edge_weights(
     adapter: &impl AstAdapter,
     rows: &[Row],
@@ -1371,9 +1404,7 @@ fn index_edges(
 
 /// `@| graph:distance`: each node's shortest distance from the seeds
 /// (spec: The graph library) — an integer in hops; under
-/// `--weight=UNIT` a quantity in that unit; under `--weight=::prop`
-/// the property's values summed, in their own shape (integers stay
-/// integers, quantities of one dimension a quantity, else a float).
+/// `--weight=UNIT` a quantity in that unit.
 /// A seed reads zero, a node no seed reaches null; a seed outside
 /// the context counts for nothing.
 pub(crate) fn distance_values(

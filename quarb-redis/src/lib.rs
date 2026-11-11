@@ -678,10 +678,11 @@ impl AstAdapter for RedisAdapter {
                 (ttl >= 0).then_some(Value::seconds(ttl, 0))
             }
             (Kind::Scored { score, .. }, "score") => Some(Value::Float(*score)),
+            // a stream entry's id is its epoch in milliseconds
             (Kind::Entry { ms, .. }, "ts") => Some(Value::Instant {
                 secs: ms.div_euclid(1000),
                 nanos: (ms.rem_euclid(1000) as u32) * 1_000_000,
-                offset_min: None,
+                offset_min: Some(0),
                 calendar: Default::default(),
             }),
             _ => None,

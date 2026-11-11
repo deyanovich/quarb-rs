@@ -363,7 +363,7 @@ impl AstAdapter for CflAdapter {
             "timestamp" => Some(Value::Instant {
                 secs: rec.secs,
                 nanos: rec.nanos,
-                offset_min: None,
+                offset_min: Some(0),
                 calendar: Default::default(),
             }),
             _ => get(name),

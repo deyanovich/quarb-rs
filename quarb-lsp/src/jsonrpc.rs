@@ -112,11 +112,13 @@ pub fn serve() -> Result<()> {
 /// LSP CompletionItemKind.
 fn lsp_kind(kind: &str) -> u32 {
     match kind {
-        "function" | "aggregate" => 3, // Function
-        "register" => 6,               // Variable
-        "child" => 5,                  // Field
-        "property" => 10,              // Property
-        "trait" => 7,                  // Class
+        // the protocol has no command kind: a command draws as a
+        // Function, an accessor as a Variable
+        "command" => 3,
+        "accessor" => 6,
+        "child" => 5,     // Field
+        "property" => 10, // Property
+        "trait" => 7,     // Class
         _ => 1,
     }
 }

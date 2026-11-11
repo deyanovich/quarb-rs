@@ -459,6 +459,42 @@ pub enum Confidence {
     Exact,
 }
 
+/// The surface a source declares for a container
+/// ([`AstAdapter::surface`]): what its members have, all of it. Each
+/// side is declared or open on its own: a CSV declares its columns
+/// and not what a model will link.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Surface {
+    /// The members, as a message names them from the source's root:
+    /// a table by its path (`/employees`), a CSV's rows by theirs
+    /// (`/row`).
+    pub container: String,
+    /// The names of the properties a member has (a table's columns),
+    /// where the list is whole; `None` where it is open.
+    pub properties: Option<Vec<String>>,
+    /// The labels of the edges that leave or reach a member (the
+    /// table's declared keys and those that point at it), where the
+    /// list is whole; `None` where it is open.
+    pub labels: Option<Vec<String>>,
+}
+
+impl Surface {
+    /// The surface as a composite hands it on: the container named
+    /// from the composite's root, the source's own root standing at
+    /// `at` there (`/db` before `/employees`).
+    pub fn under(mut self, at: &str) -> Surface {
+        let at = at.trim_end_matches('/');
+        if !at.is_empty() {
+            self.container = if self.container == "/" {
+                at.to_string()
+            } else {
+                format!("{at}{}", self.container)
+            };
+        }
+        self
+    }
+}
+
 /// What a source knows about itself before it is read: how many
 /// entries it holds (files under a directory, members of an
 /// archive, rows of a table, documents on a shelf) and how many
@@ -1281,6 +1317,24 @@ pub trait AstAdapter {
             .collect()
     }
 
+    /// Whether the links into `node` are ones this source cannot walk
+    /// back (spec: The adapter contract): it answers `links` and
+    /// provides no `backlinks`, as a document store whose references
+    /// live in the referring documents does. A hop that needs the
+    /// backward direction there (`<-`, `--`, the navop wildcard,
+    /// `edges` over any of them) is refused, the refusal naming what
+    /// the source lacks, rather than answered with an empty set that
+    /// would read as "nothing points here". `label` is the one label
+    /// the hop names when it names exactly one, `None` for a
+    /// wildcard, a pattern or a selection: a layer that walks some
+    /// labels back itself (a model's declared references over such a
+    /// source) answers for those and hands the rest down. A source
+    /// with no links at all says no: there is nothing to walk back,
+    /// and the empty answer is the true one. False by default.
+    fn backlinks_unsupported(&self, _node: NodeId, _label: Option<&str>) -> bool {
+        false
+    }
+
     /// Whether the link from `source` under `label` is a reference
     /// an edge declaration consumed: a bare wildcard hop (`->*`,
     /// `<-*`, `--*`, the crosslink part of `~`) skips it, the label
@@ -1466,6 +1520,20 @@ pub trait AstAdapter {
     /// them, or none: a count cannot be partially applied). SQL:
     /// `SELECT COUNT(*)`; a document index: the bucket's length.
     fn count(&self, _from: NodeId, _plan: &StepPlan<'_>) -> Option<usize> {
+        None
+    }
+    /// The surface the source declares for the container `node` is a
+    /// member of (ruling 2026-11-10): where a source declares every
+    /// property its members have and every label that leaves or
+    /// reaches them (a table's columns and keys, a CSV's header), it
+    /// says so for a member (a row), and a query that names what the
+    /// surface lacks is warned. `None`, the default, is a source that
+    /// declares nothing: a key absent from one JSON object is
+    /// ordinary data, and nothing is said. So is a node that is no
+    /// member (the table itself, a cell). A composite answers for
+    /// the adapter that owns the node and names the container from
+    /// its own root ([`Surface::under`]).
+    fn surface(&self, _node: NodeId) -> Option<Surface> {
         None
     }
     /// The columns of the rows `row_text` serves, asked for the
@@ -1786,11 +1854,12 @@ macro_rules! forward_ast_adapter {
             index_referrers non_tree_nodes child_host children_named
             answers_to has_trait default_value metadata
             metadata_keys metadata_catalogue
-            aliased_metadata links backlinks link_rows edge_rows backlink_rows link_consumed resolve external_ref
+            aliased_metadata links backlinks link_rows edge_rows backlink_rows backlinks_unsupported
+            link_consumed resolve external_ref
             resolve_fragment ref_property ref_label link_property
             document_by_ref reverse_resolve descendants_named
             descendants_where may_hold_below select select_plan estimate count
-            row_columns intrinsic row_text prefetch_properties
+            surface row_columns intrinsic row_text prefetch_properties
             prefetch_links whole_listings link_property_names edge_weights acyclic_link quantifier_bound frontier_bound
             property_withheld withheld_properties nodes_withheld
             graph_bound graph_declarations graph_measure store_graph_measure
@@ -1845,6 +1914,7 @@ macro_rules! forward_ast_adapter {
     (@unless [$i:tt] [graph_measure $($r:ident)*] graph_measure) => {};
     (@unless [$i:tt] [store_graph_measure $($r:ident)*] store_graph_measure) => {};
     (@unless [$i:tt] [backlink_rows $($r:ident)*] backlink_rows) => {};
+    (@unless [$i:tt] [backlinks_unsupported $($r:ident)*] backlinks_unsupported) => {};
     (@unless [$i:tt] [link_consumed $($r:ident)*] link_consumed) => {};
     (@unless [$i:tt] [resolve $($r:ident)*] resolve) => {};
     (@unless [$i:tt] [external_ref $($r:ident)*] external_ref) => {};
@@ -1861,6 +1931,7 @@ macro_rules! forward_ast_adapter {
     (@unless [$i:tt] [estimate $($r:ident)*] estimate) => {};
     (@unless [$i:tt] [count $($r:ident)*] count) => {};
     (@unless [$i:tt] [row_columns $($r:ident)*] row_columns) => {};
+    (@unless [$i:tt] [surface $($r:ident)*] surface) => {};
     (@unless [$i:tt] [intrinsic $($r:ident)*] intrinsic) => {};
     (@unless [$i:tt] [row_text $($r:ident)*] row_text) => {};
     (@unless [$i:tt] [prefetch_properties $($r:ident)*] prefetch_properties) => {};
@@ -2109,6 +2180,11 @@ macro_rules! forward_ast_adapter {
             $crate::forward_ast_adapter!(@target self $i).backlink_rows(node)
         }
     };
+    (@fwd [$i:tt] backlinks_unsupported) => {
+        fn backlinks_unsupported(&self, node: $crate::NodeId, label: Option<&str>) -> bool {
+            $crate::forward_ast_adapter!(@target self $i).backlinks_unsupported(node, label)
+        }
+    };
     (@fwd [$i:tt] link_consumed) => {
         fn link_consumed(&self, source: $crate::NodeId, label: &str) -> bool {
             $crate::forward_ast_adapter!(@target self $i).link_consumed(source, label)
@@ -2231,6 +2307,11 @@ macro_rules! forward_ast_adapter {
     (@fwd [$i:tt] row_columns) => {
         fn row_columns(&self, node: $crate::NodeId) -> Option<Vec<String>> {
             $crate::forward_ast_adapter!(@target self $i).row_columns(node)
+        }
+    };
+    (@fwd [$i:tt] surface) => {
+        fn surface(&self, node: $crate::NodeId) -> Option<$crate::Surface> {
+            $crate::forward_ast_adapter!(@target self $i).surface(node)
         }
     };
     (@fwd [$i:tt] intrinsic) => {
@@ -2551,6 +2632,9 @@ mod forwarding {
         fn backlinks(&self, node: NodeId) -> Vec<(String, NodeId)> {
             vec![("back".into(), n(node.0 + 3))]
         }
+        fn backlinks_unsupported(&self, node: NodeId, label: Option<&str>) -> bool {
+            node.0 == 2 && label == Some("lbl")
+        }
         fn resolve(&self, node: NodeId, property: &str, hint: Option<&str>) -> Option<NodeId> {
             Some(n(node.0
                 + property.len() as u64
@@ -2717,6 +2801,8 @@ mod forwarding {
         same!(aliased_metadata, n(5));
         same!(links, n(2));
         same!(backlinks, n(2));
+        same!(backlinks_unsupported, n(2), Some("lbl"));
+        same!(backlinks_unsupported, n(2), None);
         same!(resolve, n(2), "pp", Some("h"));
         same!(external_ref, n(2), "pp", Some("frag"));
         same!(resolve_fragment, n(2), "frag");

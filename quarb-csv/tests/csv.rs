@@ -440,7 +440,7 @@ fn window_shapes() {
     assert!(err("/row @| shift()").contains("integer distance"));
     // a range argument is window's span or a rank band on the
     // commands that select by rank; a reduction takes none
-    assert!(err("/row @| sum(1..2)").contains("no range argument"));
+    assert!(err("/row @| sum(1..2)").contains("no range operand"));
     let adapter = CsvAdapter::parse(DOC).unwrap();
     assert!(quarb::run("/row @| top(1..2; ::age)", &adapter).is_ok());
 }

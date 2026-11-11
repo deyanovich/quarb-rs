@@ -165,11 +165,13 @@ const PATHS: NodeId = NodeId(4);
 
 const NS: i64 = 1_000_000_000;
 
+/// A stamp of nanoseconds since the epoch: a point of the timeline,
+/// `Z`.
 fn instant_ns(ns: i64) -> Value {
     Value::Instant {
         secs: ns.div_euclid(NS),
         nanos: ns.rem_euclid(NS) as u32,
-        offset_min: None,
+        offset_min: Some(0),
         calendar: Default::default(),
     }
 }

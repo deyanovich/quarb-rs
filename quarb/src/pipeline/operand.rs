@@ -5,10 +5,45 @@
 use crate::pipeline::*;
 use crate::syntax::ast::IndexSpec;
 
+/// The most values one expression may fork: the members of a range,
+/// or the direct product of two forking operands. Each is a thread,
+/// and a count read from the query sized the allocation with no
+/// bound (`= (1..300000) + (1..300000) @| count` aborted the
+/// process). Reaching it is a refusal, as every bound's is.
+pub const MAX_FORK: usize = 10_000_000;
+
+/// The refusal of a direct product past [`MAX_FORK`], if it is.
+fn product_past_bound(left: usize, right: usize) -> Option<String> {
+    match left.checked_mul(right) {
+        Some(n) if n <= MAX_FORK => None,
+        _ => Some(format!(
+            "the product of {left} and {right} values is past the {MAX_FORK} one expression may fork"
+        )),
+    }
+}
+
 /// Evaluate an operand against `node` to a list of values (a
 /// projection may yield several; a structural path yields one marker
 /// per selected node).
 pub(crate) fn eval_operand<H: Host>(
+    host: &H,
+    ext: &H::Ext,
+    operand: &Operand,
+    trace: &H::Trace,
+    scope: Scope<'_, H::Ext>,
+) -> Vec<Value> {
+    // A chain written flat, `1 + 1 + …`, is a tree as deep as it is
+    // long, and this function's frame is large: 2,200 terms overflowed
+    // the stack of a release build and 150 that of a debug one (the
+    // code review of 2026-11-10). The stack grows into a heap segment
+    // where it runs short; where it cannot be measured (wasm) the
+    // evaluation runs in place.
+    stacker::maybe_grow(1024 * 1024, 16 * 1024 * 1024, || {
+        eval_operand_in(host, ext, operand, trace, scope)
+    })
+}
+
+fn eval_operand_in<H: Host>(
     host: &H,
     ext: &H::Ext,
     operand: &Operand,
@@ -42,7 +77,7 @@ pub(crate) fn eval_operand<H: Host>(
         // only as a comparison's right operand, where the Compare
         // arm intercepts it before operand evaluation.
         Operand::Pattern(_) => Vec::new(),
-        // The value match: scrutinee once, arms in order, first hit
+        // The switch: scrutinee once, arms in order, first hit
         // wins, only the taken branch evaluates. A regex arm tests
         // like `=~`; a value arm compares by the standard equality.
         Operand::Match {
@@ -53,24 +88,72 @@ pub(crate) fn eval_operand<H: Host>(
             let subject = discard(|| operand_scalar(host, ext, scrutinee, trace, scope));
             if matches!(subject, Value::Bool(_)) {
                 record_refusal(
-                    "the value match compares a VALUE, and its scrutinee is a boolean: \
+                    "the switch compares a VALUE, and its scrutinee is a boolean: \
                      the plain conditional is '(cond ? a : b)'"
                         .to_string(),
                 );
                 return vec![Value::Null];
             }
             for (test, regex, result) in arms {
+                // A pattern arm that matches binds its groups for its
+                // own result (ruling 2026-11-10): in
+                // `(x ?= (/re(\d+)/) ? $1 : else)` the `$1` reads this
+                // arm's match. The scope is the result's alone: the
+                // thread's captures stay as they were, and the next
+                // arm and the else see none of these.
+                let mut groups: Option<Captured> = None;
                 let hit = discard(|| {
                     if *regex {
                         let pat = operand_scalar(host, ext, test, trace, scope);
-                        regex_test(&subject, &pat, true)
+                        let hit = regex_test(&subject, &pat, true);
+                        if hit {
+                            groups = compiled_regex(&pat.to_string())
+                                .filter(|re| re.captures_len() > 1)
+                                .and_then(|re| {
+                                    let text = subject.to_string();
+                                    re.captures(&text).map(|caps| {
+                                        let numbered = caps
+                                            .iter()
+                                            .skip(1)
+                                            .map(|g| {
+                                                g.map_or(String::new(), |m| m.as_str().to_string())
+                                            })
+                                            .collect();
+                                        let named = re
+                                            .capture_names()
+                                            .enumerate()
+                                            .filter_map(|(i, n)| {
+                                                n.map(|n| {
+                                                    let text =
+                                                        caps.get(i).map_or(String::new(), |m| {
+                                                            m.as_str().to_string()
+                                                        });
+                                                    (n.to_string(), text)
+                                                })
+                                            })
+                                            .collect();
+                                        (numbered, named)
+                                    })
+                                });
+                        }
+                        hit
                     } else {
                         let t = operand_scalar(host, ext, test, trace, scope);
                         value_eq(&subject, &t, &|e| host.scale_of(e))
                     }
                 });
                 if hit {
-                    return eval_operand(host, ext, result, trace, scope);
+                    return match &groups {
+                        Some((numbered, named)) => {
+                            let arm = Scope {
+                                captures: numbered,
+                                named,
+                                ..scope
+                            };
+                            eval_operand(host, ext, result, trace, arm)
+                        }
+                        None => eval_operand(host, ext, result, trace, scope),
+                    };
                 }
             }
             eval_operand(host, ext, other, trace, scope)
@@ -304,11 +387,12 @@ pub(crate) fn eval_operand<H: Host>(
                     steps,
                     projection,
                     anchor,
-                } => host
-                    .rel_threads(ext, steps, anchor, projection.as_ref(), trace, scope)
-                    .into_iter()
-                    .map(|(x, topic, _)| (x, topic))
-                    .collect(),
+                } => crate::pipeline::run::out_of_row_reach(|| {
+                    host.rel_threads(ext, steps, anchor, projection.as_ref(), trace, scope)
+                })
+                .into_iter()
+                .map(|(x, topic, _)| (x, topic))
+                .collect(),
                 other => eval_operand(host, ext, other, trace, scope)
                     .into_iter()
                     .map(|v| (ext.clone(), Some(v)))
@@ -390,7 +474,7 @@ pub(crate) fn eval_operand<H: Host>(
                                 },
                                 v @ (Value::Str(_) | Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Null) if held => {
                                     crate::pipeline::record_refusal(format!(
-                                        "the colon projects, and the register holds {} with no projector in it; to run a quarq write v | &$.f",
+                                        "the colon projects, and the regula holds {} with no projector in it; to run a quarq write v | &$.f",
                                         crate::stdlib::kind_of(&v)
                                     ));
                                     Value::Null
@@ -657,8 +741,12 @@ pub(crate) fn eval_operand<H: Host>(
                         };
                         let kept = matches!(topic, Some(Value::Table(t)) if t.index > 0)
                             && index.is_none();
-                        let built =
-                            crate::Table::declared(header, rows).and_then(|t| match new_index {
+                        // the columns of a table whose names are paths of
+                        // levels are still such paths
+                        let levels = matches!(topic, Some(Value::Table(t)) if t.levels);
+                        let built = crate::Table::declared(header, rows)
+                            .map(|t| t.with_levels(levels))
+                            .and_then(|t| match new_index {
                                 // `-i=:A` names the index (declaring it when typed)
                                 Some(Ok(levels)) => t.indexed_by_levels(&levels),
                                 Some(Err(why)) => Err(why),
@@ -905,6 +993,15 @@ pub(crate) fn eval_operand<H: Host>(
                     None if b < a => -1,
                     None => 1,
                 };
+                // every value is a thread: a range sized by a number
+                // in the query must not exhaust memory
+                // (`= 1..9000000000 @| count` aborted the process)
+                let count = ((b as i128 - a as i128) / s as i128).max(-1) + 1;
+                if count > MAX_FORK as i128 {
+                    return Err(format!(
+                        "the range {a}..{b} holds {count} values, past the {MAX_FORK} one expression may fork"
+                    ));
+                }
                 let mut out = Vec::new();
                 let mut i = a;
                 while if s > 0 { i <= b } else { i >= b } {
@@ -941,6 +1038,7 @@ pub(crate) fn eval_operand<H: Host>(
             header,
             declared,
             rows,
+            levels,
         } => {
             // a projector literal stays the projector, as a list item
             // or a record field does (a held projector table)
@@ -949,7 +1047,7 @@ pub(crate) fn eval_operand<H: Host>(
                 _ => operand_value(host, ext, e, trace, scope),
             };
             match table_literal(header.clone(), declared, rows, cell) {
-                Ok(t) => vec![Value::table(t)],
+                Ok(t) => vec![Value::table(t.with_levels(*levels))],
                 Err(why) => {
                     crate::pipeline::record_refusal(why);
                     vec![Value::Null]
@@ -957,20 +1055,36 @@ pub(crate) fn eval_operand<H: Host>(
             }
         }
         // `%+` — the named groups of the last match, as a record.
-        Operand::NamedCaptures => vec![Value::Record(
-            scope
-                .named
-                .iter()
-                .map(|(k, v)| (k.clone(), Value::Str(v.clone())))
-                .collect(),
-        )],
-        // `$ord`: the thread's position in its context; in a regula
-        // fold's reducing command, the group's ordinal in the fold's
-        // order (spec: the fold by a regula).
+        Operand::NamedCaptures => {
+            let record = |named: &[(String, String)]| {
+                Value::Record(
+                    named
+                        .iter()
+                        .map(|(k, v)| (k.clone(), Value::Str(v.clone())))
+                        .collect(),
+                )
+            };
+            // a predicate that made no capture reads the thread's
+            // that navigates its path
+            vec![if scope.captures.is_empty() && scope.named.is_empty() {
+                crate::pipeline::run::enclosing_captures(|c| {
+                    record(c.map_or(&[][..], |(_, named)| named))
+                })
+            } else {
+                record(scope.named)
+            }]
+        }
+        // `$ord`: the thread's position in its context; in a
+        // reducing command the group's ordinal, the place of the
+        // group in a regula fold's order and 1 without a fold (spec:
+        // the fold by a regula; ruling 2026-11-10). The scope carries
+        // either: a reducing command builds its seed's scope at the
+        // group's ordinal. (It fell back to a run-wide slot, which
+        // answered by where `$ord` was written and reached a nested
+        // pipeline's arguments.)
         Operand::Ordinal => vec![
             scope
                 .ordinal
-                .or_else(|| crate::pipeline::with_run(|s| s.fold_ordinal))
                 .map(|i| Value::Int(i as i64))
                 .unwrap_or(Value::Null),
         ],
@@ -1046,6 +1160,9 @@ pub(crate) fn eval_operand<H: Host>(
             }
         }
         Operand::Piped { expr, commands } => {
+            // the nested pipeline stands on lone values, or on the
+            // cell `map` marked it with, whatever encloses it
+            let _own_cells = crate::value::ambient::cells_ground();
             // A capsa of the tail: this scope's register, captures,
             // marks, witness and arrivals, standing at `n` with
             // `topic` — or none, for a row that is a node, whose
@@ -1053,7 +1170,6 @@ pub(crate) fn eval_operand<H: Host>(
             // pipeline would: as a node (`@| unique` tells two nodes
             // apart whatever they read as).
             let capsa = |x: H::Ext, topic: Option<Value>, prov: Prov| Thread::<H::Ext> {
-                window: None,
                 prov,
                 register: scope.register.to_vec(),
                 topic,
@@ -1071,11 +1187,12 @@ pub(crate) fn eval_operand<H: Host>(
                     steps,
                     projection,
                     anchor,
-                } => host
-                    .rel_threads(ext, steps, anchor, projection.as_ref(), trace, scope)
-                    .into_iter()
-                    .map(|(x, topic, prov)| capsa(x, topic, prov))
-                    .collect(),
+                } => crate::pipeline::run::out_of_row_reach(|| {
+                    host.rel_threads(ext, steps, anchor, projection.as_ref(), trace, scope)
+                })
+                .into_iter()
+                .map(|(x, topic, prov)| capsa(x, topic, prov))
+                .collect(),
                 // The seed of a headless body: the enclosing capsa
                 // as the pipeline hands it to a command — its topic
                 // on its node, or the node itself when there is no
@@ -1105,7 +1222,6 @@ pub(crate) fn eval_operand<H: Host>(
                         .map(|m| crate::pipeline::effective_topic(m, host))
                         .collect();
                     vec![Thread::<H::Ext> {
-                        window: None,
                         prov: scope.prov.cloned().unwrap_or_else(|| host.prov_at(ext)),
                         register: scope.register.to_vec(),
                         topic: Some(Value::list(topics)),
@@ -1144,6 +1260,9 @@ pub(crate) fn eval_operand<H: Host>(
                 }
             };
             let mut mode = crate::pipeline::commands::start_mode(&caps);
+            // the nested pipeline reduces its own context: an
+            // enclosing fold's group is not its commands' group
+            let _own_ground = crate::pipeline::run::fresh_group();
             for command in commands.iter() {
                 // Absence is `default`'s whole job: an unmatched
                 // path yields no values at all, which would starve
@@ -1230,11 +1349,10 @@ pub(crate) fn eval_operand<H: Host>(
                 let command = match command {
                     Command::Func(call)
                         if stdlib::known_scalar(&call.name)
-                            && !matches!(
-                                call.name.as_str(),
-                                "rec" | "record" | "map" | "autocast"
-                            )
-                            && call.args.iter().any(outer_expr) =>
+                            && !matches!(call.name.as_str(), "rec" | "record" | "map")
+                            && call.args.iter().any(|a| {
+                                outer_expr(a) && !stdlib::names_columns(&call.name, a)
+                            }) =>
                     {
                         resolved = Command::Func(FnCall {
                             headless: false,
@@ -1243,6 +1361,9 @@ pub(crate) fn eval_operand<H: Host>(
                                 .args
                                 .iter()
                                 .map(|a| match a {
+                                    // a column's name stays a name, as
+                                    // in the pipe itself
+                                    a if stdlib::names_columns(&call.name, a) => a.clone(),
                                     Arg::Expr(e) => {
                                         Arg::Lit(operand_scalar(host, ext, e, trace, scope))
                                     }
@@ -1386,7 +1507,7 @@ pub(crate) fn eval_operand<H: Host>(
                             record_refusal(match msg {
                                 Some(m) => m.clone(),
                                 None => format!(
-                                    "the strict expansion '${{{}:?}}' produced nothing",
+                                    "the strict expansion '${{{}:?}}' is null",
                                     crate::syntax::unparse::operand_text(e)
                                 ),
                             });
@@ -1409,13 +1530,23 @@ pub(crate) fn eval_operand<H: Host>(
             }
             vec![Value::Str(out)]
         }
-        Operand::Capture(n) => vec![
-            scope
-                .captures
-                .get(n - 1)
-                .map(|s| Value::Str(s.clone()))
-                .unwrap_or(Value::Null),
-        ],
+        Operand::Capture(n) => {
+            let own = |captures: &[String]| {
+                captures
+                    .get(n - 1)
+                    .map(|s| Value::Str(s.clone()))
+                    .unwrap_or(Value::Null)
+            };
+            // a predicate that made no capture reads the thread's
+            // that navigates its path (ruling 2026-11-10)
+            vec![if scope.captures.is_empty() && scope.named.is_empty() {
+                crate::pipeline::run::enclosing_captures(|c| {
+                    own(c.map_or(&[][..], |(numbered, _)| numbered))
+                })
+            } else {
+                own(scope.captures)
+            }]
+        }
         // The descriptors (spec: Field Projections): on a record, a
         // table or a list of records, `:::key` reads a descriptor of
         // the value — fields, keys, header, type, dim, nrows, ncols,
@@ -1492,7 +1623,9 @@ pub(crate) fn eval_operand<H: Host>(
             steps,
             projection,
             anchor,
-        } => host.rel(ext, steps, anchor, projection.as_ref(), trace, scope),
+        } => crate::pipeline::run::out_of_row_reach(|| {
+            host.rel(ext, steps, anchor, projection.as_ref(), trace, scope)
+        }),
         // An operand that reaches several values forks the
         // expression (spec: Value Expressions, draft 164): one result
         // per value, each its own row; two forking operands give the
@@ -1504,6 +1637,10 @@ pub(crate) fn eval_operand<H: Host>(
             let scale = |e: &str| host.scale_of(e);
             let ls = forking(eval_operand(host, ext, left, trace, scope));
             let rs = forking(eval_operand(host, ext, right, trace, scope));
+            if let Some(refusal) = product_past_bound(ls.len(), rs.len()) {
+                crate::pipeline::record_refusal(refusal);
+                return vec![Value::Null];
+            }
             let mut out = Vec::with_capacity(ls.len() * rs.len());
             for l in &ls {
                 let l = retype_shaped_lit(left, l.clone(), &scale);
@@ -1571,6 +1708,10 @@ pub(crate) fn eval_operand<H: Host>(
                 }
                 _ => {
                     let rs = forking(eval_operand(host, ext, right, trace, scope));
+                    if let Some(refusal) = product_past_bound(ls.len(), rs.len()) {
+                        crate::pipeline::record_refusal(refusal);
+                        return vec![Value::Null];
+                    }
                     let mut out = Vec::with_capacity(ls.len() * rs.len());
                     for l in &ls {
                         for r in &rs {
@@ -1610,6 +1751,22 @@ pub(crate) fn eval_operand<H: Host>(
         Operand::InUnit { inner, unit } => forking(eval_operand(host, ext, inner, trace, scope))
             .into_iter()
             .map(|v| crate::value::unit_reading(v, unit))
+            .collect(),
+        Operand::InOffset { inner, minutes } => {
+            forking(eval_operand(host, ext, inner, trace, scope))
+                .into_iter()
+                .map(|v| crate::value::offset_reading_at(v, *minutes))
+                .collect()
+        }
+        // The offset trait likewise (ruling 2026-11-10): `::at<+02:00>`
+        // as a value is the instant declared or displayed at the
+        // offset, null on what is no instant.
+        Operand::Typed {
+            inner,
+            typing: crate::Typing::Declared(crate::ColumnType::Offset(minutes)),
+        } => forking(eval_operand(host, ext, inner, trace, scope))
+            .into_iter()
+            .map(|v| crate::value::offset_reading_at(v, *minutes))
             .collect(),
         Operand::Typed { inner, typing } => {
             let spelled = crate::syntax::unparse::operand(operand);
@@ -1755,6 +1912,27 @@ pub(crate) fn read_projection<H: Host>(
 /// value kept (spec: The Projection Operator).
 pub(crate) fn walk_projections(v: Value, read: &dyn Fn(u8, &str) -> Value) -> Value {
     match v {
+        // a projector that holds a level (`:bar:@(:A; :B)`, a
+        // header's nested reading): the name read, and the level
+        // below read on that reading, as the glued colon applies a
+        // list to a value
+        Value::Projection {
+            ladder,
+            key,
+            typing: Some(crate::Typing::Levels(below)),
+        } => {
+            let base = read(ladder, &key);
+            let under = |l: u8, k: &str| match l {
+                1 => crate::pipeline::commands::record_field(base.clone(), k),
+                _ => Value::Null,
+            };
+            Value::list(
+                below
+                    .into_iter()
+                    .map(|x| walk_projections(x, &under))
+                    .collect(),
+            )
+        }
         // a typed projector casts what it reads (draft 166): the
         // column's cells, or the one value, into its declaration
         Value::Projection {
@@ -1915,12 +2093,12 @@ pub(crate) fn label_lookup(
                 match s {
                     LabelSpec::One(k) => {
                         let k = cast(k);
-                        rows.extend(labels.iter().enumerate().filter(|(_, l)| **l == k).map(|(i, _)| i));
+                        rows.extend(labels.iter().enumerate().filter(|(_, l)| l.same_key(&k)).map(|(i, _)| i));
                     }
                     LabelSpec::Many(ks) => {
                         for k in ks {
                             let k = cast(k);
-                            rows.extend(labels.iter().enumerate().filter(|(_, l)| **l == k).map(|(i, _)| i));
+                            rows.extend(labels.iter().enumerate().filter(|(_, l)| l.same_key(&k)).map(|(i, _)| i));
                         }
                     }
                     LabelSpec::Range(a, b) => {
@@ -2466,6 +2644,20 @@ pub(crate) fn eval_pred_expr<H: Host>(
     trace: &H::Trace,
     scope: Scope<'_, H::Ext>,
 ) -> bool {
+    // a long `a || b || …` is a tree as deep as it is long: the
+    // stack grows where it runs short (see `eval_operand`)
+    stacker::maybe_grow(512 * 1024, 8 * 1024 * 1024, || {
+        eval_pred_expr_in(host, ext, e, trace, scope)
+    })
+}
+
+fn eval_pred_expr_in<H: Host>(
+    host: &H,
+    ext: &H::Ext,
+    e: &PredExpr,
+    trace: &H::Trace,
+    scope: Scope<'_, H::Ext>,
+) -> bool {
     match e {
         PredExpr::Or(a, b) => {
             eval_pred_expr(host, ext, a, trace, scope) || eval_pred_expr(host, ext, b, trace, scope)
@@ -2518,9 +2710,25 @@ pub(crate) fn eval_pred_expr<H: Host>(
         }
         // a list of booleans — a comparison that distributed over a
         // list — holds when any element does (ruling 2026-11-05)
-        PredExpr::Truthy(o) => eval_operand(host, ext, o, trace, scope)
-            .iter()
-            .any(|v| match v {
+        PredExpr::Truthy(o) => {
+            // a property alone is a test of presence: the name is
+            // the question, and a surface that lacks it is asked
+            // nothing (the read is the same, the warning is not)
+            let read = || eval_operand(host, ext, o, trace, scope);
+            let values = match o {
+                Operand::Rel {
+                    projection: Some(Projection::Property(Some(name))),
+                    ..
+                } => {
+                    let values = crate::value::ambient::with_presence(read);
+                    if values.iter().any(|v| !matches!(v, Value::Null)) {
+                        crate::value::ambient::presence_found(name);
+                    }
+                    values
+                }
+                _ => read(),
+            };
+            values.iter().any(|v| match v {
                 Value::List(l)
                     if !l.is_empty()
                         && l.iter().all(|x| matches!(x, Value::Bool(_) | Value::Null)) =>
@@ -2528,7 +2736,91 @@ pub(crate) fn eval_pred_expr<H: Host>(
                     l.iter().any(|x| matches!(x, Value::Bool(true)))
                 }
                 v => v.is_truthy(),
-            }),
+            })
+        }
+    }
+}
+
+/// A join condition (spec: Correlation; ruling 2026-11-10): the ON
+/// clause read in three-valued logic. A comparison one of whose
+/// operands reads the other side of the join — the driver or an
+/// earlier joined node — is a key comparison, and a null on either
+/// side of it is unknown whatever the operator: `=` does not pair
+/// two absent keys, and `!=` does not pair an absent key with every
+/// node. Unknown passes through `!`, yields to a true under `||` and
+/// to a false under `&&`; only a condition that is true admits the
+/// candidate. Every other part of the clause reads as a predicate
+/// does anywhere (`[::status = null]` holds for a null).
+pub(crate) fn eval_join_condition<H: Host>(
+    host: &H,
+    ext: &H::Ext,
+    e: &PredExpr,
+    trace: &H::Trace,
+    scope: Scope<'_, H::Ext>,
+) -> Option<bool> {
+    use crate::syntax::parser::operand_is_correlated as keyed;
+    let known = |o: &Operand| -> Vec<Value> {
+        eval_operand(host, ext, o, trace, scope)
+            .into_iter()
+            .filter(|v| !matches!(v, Value::Null))
+            .collect()
+    };
+    match e {
+        PredExpr::Or(a, b) => match eval_join_condition(host, ext, a, trace, scope) {
+            Some(true) => Some(true),
+            left => match (left, eval_join_condition(host, ext, b, trace, scope)) {
+                (_, Some(true)) => Some(true),
+                (Some(false), Some(false)) => Some(false),
+                _ => None,
+            },
+        },
+        PredExpr::And(a, b) => match eval_join_condition(host, ext, a, trace, scope) {
+            Some(false) => Some(false),
+            left => match (left, eval_join_condition(host, ext, b, trace, scope)) {
+                (_, Some(false)) => Some(false),
+                (Some(true), Some(true)) => Some(true),
+                _ => None,
+            },
+        },
+        PredExpr::Not(a) => eval_join_condition(host, ext, a, trace, scope).map(|b| !b),
+        // a parenthesized condition is the condition: `!(a = b)`
+        PredExpr::Truthy(Operand::Group(inner)) => {
+            eval_join_condition(host, ext, inner, trace, scope)
+        }
+        PredExpr::Compare(l, op, r) if keyed(l) || keyed(r) => {
+            let lhs = known(l);
+            if lhs.is_empty() {
+                return None;
+            }
+            if let Operand::Pattern(segs) = r {
+                return Some(match op {
+                    CmpOp::Ne => lhs.iter().any(|a| !pattern_test(segs, a)),
+                    _ => lhs.iter().any(|a| pattern_test(segs, a)),
+                });
+            }
+            let rhs = known(r);
+            if rhs.is_empty() {
+                return None;
+            }
+            Some(holds(l, &lhs, *op, r, &rhs, &|e| host.scale_of(e)))
+        }
+        PredExpr::Chain(operands, ops) if operands.iter().any(keyed) => {
+            let values: Vec<Vec<Value>> = operands.iter().map(known).collect();
+            if values.iter().any(Vec::is_empty) {
+                return None;
+            }
+            Some(ops.iter().enumerate().all(|(i, op)| {
+                holds(
+                    &operands[i],
+                    &values[i],
+                    *op,
+                    &operands[i + 1],
+                    &values[i + 1],
+                    &|e| host.scale_of(e),
+                )
+            }))
+        }
+        other => Some(eval_pred_expr(host, ext, other, trace, scope)),
     }
 }
 

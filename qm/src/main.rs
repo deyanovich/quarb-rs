@@ -189,6 +189,14 @@ fn qstr(s: &str) -> String {
 }
 
 fn main() -> anyhow::Result<()> {
+    // A refusal is a message, as in qua: `RUST_BACKTRACE=1` is a
+    // panic's; an error's stack is asked for by `RUST_LIB_BACKTRACE=1`
+    // (the first statement, before any thread or error).
+    if std::env::var_os("RUST_LIB_BACKTRACE").is_none() {
+        unsafe {
+            std::env::set_var("RUST_LIB_BACKTRACE", "0");
+        }
+    }
     let cli = Cli::parse();
     let mailbox = cli
         .mailbox
@@ -270,7 +278,7 @@ fn main() -> anyhow::Result<()> {
             if file.exists() {
                 bail!("{} already exists (refusing to overwrite)", file.display());
             }
-            let q = "/* | rec(::from, ::subject, \"epoch\", :::epoch)";
+            let q = "/* | %(from = ::from; subject = ::subject; epoch = :::epoch)";
             let QueryResult::Values(vs) = quarb::run(q, &a)? else {
                 bail!("internal: expected values");
             };

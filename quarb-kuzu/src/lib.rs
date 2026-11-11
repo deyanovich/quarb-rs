@@ -69,16 +69,22 @@ fn cell_value(v: &kuzu::Value) -> Value {
             offset_min: None,
             calendar: Default::default(),
         },
-        K::Timestamp(t)
-        | K::TimestampTz(t)
-        | K::TimestampNs(t)
-        | K::TimestampMs(t)
-        | K::TimestampSec(t) => Value::Instant {
+        // a timestamp with a zone is a point of the timeline, `Z`;
+        // one without is wall time, written with no offset
+        K::TimestampTz(t) => Value::Instant {
             secs: t.unix_timestamp(),
             nanos: t.nanosecond(),
-            offset_min: None,
+            offset_min: Some(0),
             calendar: Default::default(),
         },
+        K::Timestamp(t) | K::TimestampNs(t) | K::TimestampMs(t) | K::TimestampSec(t) => {
+            Value::Instant {
+                secs: t.unix_timestamp(),
+                nanos: t.nanosecond(),
+                offset_min: None,
+                calendar: Default::default(),
+            }
+        }
         K::Interval(d) => {
             let mut secs = d.whole_seconds();
             let mut nanos = d.subsec_nanoseconds();

@@ -110,14 +110,21 @@ pub(crate) fn attach<K: Hash + Eq + Clone + 'static>(key: K, regula: Attached) {
 /// differing values refuse, naming `@| collapse`, and the command
 /// attaches nothing. Answers whether any node's attachments
 /// changed — what a quantified push's fixpoint asks.
-pub(crate) fn commit<K: Hash + Eq + Clone + 'static>() -> std::result::Result<bool, String> {
+///
+/// Two values agree when `=` holds between them (ruling 2026-11-10;
+/// `same` is that comparison under the host's units): 1 and 1.0,
+/// `1_km` and `1000_m`, one instant under two written offsets. The
+/// test was the value's structure, which called those different.
+pub(crate) fn commit<K: Hash + Eq + Clone + 'static>(
+    same: &dyn Fn(&Value, &Value) -> bool,
+) -> std::result::Result<bool, String> {
     with_attachments::<K, _>(|a| {
         let pending = std::mem::take(&mut a.pending);
         // agreement first, before anything lands
         let mut seen: HashMap<(&K, &str), &Value> = HashMap::new();
         for (key, r) in &pending {
             match seen.get(&(key, r.name.as_str())) {
-                Some(v) if **v != r.value => {
+                Some(v) if !same(v, &r.value) => {
                     return Err(format!(
                         "threads standing at one node attach differing values under '{}' ({} and {}): \
                          '@| collapse' first, so that one thread stands at each node and attaches the gathered value",
@@ -137,7 +144,7 @@ pub(crate) fn commit<K: Hash + Eq + Clone + 'static>() -> std::result::Result<bo
             let at = a.committed.entry(key).or_default();
             match at.iter_mut().find(|x| x.name == r.name) {
                 Some(x) => {
-                    if x.value != r.value {
+                    if !same(&x.value, &r.value) {
                         changed = true;
                     }
                     *x = r;

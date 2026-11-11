@@ -219,17 +219,23 @@ fn text_instant(s: &str) -> Option<Value> {
         })
 }
 
-/// An instant at the start of its UTC day, no offset: what a date
-/// column holds (a midnight instant with no offset prints as a bare
-/// date).
+/// An instant at the start of the day it is written in, no offset:
+/// what a date column holds (a midnight instant with no offset
+/// prints as a bare date). The day is the written offset's, as
+/// `date` answers it; an epoch is `Z`, so its day is UTC's.
 fn to_date(v: Value) -> Value {
     match v {
-        Value::Instant { secs, .. } => Value::Instant {
-            secs: secs - secs.rem_euclid(86_400),
-            nanos: 0,
-            offset_min: None,
-            calendar: Default::default(),
-        },
+        Value::Instant {
+            secs, offset_min, ..
+        } => {
+            let wall = Value::wall_secs(secs, offset_min);
+            Value::Instant {
+                secs: wall - wall.rem_euclid(86_400),
+                nanos: 0,
+                offset_min: None,
+                calendar: Default::default(),
+            }
+        }
         other => other,
     }
 }
@@ -678,10 +684,10 @@ impl Plan {
             Reading::Instant | Reading::Date => {
                 let inst = match v {
                     Value::Null => Value::Null,
-                    Value::Int(n) => Value::from_epoch(n as f64),
+                    Value::Int(n) => Value::from_epoch_int(n),
                     Value::Float(x) => Value::from_epoch(x),
                     Value::Str(s) => match s.trim().parse::<f64>() {
-                        Ok(x) => Value::from_epoch(x),
+                        Ok(_) => Value::from_epoch_text(&s).unwrap_or(Value::Str(s)),
                         Err(_) => text_instant(&s).unwrap_or(Value::Str(s)),
                     },
                     other => other,
@@ -742,10 +748,15 @@ pub struct AutoUnits<A: AstAdapter> {
     /// The target as written, without its options, for the info
     /// line and the refusals.
     target: String,
-    /// Per distinct list of property names, the plan: a table's rows
-    /// share one header, so one entry serves them all; a document's
-    /// nodes each bring their own.
-    plans: RefCell<HashMap<Vec<String>, Rc<Plan>>>,
+    /// Per container, and per list of property names in it, the
+    /// plan: a table's rows share one header, so one entry serves
+    /// them all; a document's nodes each bring their own names, and
+    /// the nodes of one container that bring the same ones share
+    /// their plan.
+    plans: RefCell<HashMap<NodeId, HashMap<Vec<String>, Rc<Plan>>>>,
+    /// The info lines told so far: a document of many containers of
+    /// one shape decides once per container and tells once.
+    told: RefCell<std::collections::HashSet<String>>,
     /// Per node whose rows are asked for, the header beneath it.
     headers: RefCell<HashMap<NodeId, Option<(NodeId, Vec<String>)>>>,
     /// Per parent of rows with a shape, their plan: a table's rows
@@ -753,6 +764,10 @@ pub struct AutoUnits<A: AstAdapter> {
     /// read allocates the header to find it.
     by_parent: RefCell<HashMap<NodeId, Rc<Plan>>>,
 }
+
+/// How many of a container's first rows a plan looks for its
+/// deciding cells in.
+const PROBE: usize = 32;
 
 impl<A: AstAdapter> AutoUnits<A> {
     pub fn new(inner: A, suffixes: Suffixes, target: &str) -> Self {
@@ -768,6 +783,7 @@ impl<A: AstAdapter> AutoUnits<A> {
             units: Vec::new(),
             target: target.to_string(),
             plans: RefCell::new(HashMap::new()),
+            told: RefCell::new(std::collections::HashSet::new()),
             headers: RefCell::new(HashMap::new()),
             by_parent: RefCell::new(HashMap::new()),
         }
@@ -808,16 +824,77 @@ impl<A: AstAdapter> AutoUnits<A> {
         parts.join("+")
     }
 
-    /// The plan for one list of names, decided once; the first
-    /// decision tells the conversions (an info) or refuses a
-    /// collision.
-    fn plan_for(&self, names: &[String], sample: &dyn Fn(&str) -> Option<Value>) -> Rc<Plan> {
-        if let Some(p) = self.plans.borrow().get(names) {
+    /// The plan for one list of names among the nodes `at` stands
+    /// with, decided once per container; the decision tells the
+    /// conversions (an info) or refuses a collision.
+    ///
+    /// A column converts only when its first cell that says
+    /// something is a number, so the deciding cell is looked for in
+    /// the container's first rows ([`PROBE`]), not in whichever node
+    /// asked first: `at`'s parent's children, or, for a root a table
+    /// adapter answers a header for, the rows beneath it. (The plan
+    /// was keyed by the names alone and sampled on the asking node.
+    /// A CSV's root answers its rows' header and has no cell, every
+    /// cell read absent and absent admits, so a text column `len_km`
+    /// was renamed and read null; in a document the first node asked
+    /// decided for every node with the same names.)
+    fn plan_for(&self, at: NodeId, names: &[String]) -> Rc<Plan> {
+        let parent = self.inner.parent(at);
+        let container = parent.unwrap_or(at);
+        if let Some(p) = self
+            .plans
+            .borrow()
+            .get(&container)
+            .and_then(|m| m.get(names))
+        {
             return p.clone();
         }
-        let plan = Rc::new(self.decide(names, sample));
-        self.plans.borrow_mut().insert(names.to_vec(), plan.clone());
+        let rows: Vec<NodeId> = match parent {
+            Some(p) => self.probe_rows(p),
+            None if self.inner.row_columns(at).is_some() => self.probe_rows(at),
+            None => Vec::new(),
+        };
+        // the rows in order, then the asking node (a document's root
+        // is its own one sample)
+        let sample = |name: &str| {
+            rows.iter().chain(std::iter::once(&at)).find_map(|&r| {
+                match self.inner.property(r, name) {
+                    None | Some(Value::Null) => None,
+                    said => said,
+                }
+            })
+        };
+        let plan = Rc::new(self.decide(names, &sample));
+        self.plans
+            .borrow_mut()
+            .entry(container)
+            .or_default()
+            .insert(names.to_vec(), plan.clone());
         plan
+    }
+
+    /// The first rows of a container, through the source's own
+    /// selection when it has one, so a table is never listed to
+    /// learn what its cells are.
+    fn probe_rows(&self, container: NodeId) -> Vec<NodeId> {
+        let probe = StepPlan {
+            axis: crate::graph::adapter::PlanAxis::Child,
+            name: None,
+            conjuncts: Vec::new(),
+            traits: Vec::new(),
+            limit: Some(PROBE),
+            cap: Default::default(),
+            order: None,
+        };
+        match self.inner.select(container, &probe) {
+            Some(sel) => sel.nodes.iter().take(PROBE).map(|(n, _)| *n).collect(),
+            None => self
+                .inner
+                .children(container)
+                .into_iter()
+                .take(PROBE)
+                .collect(),
+        }
     }
 
     /// Whether the deciding cell admits the reading: a number,
@@ -1029,11 +1106,13 @@ impl<A: AstAdapter> AutoUnits<A> {
         if !skipped.is_empty() {
             msg.push_str(&format!("; skipped: {}", skipped.join(", ")));
         }
-        crate::value::ambient::record_diagnostic(Diagnostic::info(
-            "AUTOUNITS",
-            self.target.clone(),
-            msg,
-        ));
+        if self.told.borrow_mut().insert(msg.clone()) {
+            crate::value::ambient::record_diagnostic(Diagnostic::info(
+                "AUTOUNITS",
+                self.target.clone(),
+                msg,
+            ));
+        }
         plan
     }
 
@@ -1062,7 +1141,7 @@ impl<A: AstAdapter> AutoUnits<A> {
         let names = shaped
             .clone()
             .unwrap_or_else(|| self.inner.property_names(node));
-        let plan = self.plan_for(&names, &|n| self.inner.property(node, n));
+        let plan = self.plan_for(node, &names);
         if let (Some(p), Some(_)) = (parent, shaped) {
             self.by_parent.borrow_mut().insert(p, plan.clone());
         }
@@ -1087,7 +1166,7 @@ impl<A: AstAdapter> AutoUnits<A> {
 
     /// The plan for a header seen through one of its rows.
     fn plan_for_row(&self, cols: &[String], row: NodeId) -> Rc<Plan> {
-        self.plan_for(cols, &|n| self.inner.property(row, n))
+        self.plan_for(row, cols)
     }
 
     /// The locator of `node` with a renamed member spelled by its new
@@ -1175,6 +1254,7 @@ impl<A: AstAdapter> AutoUnits<A> {
                 .plans
                 .borrow()
                 .values()
+                .flat_map(HashMap::values)
                 .any(|p| p.by_new.contains_key(name) || p.by_source.contains_key(name))
         {
             return true;
@@ -1182,13 +1262,19 @@ impl<A: AstAdapter> AutoUnits<A> {
         if plan.conjuncts.is_empty() && plan.order.is_none() {
             return false;
         }
-        self.plans.borrow().values().any(|p| p.touches(plan))
+        self.plans
+            .borrow()
+            .values()
+            .flat_map(HashMap::values)
+            .any(|p| p.touches(plan))
     }
 }
 
 impl<A: AstAdapter> AstAdapter for AutoUnits<A> {
+    // (`surface` is left at the default, open: the convention renames
+    // the properties, and the inner names would warn of the new ones)
     crate::forward_ast_adapter!(inner; except property, properties, property_names,
-        row_columns, row_text, prefetch_properties, select, select_plan, estimate, count,
+        row_columns, surface, row_text, prefetch_properties, select, select_plan, estimate, count,
         index_lookup, property_withheld, reference_properties, resolve,
         name, children_named, answers_to, default_value, descendants_named, descendants_where);
 
@@ -1421,6 +1507,7 @@ impl<A: AstAdapter> AstAdapter for AutoUnits<A> {
             .plans
             .borrow()
             .values()
+            .flat_map(HashMap::values)
             .any(|p| p.by_new.contains_key(property) || p.by_source.contains_key(property));
         if converted {
             return None;
@@ -1647,11 +1734,12 @@ mod tests {
         assert_eq!(v.to_string(), "2024-03-05T10:20:30Z");
         let d = plan.convert(Value::Str("2024-03-05T10:20:30Z".into()), &Reading::Date);
         assert_eq!(d.to_string(), "2024-03-05");
-        // epoch seconds, then milliseconds from 10^11 up
+        // epoch seconds, then milliseconds from 10^11 up: a point of
+        // the timeline, `Z`
         let e = plan.convert(Value::Int(1_700_000_000), &Reading::Instant);
-        assert_eq!(e.to_string(), "2023-11-14T22:13:20");
+        assert_eq!(e.to_string(), "2023-11-14T22:13:20Z");
         let m = plan.convert(Value::Int(1_700_000_000_000), &Reading::Instant);
-        assert_eq!(m.to_string(), "2023-11-14T22:13:20");
+        assert_eq!(m.to_string(), "2023-11-14T22:13:20Z");
         assert_eq!(
             Reading::Instant.told("created_at", "created", Some(&Value::Int(1_700_000_000))),
             "created_at: instants (epoch seconds)"

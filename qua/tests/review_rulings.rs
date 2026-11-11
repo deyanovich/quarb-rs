@@ -405,11 +405,51 @@ fn the_ordinal_in_a_regula_folds_reducing_command_is_the_groups() {
         .collect::<Vec<_>>(),
         ordinals
     );
-    // a reducing context without a fold has no position
+    // The group's ordinal in every position alike (ruling
+    // 2026-11-10): the bare expression answered 1, 1, 1 and the
+    // aggregate push with a selector null.
+    let numbers: Vec<String> = (1..=groups).map(|i| i.to_string()).collect();
+    assert_eq!(
+        ok(&d, &["/books/* | .s(::shelf) @|{.s} ($ord)", "books.json"])
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
+        numbers
+    );
+    // each book is filed its shelf's ordinal: A, A, B
+    assert_eq!(
+        ok(
+            &d,
+            &["/books/* | .s(::shelf) | .i@{.s}($ord) | $.i", "books.json"]
+        ),
+        "1\n1\n2"
+    );
+    // A reducing command without a fold stands for the one group
+    // there is: 1, in the record, the bare expression and the
+    // aggregate push alike. (The record answered null.)
     assert_eq!(
         ok(&d, &["/books/* @| %(i = $ord)", "books.json"]),
-        "%(i = null)"
+        "%(i = 1)"
     );
+    assert_eq!(ok(&d, &["/books/* @| ($ord)", "books.json"]), "1");
+    assert_eq!(
+        ok(&d, &["/books/* | .i@($ord) | $.i", "books.json"]),
+        "1\n1\n1"
+    );
+    // a nested pipeline is its own ground: its reducing command
+    // stands for its own one group, not the enclosing fold's
+    assert_eq!(
+        ok(
+            &d,
+            &[
+                "/books/* | .s(::shelf) @|{.s} %(i = $ord; j = (@(7; 8; 9) @| %(k = $ord)))",
+                "books.json"
+            ]
+        ),
+        "%(i = 1; j = %(k = 1))\n%(i = 2; j = %(k = 1))"
+    );
+    // the thread's own position is what a row-wise command reads
+    assert_eq!(ok(&d, &["/books/* | ($ord)", "books.json"]), "1\n2\n3");
 }
 
 #[test]
@@ -588,7 +628,12 @@ fn the_edge_carries_one_label() {
     let m = ["--model", "net.model"];
     // an edge is one element with one label (spec: the edge model,
     // ruling 2026-11-07): `$-:label` is that label, what bare `$-`
-    // answers; a reference reached under two labels is two edges
+    // answers; a reference reached under two labels is two edges.
+    // The label of a resolution's edge is the reference label, the
+    // property's name without its `_id` (draft.186, and the
+    // resolution's formalia since 2026-11-10): the edge read after
+    // the step said the full name, which its own predicate did not
+    // match (the review's graph T1)
     assert_eq!(
         ok(
             &d,
@@ -598,14 +643,28 @@ fn the_edge_carries_one_label() {
             ]
             .concat()
         ),
-        "to_id"
+        "to"
     );
     assert_eq!(
         ok(
             &d,
             &[&m[..], &["/hops/*[::id = 1] | ::to_id--> | $-", "net.db"]].concat()
         ),
-        "to_id"
+        "to"
+    );
+    assert_eq!(
+        ok(
+            &d,
+            &[
+                &m[..],
+                &[
+                    "/hops/*[::id = 1] | ::to_id-->[$- = \"to\"] @| count",
+                    "net.db"
+                ]
+            ]
+            .concat()
+        ),
+        "1"
     );
     let e = refused(&d, &["/hops/*[::id = 1] | ::to_id--> | $-:depth", "net.db"]);
     assert!(
@@ -628,9 +687,52 @@ fn an_uncarried_locale_is_refused_naming_the_carried_ones() {
         "{e}"
     );
     assert_eq!(ok(&d, &[r#"= "1,5" | number(de)"#]), "1.5");
-    let e = refused(&d, &[r#"= "2024-01-01" | datetime(xx)"#]);
-    assert!(e.contains("datetime: no tables for locale \"xx\""), "{e}");
-    assert_eq!(ok(&d, &[r#"= "2024-01-01" | datetime(ru)"#]), "2024-01-01");
+}
+
+/// Ruling 2026-11-10: `datetime` takes no operand (a locale named
+/// there read nothing), and the refusal points at `strptime`.
+#[test]
+fn datetime_takes_no_operand() {
+    let d = fixture("datetime-operand");
+    assert_eq!(ok(&d, &[r#"= "2024-01-01" | datetime"#]), "2024-01-01");
+    for q in [
+        r#"= "2024-01-01" | datetime(ru)"#,
+        r#"= "2024-01-01" | datetime(xx)"#,
+        r#"= datetime("2024-01-01"; ru)"#,
+    ] {
+        let e = refused(&d, &[q]);
+        assert!(
+            e.contains("'datetime' takes no operand") && e.contains("strptime(fmt; LOCALE)"),
+            "{q}: {e}"
+        );
+    }
+    // the parser that reads a locale's words still does
+    assert_eq!(
+        ok(&d, &[r#"= "15 февраля 2024" | strptime("%d %B %Y"; ru)"#]),
+        "2024-02-15"
+    );
+}
+
+/// Ruling 2026-11-10: `isoformat` prints the `Z`, for every instant.
+#[test]
+fn isoformat_prints_the_z() {
+    let d = fixture("isoformat-z");
+    assert_eq!(
+        ok(&d, &["= 2024-02-15T10:00:00+02:00 | isoformat"]),
+        "2024-02-15T08:00:00Z"
+    );
+    assert_eq!(
+        ok(&d, &["= 2024-02-15T10:00:00 | isoformat"]),
+        "2024-02-15T10:00:00Z"
+    );
+    // the text reads back as the same instant
+    assert_eq!(
+        ok(
+            &d,
+            &["= 2024-02-15T10:00:00+02:00 | isoformat | datetime | epoch"]
+        ),
+        ok(&d, &["= 2024-02-15T10:00:00+02:00 | epoch"])
+    );
 }
 
 #[test]
@@ -693,4 +795,215 @@ fn a_sum_of_integer_looking_text_is_an_integer() {
     assert_eq!(ok(&d, &["/row::n @| avg", "fares.csv"]), "1020.0");
     std::fs::write(d.join("mixed.csv"), "n\n1.5\n2\n").unwrap();
     assert_eq!(ok(&d, &["/row::n @| sum", "mixed.csv"]), "3.5");
+}
+
+/// Ruling 2026-11-10: a null key matches nothing in a join
+/// condition, whatever the comparison; `=` is unchanged elsewhere.
+#[test]
+fn a_null_key_matches_nothing_in_a_join_condition() {
+    let d = fixture("join-null-key");
+    std::fs::write(
+        d.join("shop.json"),
+        r#"{"orders": [
+              {"id": 1, "customer_email": "ada@example.org", "phone": "111"},
+              {"id": 2, "customer_email": null, "phone": "222"},
+              {"id": 3, "phone": null},
+              {"id": 4, "customer_email": "nobody@example.org", "phone": "333"}],
+            "customers": [
+              {"name": "Ada", "email": "ada@example.org", "phone": "111"},
+              {"name": "Babbage", "email": null, "phone": "222", "vip": true},
+              {"name": "Carroll", "phone": null}]}"#,
+    )
+    .unwrap();
+    // order:customer pairs, one per line of the answer
+    let pairs = |on: &str, join: &str| {
+        ok(
+            &d,
+            &[
+                &format!(r#"/orders/* {join} /customers/*{on} | "${{::id}}:${{$$1::name}}""#),
+                "shop.json",
+            ],
+        )
+        .replace('\n', " ")
+    };
+    // two absent keys do not pair: orders 2 and 3 find no customer
+    assert_eq!(pairs("[::email = $$0::customer_email]", "<=>"), "1:Ada");
+    // the outer join keeps the driver, its slot null
+    assert_eq!(
+        pairs("[::email = $$0::customer_email]", "<=>?"),
+        "1:Ada 2: 3: 4:"
+    );
+    // every operator: `!=` does not pair an absent key with every node
+    assert_eq!(pairs("[::email != $$0::customer_email]", "<=>"), "4:Ada");
+    // unknown passes through a negation
+    assert_eq!(pairs("[!(::email = $$0::customer_email)]", "<=>"), "4:Ada");
+    // and yields to a true alternative: order 2 pairs by its phone
+    assert_eq!(
+        pairs(
+            "[::email = $$0::customer_email || ::phone = $$0::phone]",
+            "<=>"
+        ),
+        "1:Ada 2:Babbage"
+    );
+    // a comparison that reads one side alone keeps today's `=`:
+    // `::vip = null` holds for the customers with no such property
+    assert_eq!(
+        pairs("[::phone = $$0::phone && ::vip = null]", "<=>"),
+        "1:Ada"
+    );
+    // so does a plain predicate of the joined expression
+    assert_eq!(
+        pairs("[::email = null][::phone = $$0::phone]", "<=>"),
+        "2:Babbage"
+    );
+    // and `=` outside a join condition
+    assert_eq!(
+        ok(
+            &d,
+            &["/orders/*[::customer_email = null] | ::id", "shop.json"]
+        )
+        .replace('\n', " "),
+        "2 3"
+    );
+}
+
+/// A bare `null` in a row of a matrix literal is the missing cell,
+/// not the text "null" (lang's finding, 2026-11-10): the column keeps
+/// its type, as in the positional-record spelling of the same table.
+#[test]
+fn a_bare_null_in_a_matrix_row_is_the_null() {
+    let d = fixture("matrix-null");
+    assert_eq!(
+        ok(&d, &["= #(@(1; null); @(3; 4)) | header"]),
+        "@(:1<*; int>; :2<*; int>)"
+    );
+    assert_eq!(ok(&d, &["= #(@(1; null); @(3; 4)) | $_[1; 2]"]), "null");
+    assert_eq!(
+        ok(&d, &["= #(@(1; 2); @(3; null)) | header"]),
+        ok(&d, &["= #(%(1; 2); %(3; null)) | header"])
+    );
+    // a header of names is untouched: the record rows carry the null
+    assert_eq!(
+        ok(&d, &[r#"= #(@(name; age); %("Braund"; null)) | $_[1; 2]"#]),
+        "null"
+    );
+}
+
+/// `--table`, an alias of `--pretty` through 0.37, is refused with
+/// the pointer.
+#[test]
+fn the_table_flag_is_retired() {
+    let d = fixture("table-flag");
+    let e = refused(&d, &["--table", "= 1"]);
+    assert!(
+        e.contains("'--table' is retired") && e.contains("--pretty"),
+        "{e}"
+    );
+}
+
+fn review_items(tag: &str) -> PathBuf {
+    let d = fixture(tag);
+    std::fs::write(
+        d.join("items.json"),
+        r#"{"items": [{"n": "x12", "k": null}, {"n": "y7", "k": "a"}, {"n": "zz", "k": null}],
+            "keys": [{"c": null, "v": "N"}, {"c": "a", "v": "A"}]}"#,
+    )
+    .unwrap();
+    d
+}
+
+/// Ruling 2026-11-10: a pattern arm of the switch binds its
+/// groups for its own result, and for nothing else.
+#[test]
+fn a_pattern_arm_reads_its_own_captures() {
+    let d = review_items("arm-captures");
+    assert_eq!(
+        ok(
+            &d,
+            &[
+                r#"/items/* | (::n ?= (/x(\d+)/) ? $1 : (/y(\d+)/) ? "y" ++ $1 : "no")"#,
+                "items.json"
+            ]
+        ),
+        "12\ny7\nno"
+    );
+    // the thread's own captures stand in the else and after the
+    // conditional: the filter's group for y7, the arm's for x12
+    assert_eq!(
+        ok(
+            &d,
+            &[
+                r#"/items/* | [::n == (/(\w)\d/)] | (::n ?= (/x(\d+)/) ? $1 : $1) ++ "/" ++ $1"#,
+                "items.json"
+            ]
+        ),
+        "12/x\ny/y"
+    );
+}
+
+/// The value match `=>` pairs no null key with a null cell (spec:
+/// Value Match; the join's condition got the same rule in 520b7542).
+#[test]
+fn a_null_key_matches_nothing_in_a_value_match() {
+    let d = review_items("value-match-null");
+    assert_eq!(
+        ok(&d, &["/items/*::k=>(/keys/*::c) | ::v", "items.json"]),
+        "A"
+    );
+}
+
+/// Ruling 2026-11-10: attached regulae agree by the value equality
+/// of `=`, not by the value's structure.
+#[test]
+fn attached_regulae_agree_as_equals_compares() {
+    let d = review_items("attached-equal");
+    let attach = |values: &str| {
+        qua(
+            &d,
+            &[
+                &format!(
+                    "/items/* | .i(:index) | ^/keys/*[1] | .:t(($.i = 1 ? {values})) | :.t @| count"
+                ),
+                "items.json",
+            ],
+        )
+    };
+    for values in [
+        "1 : 1.0",
+        "1_km : 1000_m",
+        "2024-02-15T10:00:00+02:00 : 2024-02-15T08:00:00Z",
+    ] {
+        let (success, out, err) = attach(values);
+        assert!(success && out == "3", "{values}: {out} {err}");
+    }
+    let (success, _, err) = attach("1 : 2");
+    assert!(
+        !success && err.contains("attach differing values under 't' (1 and 2)"),
+        "{err}"
+    );
+}
+
+/// Ruling 2026-11-10: a double-quoted string has four escapes, and
+/// the backslash before a backtick is no longer one. The printer
+/// escapes the rounded hole's opener of today, `(_`.
+#[test]
+fn four_escapes_in_a_double_quoted_string() {
+    let d = fixture("escapes");
+    assert_eq!(ok(&d, &[r#"= "a\`b\$c\(d\\e\"f""#]), r#"a\`b$c(d\e"f"#);
+    assert_eq!(ok(&d, &[r#"= "a\nb""#]), r"a\nb");
+    assert_eq!(ok(&d, &["= @('n(_1 + 1)')"]), r#"@("n\(_1 + 1)")"#);
+    assert_eq!(ok(&d, &[r#"= @("n\(_1 + 1)")"#]), r#"@("n\(_1 + 1)")"#);
+}
+
+/// The strict expansion refuses a null (and splices an empty text):
+/// its refusal says so.
+#[test]
+fn the_strict_expansion_refuses_a_null() {
+    let d = fixture("strict-null");
+    let e = refused(&d, &[r#"= "${null:?}""#]);
+    assert!(
+        e.contains("the strict expansion '${null:?}' is null"),
+        "{e}"
+    );
+    assert_eq!(ok(&d, &[r#"= "a${"":?}b""#]), "ab");
 }

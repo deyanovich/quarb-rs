@@ -644,10 +644,10 @@ pub(crate) fn eval_query_caps_outer(
         None
     };
     if prefix.is_some() {
-        crate::pipeline::with_run(|s| {
-            s.prefix_limit = prefix;
-            s.walk_captures.clear();
-        });
+        crate::pipeline::with_run(|s| s.prefix_limit = prefix);
+    }
+    if outer.is_none() && base.contexts.is_empty() {
+        crate::pipeline::with_run(|s| s.walk_captures.clear());
     }
     let _clear = PrefixClear(prefix.is_some());
     let first_new = base.contexts.len();
@@ -673,13 +673,22 @@ pub(crate) fn eval_query_caps_outer(
         witnesses: Default::default(),
         join_keys: Default::default(),
     };
-    // A collapsing reducer or a graph table right after the branches
-    // reads nodes alone: the walk may expand by node where that is
-    // exact (spec: Expansion paths, Acyclic links).
-    let node_level = matches!(
-        query.pipeline.first(),
-        Some(Command::Agg(call)) if matches!(call.name.as_str(), "collapse" | "nodes" | "edges")
-    );
+    // A graph table right after the branches reads nodes alone: the
+    // walk may expand by node where that is exact (spec: Expansion
+    // paths, Acyclic links). So does a bare `collapse` where nothing
+    // after it reads the edges it gathers. A node reached by three
+    // edges collapses to one thread whose `@-` has three elements,
+    // and `collapse(-e)` is one thread per node and arriving edge:
+    // either needs every arrival, and the walk by node kept one (two
+    // rows from S to T collapsed to `@(1)` where the exact walk
+    // gathers `@(1; 2)`).
+    let node_level = match query.pipeline.first() {
+        Some(Command::Agg(call)) if matches!(call.name.as_str(), "nodes" | "edges") => true,
+        Some(Command::Agg(call)) if call.name == "collapse" => {
+            call.args.is_empty() && !crate::graph::steps::commands_read_edges(&query.pipeline[1..])
+        }
+        _ => false,
+    };
     let mut caps = union_branches(&query.branches, adapter, start, &trace, outer, node_level);
     // The expression head's thread opens with the topic the run was
     // given (`qc` reading its pipe): the top-level query only, and
@@ -710,7 +719,7 @@ pub(crate) fn eval_query_caps_outer(
     // Modes): a projected branch in value mode, plain navigation in
     // navigation mode; the join's tail continues where the head left
     let start = if query.branches.iter().any(|b| b.projection.is_some()) {
-        crate::syntax::parser::PipeMode::Scalar
+        crate::syntax::parser::PipeMode::Value
     } else {
         crate::syntax::parser::PipeMode::Nav
     };
@@ -770,7 +779,9 @@ pub(crate) fn split_on(entry: &Query) -> (Query, Vec<PredExpr>) {
 /// The join gate: for each driving capsa, search the joined
 /// contexts for a tuple satisfying every ON clause — entry `i`'s
 /// predicates evaluated against entry `i`'s candidate node, with
-/// the driver reachable as `$$…` and earlier entries as `$*k`. The
+/// the driver reachable as `$$…` and earlier entries as `$*k`. A
+/// key comparison with a null on either side does not hold
+/// (ruling 2026-11-10, `eval_join_condition`). The
 /// first satisfying tuple (document order) is kept as the witness;
 /// an outer entry (`<=>?`) offers a null binding after its real
 /// candidates are exhausted, its own ON vacuous under it. A capsa
@@ -885,7 +896,16 @@ pub(crate) fn join_candidates(
         ..Scope::at(driver.ext)
     };
     let at = driver.view.node.unwrap_or_else(|| adapter.root());
-    let wanted = eval_operand_at(adapter, at, driver_side, trace, bound, scope);
+    // A null key matches nothing (ruling 2026-11-10): the equality
+    // is a conjunct of the condition, so a driver with no key has no
+    // candidate here (an outer entry then takes its null binding).
+    let wanted: Vec<Value> = eval_operand_at(adapter, at, driver_side, trace, bound, scope)
+        .into_iter()
+        .filter(|v| !matches!(v, Value::Null))
+        .collect();
+    if wanted.is_empty() {
+        return Vec::new();
+    }
     let keys: Option<Vec<String>> = wanted.iter().map(Value::equality_key).collect();
     let Some(keys) = keys else {
         return context.clone();
@@ -970,7 +990,7 @@ pub(crate) fn bind_entries(
         };
         let ok = on_preds[i]
             .iter()
-            .all(|e| eval_pred_expr_at(adapter, cand, e, trace, bound, scope))
+            .all(|e| eval_join_condition_at(adapter, cand, e, trace, bound, scope))
             && bind_entries(adapter, driver, on_preds, trace, first_new, bound);
         if ok {
             return true;
@@ -1030,7 +1050,6 @@ pub(crate) fn union_branches(
             ) {
                 let walked = crate::pipeline::with_run(|s| s.walk_captures.get(&ext.node).cloned());
                 caps.push(Capsa {
-                    window: None,
                     prov: if branch.projection.is_some() {
                         Prov::at(ext.node.into(), command_now())
                     } else {

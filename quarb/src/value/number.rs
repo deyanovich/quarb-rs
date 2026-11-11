@@ -45,6 +45,18 @@ pub fn read(text: &str, decimal: Decimal) -> Option<Value> {
     if let Ok(n) = canonical.parse::<i64>() {
         return Some(Value::Int(n));
     }
+    // Text of integer form past the integer bound has no numeric
+    // reading and stays text (ruling 2026-11-10): as a float it lost
+    // its last digits, and two identifiers of twenty digits that
+    // differ in the last one compared equal. A literal in a query is
+    // the parser's, and stays the float.
+    if canonical
+        .bytes()
+        .enumerate()
+        .all(|(i, b)| b.is_ascii_digit() || (i == 0 && (b == b'-' || b == b'+')))
+    {
+        return None;
+    }
     canonical
         .parse::<f64>()
         .ok()

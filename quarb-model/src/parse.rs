@@ -65,6 +65,58 @@ pub struct Model {
     pub unit_files: Vec<std::path::PathBuf>,
 }
 
+impl Model {
+    /// Take `other`'s statements after this model's own: what a later
+    /// model cell of a notebook adds to the cells before it. Every
+    /// field is named, by a destructuring a new field breaks until it
+    /// is listed here: the notebook merged eleven fields by hand, and
+    /// the three statements added since (`property`, `graph`,
+    /// `weight-potential`) were lost from every cell after the first.
+    pub fn absorb(&mut self, other: &Model) {
+        let Model {
+            mounts,
+            nodes,
+            refs,
+            rels,
+            edges,
+            defs_text,
+            aliases,
+            traits,
+            indexes,
+            graphs,
+            potentials,
+            properties,
+            trees,
+            units,
+            unit_files,
+        } = other;
+        // a later cell's constructors see the traits declared before
+        // them in their own cell, after this model's so far
+        let traits_so_far = self.traits.len();
+        self.mounts.extend(mounts.iter().cloned());
+        self.nodes.extend(nodes.iter().cloned().map(|mut n| {
+            n.traits_before += traits_so_far;
+            n
+        }));
+        self.refs.extend(refs.iter().cloned());
+        self.rels.extend(rels.iter().cloned());
+        self.edges.extend(edges.iter().cloned());
+        self.aliases.extend(aliases.iter().cloned());
+        self.traits.extend(traits.iter().cloned());
+        self.indexes.extend(indexes.iter().cloned());
+        self.graphs.extend(graphs.iter().cloned());
+        self.potentials.extend(potentials.iter().cloned());
+        self.properties.extend(properties.iter().cloned());
+        self.trees.extend(trees.iter().cloned());
+        self.units.extend(units.iter().cloned());
+        self.unit_files.extend(unit_files.iter().cloned());
+        if !defs_text.trim().is_empty() {
+            self.defs_text.push('\n');
+            self.defs_text.push_str(defs_text);
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnitDecl {
     /// The spellings, the first primary.
@@ -408,11 +460,34 @@ pub enum Label {
     Property(String),
 }
 
+/// A name as an `as` clause writes it (ruling 2026-11-10): quotes
+/// are delimiters, so `as "e"` declares the label `e`, and a quote
+/// or a backslash inside a quoted name is escaped with a backslash
+/// (`as "say \"hi\""`). The quotes were kept in the label: the edges
+/// showed `"e"`, and `->e` matched nothing.
+fn unquoted_name(text: &str) -> String {
+    let t = text.trim();
+    let quote = match t.chars().next() {
+        Some(q @ ('"' | '\'')) if t.len() >= 2 && t.ends_with(q) => q,
+        _ => return t.to_string(),
+    };
+    let inner = &t[quote.len_utf8()..t.len() - quote.len_utf8()];
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => out.push(chars.next().unwrap_or('\\')),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 impl Label {
     fn parse(text: &str) -> Label {
         match text.strip_prefix("::") {
             Some(p) => Label::Property(p.trim().to_string()),
-            None => Label::Name(text.to_string()),
+            None => Label::Name(unquoted_name(text)),
         }
     }
 
@@ -754,6 +829,28 @@ fn statements(text: &str) -> Vec<String> {
         }
     }
     if start < b.len() {
+        // What is left was never closed: a bracket or a brace that
+        // nothing balances kept every `;` after it inside. The
+        // statement that opened it ends where its line does, at the
+        // `;` that closes a line: the terminator is the statement's,
+        // not the query's (the refusal quoted it inside the query,
+        // and took the statements after it with it), and what
+        // follows is read as statements again.
+        if depth > 0 {
+            let ends_line = |k: usize| {
+                b[k] == ';'
+                    && b[k + 1..]
+                        .iter()
+                        .take_while(|c| **c != '\n')
+                        .all(|c| c.is_whitespace())
+            };
+            if let Some(k) = (start..b.len()).find(|&k| ends_line(k)) {
+                out.push(b[start..k].iter().collect());
+                let rest: String = b[k + 1..].iter().collect();
+                out.extend(statements(&rest));
+                return out;
+            }
+        }
         let tail: String = b[start..].iter().collect();
         if !tail.trim().is_empty() {
             out.push(tail);
@@ -892,9 +989,14 @@ fn parse_property(rest: &str, stmt: &str) -> Result<PropertyDecl, String> {
                         PropertyTyping::Type(ct)
                     }
                     _ => {
+                        // an offset's shape that names none (`<+19>`)
+                        if let Some(Err(why)) = quarb::offset_word(t) {
+                            return Err(format!("property: '::{field}': {why}: '{stmt}'"));
+                        }
                         return Err(format!(
                             "property: '::{field}' names no type between '<' and '>': a unit \
-                             with its underscore ('<_km>') or a type word ({}): '{stmt}'",
+                             with its underscore ('<_km>'), an offset from UTC ('<+02:00>', \
+                             '<Z>') or a type word ({}): '{stmt}'",
                             quarb::ColumnType::words().join(", ")
                         ));
                     }
@@ -1002,6 +1104,39 @@ fn split_container_role(path: &str) -> Option<(String, String)> {
     Some((container.to_string(), role.to_string()))
 }
 
+/// Whether `cond` holds a bare `$$` outside a string: one followed
+/// by none of the things that make it an operand (`$$0`, `$$N`,
+/// `$$_`, `$$__`, `$$.name`).
+fn has_bare_position(cond: &str) -> bool {
+    let b: Vec<char> = cond.chars().collect();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            q @ ('\'' | '"') => {
+                i += 1;
+                while i < b.len() && b[i] != q {
+                    if b[i] == '\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            '$' if b.get(i + 1) == Some(&'$') => {
+                if !b
+                    .get(i + 2)
+                    .is_some_and(|c| c.is_ascii_digit() || *c == '_' || *c == '.')
+                {
+                    return true;
+                }
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+    false
+}
+
 /// Split a trailing bracket group off a path: `/d/deploy [::at > $$]`
 /// -> (`/d/deploy`, `[::at > $$]`). Scans from the end so a bracket
 /// inside an earlier predicate stays with the path.
@@ -1099,6 +1234,30 @@ fn split_arrow(s: &str) -> Option<(String, String)> {
 /// Parse model-file text. A `use FILE;` statement needs a location
 /// to resolve against, so it is refused here; [`parse_model_file`]
 /// is the entry point for a model on disk.
+/// The keywords that open a model statement, every one the parser
+/// below reads. The one list: the front ends that must tell a model
+/// cell from a query (quai, the playground) read it from here, and
+/// the refusal of an unknown statement names it.
+pub const STATEMENTS: [&str; 17] = [
+    "node",
+    "ref",
+    "rel",
+    "edge",
+    "mount",
+    "alias",
+    "trait",
+    "index",
+    "graph",
+    "tree",
+    "unit",
+    "units",
+    "use",
+    "weight-potential",
+    "property",
+    "def",
+    "macro",
+];
+
 pub fn parse_model(text: &str) -> Result<Model, String> {
     parse_model_in(text, None, &mut Vec::new(), &mut Vec::new())
 }
@@ -1241,6 +1400,10 @@ fn parse_model_in(
                 model.edges.extend(sub.edges);
                 model.aliases.extend(sub.aliases);
                 model.indexes.extend(sub.indexes);
+                // The used file's `graph` declarations stay out
+                // (spec: Model Files, Composition: its statements
+                // join, "not its graph declarations"): a graph is
+                // declared by the model that is opened.
                 model.units.extend(sub.units);
                 for f in sub.unit_files {
                     if model.unit_files.contains(&f) {
@@ -1311,6 +1474,16 @@ fn parse_model_in(
                 })?;
                 if source.is_empty() {
                     return Err(format!("rel needs a source path: '{stmt}'"));
+                }
+                // The condition is evaluated per source with `$$0`
+                // bound; one that does not lex answers no pair, so a
+                // bare `$$` (the retired spelling of the position)
+                // declared a relation that silently held nowhere.
+                if has_bare_position(&cond) {
+                    return Err(format!(
+                        "rel: a bare '$$' is no operand: the relation's source is '$$0' \
+                         ('$$0::id'), the candidate the condition tests '$$_': '{stmt}'"
+                    ));
                 }
                 model.rels.push(RelDecl {
                     source,
@@ -1558,9 +1731,8 @@ fn parse_model_in(
             }
             other => {
                 return Err(format!(
-                    "unknown model statement '{other}' \
-                     (expected node/ref/rel/edge/mount/alias/trait/index/graph/tree/unit/use/\
-                     weight-potential/property/def/macro)"
+                    "unknown model statement '{other}' (expected {})",
+                    STATEMENTS.join("/")
                 ));
             }
         }
@@ -1611,6 +1783,25 @@ mod tests {
     }
 
     use super::*;
+
+    /// The one list of statement keywords is the parser's: no word
+    /// of it is refused as an unknown statement (the front ends tell
+    /// a model cell from a query by this list).
+    #[test]
+    fn every_statement_keyword_is_read() {
+        for kw in STATEMENTS {
+            let err = parse_model(&format!("{kw} x;")).err().unwrap_or_default();
+            assert!(
+                !err.contains("unknown model statement"),
+                "'{kw}' is listed and the parser does not know it: {err}"
+            );
+        }
+        let err = parse_model("frobnicate x;").unwrap_err();
+        assert!(
+            err.contains("unknown model statement") && err.contains("units"),
+            "{err}"
+        );
+    }
 
     #[test]
     fn a_ref_takes_as_name_then_acyclic_and_nothing_else() {

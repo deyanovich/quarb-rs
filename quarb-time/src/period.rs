@@ -168,11 +168,15 @@ impl Period {
     }
 
     /// An instant at the grain it prints at: the day for a midnight
-    /// instant with no offset, the second otherwise.
+    /// instant with no offset, the second otherwise. A period is of
+    /// the wall clock, so an instant written with an offset gives
+    /// the period it reads at there (ruling 2026-11-10: the
+    /// components in the written offset): 23:30 at -05:00 is in that
+    /// day, not in the next one of UTC.
     pub fn of_instant(secs: i64, nanos: u32, offset_min: Option<i16>) -> Period {
         let midnight = secs.rem_euclid(86400) == 0 && nanos == 0 && offset_min.is_none();
         Period {
-            start: secs,
+            start: secs.saturating_add(i64::from(offset_min.unwrap_or(0)) * 60),
             grain: if midnight { Grain::Day } else { Grain::Second },
             calendar: Default::default(),
         }

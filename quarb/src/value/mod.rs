@@ -4,6 +4,8 @@
 //! AST holds are these values. No node, no arbor, no thread.
 mod space;
 pub use space::*;
+mod label;
+pub use label::*;
 mod words;
 pub(crate) use words::*;
 pub mod accents;

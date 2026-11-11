@@ -2,7 +2,7 @@
 //!
 //! `| /path` is a branch in command position — the pipeline spelling
 //! of a path continuation. Legal only in navigation mode; a push
-//! returns a scalar-mode thread to navigation mode (spec:
+//! returns a value-mode thread to navigation mode (spec:
 //! Execution Modes).
 
 use quarb::Defs;
@@ -96,5 +96,5 @@ fn context_pipes_refuse_hops() {
     let e = refuse("/a @| /kids/*");
     assert!(e.contains("per-thread"), "unexpected message: {e}");
     let e = refuse("/a | ... $| /kids/*");
-    assert!(e.contains("map pipe"), "unexpected message: {e}");
+    assert!(e.contains("iteration pipe"), "unexpected message: {e}");
 }

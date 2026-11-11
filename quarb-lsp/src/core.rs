@@ -29,8 +29,10 @@ pub struct Diag {
 #[derive(Debug, Clone, Serialize)]
 pub struct Item {
     pub label: String,
-    /// "function" | "aggregate" | "register" | "child" |
-    /// "property" | "trait"
+    /// "command" | "accessor" | "child" | "property" | "trait": the
+    /// word an editor shows beside the label (ruling 2026-11-10: what
+    /// stands after a pipe is a command, whichever pipe; a capsa
+    /// accessor is an accessor)
     pub kind: &'static str,
 }
 
@@ -117,9 +119,8 @@ pub fn completions(text: &str, line: u32, character: u32) -> Vec<Item> {
         .map(|c| Item {
             label: c.text,
             kind: match c.kind {
-                quarb::complete::Kind::Function => "function",
-                quarb::complete::Kind::Aggregate => "aggregate",
-                quarb::complete::Kind::Register => "register",
+                quarb::complete::Kind::Command | quarb::complete::Kind::ContextCommand => "command",
+                quarb::complete::Kind::Accessor => "accessor",
                 quarb::complete::Kind::Child => "child",
                 quarb::complete::Kind::Property => "property",
                 quarb::complete::Kind::Trait => "trait",
@@ -160,6 +161,32 @@ mod tests {
     #[test]
     fn defs_files_pass_through() {
         assert!(diagnostics("node /people/person: /teams/*;").is_empty());
+    }
+
+    /// Ruling 2026-11-10: what stands after a pipe is a command,
+    /// whichever pipe, and a capsa accessor is an accessor; no item
+    /// says "function", "aggregate" or "register".
+    #[test]
+    fn completions_are_labelled_by_the_ruled_words() {
+        let kind_of = |text: &str, label: &str| {
+            completions(text, 0, text.len() as u32)
+                .into_iter()
+                .find(|i| i.label == label)
+                .map(|i| i.kind)
+        };
+        assert_eq!(kind_of("/a | up", "upper"), Some("command"));
+        assert_eq!(kind_of("/a @| co", "count"), Some("command"));
+        let all: Vec<&str> = ["/a | ", "/a @| ", "/a | $"]
+            .iter()
+            .flat_map(|t| completions(t, 0, t.len() as u32))
+            .map(|i| i.kind)
+            .collect();
+        assert!(all.contains(&"accessor"), "{all:?}");
+        assert!(
+            all.iter()
+                .all(|k| !matches!(*k, "function" | "aggregate" | "register")),
+            "{all:?}"
+        );
     }
 
     #[test]

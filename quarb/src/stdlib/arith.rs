@@ -227,12 +227,9 @@ pub(crate) fn quantital_arith(
             base: base.clone(),
             // the written magnitude of a computed quantity rounds to 15
             // significant digits (ruling 2026-11-09)
-            written: written.as_ref().map(|(v, u)| {
-                (
-                    crate::value::quantity::round_significant(v * k, 15),
-                    u.clone(),
-                )
-            }),
+            written: written
+                .as_ref()
+                .map(|(v, u)| (crate::value::quantity::settled(v * k), u.clone())),
         }
     };
     // Scaling factors stay numbers, as with durations.
@@ -275,10 +272,7 @@ pub(crate) fn quantital_arith(
                         None
                     } else {
                         Some((
-                            crate::value::quantity::round_significant(
-                                if mul { ma * mb } else { ma / mb },
-                                15,
-                            ),
+                            crate::value::quantity::settled(if mul { ma * mb } else { ma / mb }),
                             u,
                         ))
                     }
@@ -313,7 +307,11 @@ pub(crate) fn quantital_arith(
             ArithOp::Mul => Value::Float(a * b),
             ArithOp::Div if b == 0.0 => Value::Null,
             ArithOp::Div => Value::Float(a / b),
-            _ => Value::Null,
+            // the whole quotient and the remainder of the numbers
+            // they are (`12_% mod 5` is 0.12; it was a silent null)
+            ArithOp::IDiv | ArithOp::Mod if b == 0.0 => Value::Null,
+            ArithOp::IDiv | ArithOp::Mod => arith(op, &Value::Float(a), &Value::Float(b), scale),
+            ArithOp::MatMul => Value::Null,
         }
     };
     let dimless_rule = || -> Option<Value> {
@@ -396,6 +394,31 @@ pub(crate) fn quantital_arith(
     match op {
         ArithOp::Add | ArithOp::Sub => {
             let (Some((a, ba, ua)), Some((b, bb, ub))) = (lift(left), lift(right)) else {
+                // A number without a unit beside a dimensioned
+                // quantity is refused, as two unlike dimensions are
+                // (ruling 2026-11-10: `5_km + 5` answered null). A
+                // side with no reading at all, a null or a text that
+                // is no number, keeps the null that propagates. (A
+                // quantity of dimension one took the rule above.)
+                let (lifted, bare) = match (lift(left), lift(right)) {
+                    (Some(q), None) => (Some(q), right),
+                    (None, Some(q)) => (Some(q), left),
+                    _ => (None, right),
+                };
+                if let Some((_, base, _)) = lifted
+                    && bare.numeric_reading().is_some()
+                {
+                    crate::record_refusal(format!(
+                        "{} of a quantity and a number without a unit ({base} and a bare \
+                         number): arithmetic is not defined for them; give the number its \
+                         unit, or take the quantity's magnitude (| magnitude)",
+                        if matches!(op, ArithOp::Add) {
+                            "the sum"
+                        } else {
+                            "the difference"
+                        }
+                    ));
+                }
                 return Some(Value::Null);
             };
             // the refusal principle (ruling 2026-11-06): two quantities of
@@ -430,6 +453,107 @@ pub(crate) fn quantital_arith(
                 base: ba,
                 written,
             })
+        }
+        // The whole quotient and the remainder of a quantity by a
+        // bare number, in the unit the quantity is written in (ruling
+        // 2026-11-10): `10_km mod 3` is `1_km`, `10_km idiv 3` is
+        // `3_km`, as `10_km div 3` keeps the kilometre. They were a
+        // silent null.
+        ArithOp::IDiv | ArithOp::Mod => {
+            if let Quantity {
+                value,
+                base,
+                written,
+            } = left
+                && !typed(right)
+                && let Some(k) = right.numeric_reading()
+            {
+                if k.numeric() == Some(0.0) {
+                    return Some(Value::Null);
+                }
+                let m = written.as_ref().map_or(*value, |(m, _)| *m);
+                let Some(r) = arith(op, &Value::Float(m), &k, scale).numeric() else {
+                    return Some(Value::Null);
+                };
+                return Some(match written {
+                    Some((_, u)) => {
+                        // back into the base by the unit's own factor
+                        let in_base = match scale(u) {
+                            Some((f, _)) if m != 0.0 => r * f,
+                            _ if m != 0.0 => r * (value / m),
+                            _ => r,
+                        };
+                        Quantity {
+                            value: in_base,
+                            base: base.clone(),
+                            written: Some((r, u.clone())),
+                        }
+                    }
+                    None => Quantity {
+                        value: r,
+                        base: base.clone(),
+                        written: None,
+                    },
+                });
+            }
+            let word = if matches!(op, ArithOp::Mod) {
+                "mod"
+            } else {
+                "idiv"
+            };
+            // A quantity by a quantity of its own dimension (ruling
+            // 2026-11-10): how many times the one goes into the
+            // other, a number, as `div` answers; and what is left, in
+            // the unit the first is written in. `10_km mod 3_km` is
+            // `1_km`, `10_km idiv 3_km` is 3. Unlike dimensions are
+            // refused, as their sum is.
+            if typed(left)
+                && typed(right)
+                && let (Some((a, ba, ua)), Some((b, bb, _))) = (lift(left), lift(right))
+            {
+                if ba != bb {
+                    crate::record_refusal(format!(
+                        "'{word}' of quantities of unlike dimensions ({ba} and {bb}): \
+                         arithmetic is not defined for them; convert first"
+                    ));
+                    return Some(Value::Null);
+                }
+                if b == 0.0 {
+                    return Some(Value::Null);
+                }
+                // the whole quotient and the remainder of the base
+                // magnitudes, as the numbers' own `idiv` and `mod`
+                // answer them (toward zero: `-7_km idiv 3_km` is -2)
+                let of_bases = arith(op, &Value::Float(a), &Value::Float(b), scale);
+                if matches!(op, ArithOp::IDiv) {
+                    return Some(match of_bases {
+                        Value::Float(q) if q.fract() == 0.0 && q.abs() < 9.0e15 => {
+                            Value::Int(q as i64)
+                        }
+                        other => other,
+                    });
+                }
+                let Some(rest) = of_bases.numeric() else {
+                    return Some(Value::Null);
+                };
+                let written = ua.and_then(|u| {
+                    scale(&u).map(|(f, _)| (crate::value::quantity::unscale_by(rest, f), u))
+                });
+                return Some(Quantity {
+                    value: rest,
+                    base: ba,
+                    written,
+                });
+            }
+            // a number by a quantity has no ruling to compute by:
+            // refused, never null (the refusal principle, ruling
+            // 2026-11-06)
+            crate::record_refusal(format!(
+                "'{word}' takes a quantity by a bare number, answered in the quantity's unit \
+                 (10_km {word} 3), or by a quantity of its dimension (10_km {word} 3_km); a \
+                 number by a quantity is not defined"
+            ));
+            Some(Value::Null)
         }
         _ => Some(Value::Null),
     }
@@ -580,56 +704,42 @@ fn labeled_broadcast(
         ));
     }
     let k = t.index;
+    // the two indexes agree on a type, level by level, first
+    let pairs: Vec<(usize, usize)> = (0..k).map(|j| (j, j)).collect();
+    if let Some((ta, ua)) = crate::stdlib::agreed_keys(sym, t, u, &pairs)? {
+        return labeled_broadcast(op, &ta, &ua, scale);
+    }
     let w = t.width();
-    let label = |r: &Vec<Value>| -> Vec<Value> { r[..k].to_vec() };
-    let occurrences = |seen: &mut Vec<(Vec<Value>, usize)>, l: &Vec<Value>| -> usize {
-        match seen.iter_mut().find(|(x, _)| x == l) {
-            Some((_, n)) => {
-                *n += 1;
-                *n
+    // the rows of each side by (label, its n-th occurrence), the
+    // labels equal as values (spec: Indexed tables): the union in
+    // the order first met
+    let mut classes = crate::value::LabelIndex::new();
+    let mut slots: Vec<(usize, usize)> = Vec::new();
+    let mut labels: std::collections::HashMap<(usize, usize), Vec<Value>> =
+        std::collections::HashMap::new();
+    let mut side = |x: &crate::Table,
+                    slots: &mut Vec<(usize, usize)>|
+     -> std::collections::HashMap<(usize, usize), Vec<Value>> {
+        let mut seen = crate::value::Occurrences::new();
+        let mut rows = std::collections::HashMap::new();
+        for r in x.rows() {
+            let r = r.cells();
+            let slot = seen.next(&mut classes, &r[..k]);
+            if !labels.contains_key(&slot) {
+                labels.insert(slot, r[..k].to_vec());
+                slots.push(slot);
             }
-            None => {
-                seen.push((l.clone(), 1));
-                1
-            }
+            rows.insert(slot, r);
         }
+        rows
     };
-    let mut keys: Vec<(Vec<Value>, usize)> = Vec::new();
-    let mut seen = Vec::new();
-    let left: Vec<(Vec<Value>, usize, Vec<Value>)> = t
-        .rows()
-        .map(|r| {
-            let r = r.cells();
-            let l = label(&r);
-            let n = occurrences(&mut seen, &l);
-            keys.push((l.clone(), n));
-            (l, n, r)
-        })
-        .collect();
-    let mut seen = Vec::new();
-    let right: Vec<(Vec<Value>, usize, Vec<Value>)> = u
-        .rows()
-        .map(|r| {
-            let r = r.cells();
-            let l = label(&r);
-            let n = occurrences(&mut seen, &l);
-            if !keys.iter().any(|(x, m)| *x == l && *m == n) {
-                keys.push((l.clone(), n));
-            }
-            (l, n, r)
-        })
-        .collect();
-    let rows = keys
+    let left = side(t, &mut slots);
+    let right = side(u, &mut slots);
+    let rows = slots
         .iter()
-        .map(|(l, n)| {
-            let a = left
-                .iter()
-                .find(|(x, m, _)| x == l && m == n)
-                .map(|(_, _, r)| r);
-            let b = right
-                .iter()
-                .find(|(x, m, _)| x == l && m == n)
-                .map(|(_, _, r)| r);
+        .map(|slot| {
+            let (a, b) = (left.get(slot), right.get(slot));
+            let l = &labels[slot];
             let mut row = l.clone();
             for j in k..w {
                 row.push(match (a, b) {
@@ -835,7 +945,10 @@ pub(crate) fn broadcast(
                     Ok((k.clone(), v))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(Value::Record(fields.into()))
+            // the keys as the values they are, and the declarations
+            Ok(Value::Record(
+                f.with_values(fields.into_iter().map(|(_, v)| v).collect()),
+            ))
         }
         // Two records: the same field names, field by field.
         // Two records ALIGN BY KEY (spec: Structured Values, draft
@@ -843,9 +956,10 @@ pub(crate) fn broadcast(
         // (1 and "1" two keys), null where a side lacks one; the
         // keys kept typed as they are.
         (Value::Record(a), Value::Record(b)) => {
-            let mut keys: Vec<Value> = a.key_values();
-            for k in b.key_values() {
-                if !keys.contains(&k) {
+            let mut met = crate::value::LabelIndex::new();
+            let mut keys: Vec<Value> = Vec::new();
+            for k in a.key_values().into_iter().chain(b.key_values()) {
+                if met.intern(std::slice::from_ref(&k)).1 {
                     keys.push(k);
                 }
             }
@@ -886,26 +1000,28 @@ pub(crate) fn broadcast(
         }
         (Value::Record(f), s) | (s, Value::Record(f)) => {
             let scalar_left = !matches!(left, Value::Record(_));
+            // the keys as the values they are, and the declarations
             Ok(Value::Record(
-                f.iter()
-                    .map(|(k, cell)| {
-                        let v = if is_structure(cell) {
-                            if scalar_left {
-                                broadcast(op, s, cell, scale)?
+                f.with_values(
+                    f.iter()
+                        .map(|(_, cell)| {
+                            let v = if is_structure(cell) {
+                                if scalar_left {
+                                    broadcast(op, s, cell, scale)?
+                                } else {
+                                    broadcast(op, cell, s, scale)?
+                                }
+                            } else if !admits(cell) {
+                                cell.clone()
+                            } else if scalar_left {
+                                arith(op, s, cell, scale)
                             } else {
-                                broadcast(op, cell, s, scale)?
-                            }
-                        } else if !admits(cell) {
-                            cell.clone()
-                        } else if scalar_left {
-                            arith(op, s, cell, scale)
-                        } else {
-                            arith(op, cell, s, scale)
-                        };
-                        Ok::<_, String>((k.clone(), v))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-                    .into(),
+                                arith(op, cell, s, scale)
+                            };
+                            Ok::<_, String>(v)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                ),
             ))
         }
         (l, r) => Ok(arith(op, l, r, scale)),

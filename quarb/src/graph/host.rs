@@ -156,6 +156,22 @@ impl<A: AstAdapter> Host for A {
             note(n.into());
         }
         match projection {
+            // the property a path leads to is tested for presence:
+            // the hops asked above, the last read asks nothing
+            Some(p @ Projection::Property(Some(name))) => {
+                let mut found = false;
+                let holds = crate::value::ambient::with_presence(|| {
+                    nodes.iter().any(|&n| {
+                        let v = project(self, n, p);
+                        found |= !matches!(v, Value::Null);
+                        v.is_truthy()
+                    })
+                });
+                if found {
+                    crate::value::ambient::presence_found(name);
+                }
+                holds
+            }
             Some(p) => nodes.iter().any(|&n| project(self, n, p).is_truthy()),
             None => !nodes.is_empty(),
         }
@@ -381,20 +397,26 @@ impl<A: AstAdapter> Host for A {
             // marked node, registers and marks carried.
             let anchor_scope = c.scope(None, peers, outer);
             for from in anchor_nodes(self, &branch.anchor, c.ext.node, trace, &[], anchor_scope) {
-                for (ext, register) in navigate_paths(
-                    &branch.steps,
-                    self,
-                    from,
-                    trace,
-                    outer,
-                    // The thread's witness travels with the hop, so
-                    // step predicates on the way read `$*k` per
-                    // thread (the results carry it on, below).
-                    &c.ext.bindings,
-                    &c.register,
-                    false,
-                    c.ext.trail.clone(),
-                ) {
+                // the thread's captures are in reach of the predicates
+                // on its way, as its regulae are
+                let walked =
+                    crate::pipeline::with_enclosing_captures(&c.captures, &c.named, || {
+                        navigate_paths(
+                            &branch.steps,
+                            self,
+                            from,
+                            trace,
+                            outer,
+                            // The thread's witness travels with the hop, so
+                            // step predicates on the way read `$*k` per
+                            // thread (the results carry it on, below).
+                            &c.ext.bindings,
+                            &c.register,
+                            false,
+                            c.ext.trail.clone(),
+                        )
+                    });
+                for (ext, register) in walked {
                     let topic = branch
                         .projection
                         .as_ref()
@@ -414,7 +436,6 @@ impl<A: AstAdapter> Host for A {
                         _ => ext.trail.clone(),
                     };
                     out.push(Capsa {
-                        window: None,
                         prov: if branch.projection.is_some() {
                             Prov::at(ext.node.into(), command_now())
                         } else {
@@ -467,6 +488,9 @@ impl<A: AstAdapter> Host for A {
         opts: &crate::graph::tabula::ReadOptions,
     ) -> Result<Table, String> {
         crate::graph::tabula::node_table_with(self, ext.node, opts)
+    }
+    fn scientific(&self, ext: &GraphExt) -> bool {
+        crate::graph::tabula::scientific_at(self, ext.node)
     }
     fn render_node(&self, ext: &GraphExt, kind: &str) -> String {
         let kind = crate::graph::koine::Render::from_name(kind)
@@ -1065,7 +1089,7 @@ impl Host for Calc {
         _: &(),
         _: Scope<'_, ()>,
     ) -> Vec<Value> {
-        record_refusal(no_arbor("a context reach"));
+        record_refusal(no_arbor("a context accessor"));
         Vec::new()
     }
     fn edges(&self, _: Scope<'_, ()>, _: Option<&Projection>) -> Vec<Value> {
@@ -1095,7 +1119,7 @@ impl Host for Calc {
         vec![Value::Null]
     }
     fn operand_keys(&self, _: &(), _: &Operand, _: &(), _: Scope<'_, ()>) -> Vec<()> {
-        record_refusal(no_arbor("a peer read"));
+        record_refusal(no_arbor("a node read"));
         Vec::new()
     }
     fn restate(&self, _: &Scope<'_, ()>, _: &()) {}

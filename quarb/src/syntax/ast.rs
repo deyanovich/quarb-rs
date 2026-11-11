@@ -599,7 +599,10 @@ pub fn auto_field_name(op: &Operand) -> Option<&str> {
     if let Operand::Field { name, .. } = op {
         return Some(name);
     }
-    if let Operand::Typed { inner, .. } | Operand::InUnit { inner, .. } = op {
+    if let Operand::Typed { inner, .. }
+    | Operand::InUnit { inner, .. }
+    | Operand::InOffset { inner, .. } = op
+    {
         return auto_field_name(inner);
     }
     if let Operand::Lit(crate::Value::Projection { key, .. }) = op {
@@ -716,7 +719,7 @@ pub struct Group {
     /// The braces stacked after the first (spec: Def. Walk, the
     /// braces stack): each a condition of its own — its own weight,
     /// rule and bounds — a walk admitted when every brace admits it;
-    /// the reach marker belongs to the last.
+    /// the reach selector after the predicates belongs to the last.
     pub more: Vec<Quant>,
     /// `[...]` expression predicates on the group's matches,
     /// applied per repetition count BEFORE reach — so
@@ -733,6 +736,15 @@ pub struct Group {
     /// `?` / `!` after the quantifier: keep only the matches at the
     /// smallest / largest repetition count. Default keeps all.
     pub reach: Reach,
+    /// The reach selectors written directly after the braces before
+    /// the last, `{…}?{…}[P]?` (ruling 2026-11-10, a reach selector
+    /// per brace): one per brace of the stack but the last, in the
+    /// braces' order, `Reach::All` where a brace has none; empty
+    /// where none is written. The last brace's selector is `reach`
+    /// and selects first; each earlier brace that carries one then
+    /// selects among the walks still tied, from right to left. A
+    /// brace without one orders nothing.
+    pub marks: Vec<Reach>,
 }
 
 /// `{m,n}`-style repetition. `max` is `None` for the open-ended
@@ -1120,6 +1132,12 @@ pub enum Operand {
     /// field, if any, stays undeclared. The same brackets on a
     /// declaring item are [`Operand::Typed`].
     InUnit { inner: Box<Operand>, unit: String },
+    /// `::at<+02:00>` as a value right of `=` (spec: Projectors, the
+    /// offset trait, ruling 2026-11-10), as the unit trait stands
+    /// there: the inner's reading declared or displayed at the
+    /// offset, in minutes east of UTC, null on what is no instant;
+    /// the field stays undeclared.
+    InOffset { inner: Box<Operand>, minutes: i16 },
     /// `base:key` — a value's provenance: the core-metadata rung
     /// after a register value or the topic, defined over the
     /// origins the value was read from (`source`, `instant`,
@@ -1158,6 +1176,11 @@ pub enum Operand {
         /// where no name carries a trait.
         declared: Vec<Option<crate::value::ColumnType>>,
         rows: Vec<TableRow>,
+        /// Whether the header writes a path of levels,
+        /// `#(@(bar:A; bar:B; baz); …)` (ruling 2026-11-10): the
+        /// table's names are then paths. A quoted name is one name
+        /// whatever it holds, `"Time (HH:MM)"`, and makes no level.
+        levels: bool,
     },
     /// `@%(...)` — the record array (spec: List Construction):
     /// sugar over a list of records in the table literal's shape, a
@@ -1317,7 +1340,7 @@ pub enum Operand {
     /// and holes, each hole an expression evaluated in the current
     /// scope and spliced as text (null splices as empty).
     Interp(Vec<InterpSeg>),
-    /// `(x ?= k1 ? r1 : k2 ? r2 : else)` — the value match: the
+    /// `(x ?= k1 ? r1 : k2 ? r2 : else)` — the switch: the
     /// scrutinee is evaluated once and compared against each arm's
     /// test in order (equality by the standard coercion; a regex
     /// arm tests `=~` instead); the first hit's result is the

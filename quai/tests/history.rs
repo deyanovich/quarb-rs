@@ -141,3 +141,25 @@ fn a_constructor_headed_cell_is_recalled() {
     assert!(out.contains("&5  &1! | count\n    2\n"), "{out}");
     assert!(out.contains("&7  &6 | count\n    2\n"), "{out}");
 }
+
+/// A headed frozen reference to a line with no result (`&9# | …`) in
+/// a notebook reports its error and the runner goes on: matched in
+/// place, the session's borrow lived across the arms and the error
+/// arm panicked ("RefCell already borrowed"), losing every cell
+/// after it (the code review of 2026-11-10).
+#[test]
+fn the_runner_survives_a_headed_reference_to_an_empty_line() {
+    let dir = scratch();
+    std::fs::write(
+        dir.join("nb.quai"),
+        "    &9# @| count\n\n    /books/*::title\n",
+    )
+    .unwrap();
+    let (out, err, ok) = quai(&dir, &["--run", "nb.quai"], "");
+    assert!(!err.contains("panicked"), "{err}");
+    assert!(out.contains("&9# has no captured result"), "{out}");
+    // the cell after it ran
+    assert!(out.contains("Emma") && out.contains("Iliad"), "{out}");
+    // and the run reports the failed cell by its exit
+    assert!(!ok);
+}

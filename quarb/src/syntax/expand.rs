@@ -556,7 +556,7 @@ impl Form {
                         "" => Reach::All,
                         "?" => Reach::Proximal,
                         "!" => Reach::Distal,
-                        other => return Err(format!("'{other}' is no reach mark (? or !)")),
+                        other => return Err(format!("'{other}' is no reach selector (? or !)")),
                     };
                 }
                 // a predicate's position: its kind, the index, the range
@@ -679,6 +679,11 @@ impl Form {
                 _ => unknown(prop)?,
             }
         }
+        // a group whose range was rewritten is still a range (the
+        // review of 2026-11-10, syntax B18)
+        if let Form::Elem(PathElem::Group(g)) = &self {
+            crate::syntax::construct::group_shape(&g.quant)?;
+        }
         Ok(self)
     }
 }
@@ -755,19 +760,19 @@ fn reg_from_spelling(s: &str) -> Result<RegRef, String> {
                 if let Some(back) = rest.strip_prefix('-') {
                     RegRef::Back(
                         back.parse()
-                            .map_err(|_| format!("'{other}' is no register reference"))?,
+                            .map_err(|_| format!("'{other}' is no capsa accessor"))?,
                     )
                 } else if rest.bytes().all(|b| b.is_ascii_digit()) {
                     RegRef::Index(
                         rest.parse()
-                            .map_err(|_| format!("'{other}' is no register reference"))?,
+                            .map_err(|_| format!("'{other}' is no capsa accessor"))?,
                     )
                 } else {
                     RegRef::Named(rest.to_string())
                 }
             } else {
                 return Err(format!(
-                    "'{other}' is no register reference ($., $.N, $.-N, $.name, $,name, @., %., %.*)"
+                    "'{other}' is no capsa accessor ($., $.N, $.-N, $.name, $,name, @., %., %.*)"
                 ));
             }
         }

@@ -362,10 +362,11 @@ impl AstAdapter for FsAdapter {
                 .modified()
                 .ok()
                 .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                // a file's time is an epoch, a point of the timeline
                 .map(|d| Value::Instant {
                     secs: d.as_secs() as i64,
                     nanos: d.subsec_nanos(),
-                    offset_min: None,
+                    offset_min: Some(0),
                     calendar: Default::default(),
                 }),
             "extension" => path
@@ -414,12 +415,13 @@ impl AstAdapter for FsAdapter {
         let path = &self.paths[node.0 as usize];
         // The file is its own source; its mtime is the node's own
         // timestamp (a graft inside it re-labels that as the
-        // source rung), and it is the root of itself.
+        // source rung), and it is the root of itself. An epoch, so
+        // `Z` (ruling 2026-11-10), as `:::modified` spells it.
         let instant = std::fs::metadata(path)
             .ok()
             .and_then(|md| md.modified().ok())
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| (d.as_secs() as i64, d.subsec_nanos(), None));
+            .map(|d| (d.as_secs() as i64, d.subsec_nanos(), Some(0)));
         quarb::Provenance {
             source: Some(path.display().to_string()),
             path: Some("/".to_string()),

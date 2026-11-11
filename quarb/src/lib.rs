@@ -57,7 +57,7 @@ pub use graph::edges::GraphDeclaration;
 pub use graph::host::{QueryResult, Traced, resolved_provenance};
 pub use graph::identity::{canonical_identity, canonical_identity_at_open, is_url, name_path};
 pub use graph::run::{Run, inherited};
-pub use graph::tabula::{table_node_records, table_rows_of};
+pub use graph::tabula::{Scientific, table_node_records, table_rows_of};
 pub use graph::{
     adapter, autounits, conformance, koine, names, plan, reflect, rooted, source, target, trace,
 };
@@ -84,7 +84,7 @@ pub use error::{Kind as ErrorKind, QuarbError, Result};
 pub use graph::adapter::{
     Ask, AstAdapter, Cap, Catalog, CatalogLookup, Cmp, Confidence, Conjunct, Estimate, ExternalRef,
     InstantFrom, Latency, LinkDir, NodeId, PlanAxis, Provenance, ProvenanceList, Selection,
-    StepPlan, Unopened,
+    StepPlan, Surface, Unopened,
 };
 
 pub use pipeline::env::{EnvKind, Environment};
@@ -102,7 +102,10 @@ pub use value::ambient::{
     retract_diagnostics, sentence_bonds, set_invocation_instant, set_sentence_bonds,
     take_refusal_diagnostic,
 };
-pub use value::{ColumnType, Foreign, ForeignValue, NodeRef, Table, TableBuilder, Typing, Value};
+pub use value::{
+    ColumnType, Foreign, ForeignValue, NodeRef, Table, TableBuilder, Typing, Value,
+    offset_spelling, offset_word,
+};
 
 /// The universal search over a step body: `*//BODY`, with the
 /// wildcard supplied when the body opens with a trait expression or

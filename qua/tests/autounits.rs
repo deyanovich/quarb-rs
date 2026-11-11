@@ -110,14 +110,16 @@ fn the_flag_converts_every_known_suffix_and_tells() {
 fn temporal_suffixes_type_the_column_in_place() {
     let d = fixture("temporal");
     let t = "penguins.csv?autounits";
-    // the name stays; ISO text, an epoch number, a date
+    // the name stays; ISO text, an epoch number, a date. The epoch
+    // is a point of the timeline and prints its `Z` (ruling
+    // 2026-11-10)
     assert_eq!(
         ok(&d, &["/row[1] | ::created_at", t]),
         "2024-01-05T10:20:30Z"
     );
     assert_eq!(
         ok(&d, &["/row[2] | ::created_at", t]),
-        "2023-11-14T22:13:20"
+        "2023-11-14T22:13:20Z"
     );
     assert_eq!(ok(&d, &["/row[1] | ::published_on", t]), "2024-01-05");
     assert_eq!(ok(&d, &["/row[3] | ::published_on", t]), "null");
@@ -126,28 +128,28 @@ fn temporal_suffixes_type_the_column_in_place() {
         "Gentoo"
     );
     // the epoch rule is one: seconds, milliseconds from 10^11 up
-    assert_eq!(ok(&d, &["= 1700000000 | datetime"]), "2023-11-14T22:13:20");
+    assert_eq!(ok(&d, &["= 1700000000 | datetime"]), "2023-11-14T22:13:20Z");
     assert_eq!(
         ok(&d, &["= 1700000000000 | datetime"]),
-        "2023-11-14T22:13:20"
+        "2023-11-14T22:13:20Z"
     );
     assert_eq!(
         ok(&d, &["= %(when<instant> = 1700000000)"]),
-        "%(when = 2023-11-14T22:13:20)"
+        "%(when = 2023-11-14T22:13:20Z)"
     );
     assert_eq!(
         ok(
             &d,
             &["= @(%(when = 1700000000); %(when = 1700003600)) | #(-c=:when<instant>) | :when"]
         ),
-        "@(2023-11-14T22:13:20; 2023-11-14T23:13:20)"
+        "@(2023-11-14T22:13:20Z; 2023-11-14T23:13:20Z)"
     );
     assert_eq!(
         ok(
             &d,
             &["= @(%(when = 1700000000)) | # | map(<instant>; --to=:when) | :when"]
         ),
-        "@(2023-11-14T22:13:20)"
+        "@(2023-11-14T22:13:20Z)"
     );
     // inference never reads a number as an instant
     assert_eq!(
@@ -178,7 +180,7 @@ fn the_table_fast_path_types_the_converted_columns() {
     );
     assert_eq!(
         ok(&d, &["/row @| # | :created_at", t]),
-        "@(2024-01-05T10:20:30Z; 2023-11-14T22:13:20; 2024-02-01T00:00:00Z)"
+        "@(2024-01-05T10:20:30Z; 2023-11-14T22:13:20Z; 2024-02-01T00:00:00Z)"
     );
 }
 
@@ -271,7 +273,7 @@ fn a_database_and_a_document_read_alike() {
     );
     assert_eq!(
         ok(&d, &["/flights/*[1] | ::created_at", db]),
-        "2023-11-14T22:13:20"
+        "2023-11-14T22:13:20Z"
     );
     // the engine evaluates what names a converted column; the source
     // keeps the rest
@@ -308,7 +310,7 @@ fn a_database_and_a_document_read_alike() {
     assert_eq!(ok(&d, &["/legs/*[2] | ::time", js]), "null");
     assert_eq!(
         ok(&d, &["/legs/*[2] | ::created_at", js]),
-        "2023-11-14T22:13:20"
+        "2023-11-14T22:13:20Z"
     );
     assert_eq!(
         ok(&d, &["/legs/*/distance", js]),
@@ -333,10 +335,15 @@ fn reducers_over_quantities_skip_nulls_and_text() {
     assert_eq!(ok(&d, &["= @(1_kg; \"NA\"; 3_kg) | min"]), "1_kg");
     assert_eq!(ok(&d, &["= @(1_kg; \"NA\"; 3_kg) | max"]), "3_kg");
     assert_eq!(ok(&d, &["= @(2_h; \"NA\"; null; 30_min) | mean"]), "1.25_h");
-    // mixed dimensions, and a bare number off the time dimension,
-    // still refuse
-    assert_eq!(ok(&d, &["= @(1_kg; 1_s) | sum"]), "null");
-    assert_eq!(ok(&d, &["= @(1_kg; 5; 3_kg) | sum"]), "null");
+    // mixed dimensions refuse, naming the two (the fold answered
+    // null where the operator refused); a bare number off the time
+    // dimension refuses too, as `1_kg + 5` does (ruling 2026-11-10;
+    // both answered null)
+    assert!(refused(&d, &["= @(1_kg; 1_s) | sum"]).contains("unlike dimensions (kg and s)"));
+    assert!(
+        refused(&d, &["= @(1_kg; 5; 3_kg) | sum"])
+            .contains("a fold over a quantity and a number without a unit (kg and a bare number)")
+    );
     // the penguins case: a converted column with "NA" cells
     std::fs::write(
         d.join("na.csv"),

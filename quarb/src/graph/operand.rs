@@ -215,3 +215,21 @@ pub(crate) fn eval_pred_expr_at(
         eval_pred_expr(adapter, &GraphExt::at(node), e, trace, scope)
     })
 }
+
+/// One clause of a join condition against a candidate: true only
+/// where the clause is true, a null key leaving it unknown (ruling
+/// 2026-11-10; see `eval_join_condition`).
+pub(crate) fn eval_join_condition_at(
+    adapter: &impl AstAdapter,
+    node: NodeId,
+    e: &PredExpr,
+    trace: &Trace,
+    bound: &[Option<NodeId>],
+    scope: Scope<'_, GraphExt>,
+) -> bool {
+    let scope = at_witness(scope, bound);
+    crate::value::ambient::with_keying(|| {
+        crate::pipeline::operand::eval_join_condition(adapter, &GraphExt::at(node), e, trace, scope)
+            == Some(true)
+    })
+}

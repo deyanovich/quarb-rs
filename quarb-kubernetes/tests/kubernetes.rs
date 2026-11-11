@@ -75,6 +75,46 @@ fn mock_cluster() {
 
     // Placement and namespace references.
     assert_eq!(v("/pods/web-1->node::name"), ["worker-1"]);
+
+    // The links are read off the object they leave, and the cluster
+    // records nothing of what points at one: walking a link back is
+    // refused, never answered empty (spec: The adapter contract) —
+    // the backward hop, the headless one and the navop wildcard. The
+    // reverse arrow over a scope looks for the referrers itself.
+    let refused = |q: &str| match quarb::run(q, &a) {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("{q} was answered"),
+    };
+    for q in [
+        "/nodes/worker-1<-node",
+        "/nodes/worker-1<-*",
+        "/nodes/worker-1--node",
+        "/nodes/worker-1~*",
+    ] {
+        let e = refused(q);
+        assert!(e.contains("does not support backlinks"), "{q}: {e}");
+    }
+    // The edges table is another matter (the user's answer of
+    // 2026-11-10): every edge among the nodes of a set leaves one of
+    // them, so the table is read off the set's forward links and is
+    // short of nothing. A set no edge runs within has none.
+    assert_eq!(v("/pods/* @| edges(<-node) | dim"), ["0, 4"]);
+    assert_eq!(v("/pods/* @| edges(--*) | dim"), ["0, 4"]);
+    assert_eq!(
+        v("/*/* @| edges(<-node) | #(:source; :target; :label) @| csv"),
+        ["source,target,label\n/pods/web-1,/nodes/worker-1,node\n/pods/db-1,/nodes/worker-1,node"]
+    );
+    assert_eq!(v("/*/* @| edges(--*) | dim"), v("/*/* @| edges(->*) | dim"));
+    assert!(refused("/nodes/worker-1<-node").contains("'<-' walks links back"));
+    assert!(refused("/nodes/worker-1--node").contains("'--' walks links back"));
+    // a listing is nothing's target: nothing is there to walk back
+    assert_eq!(v("/nodes<-*"), [] as [&str; 0]);
+    // forward as before, and the referrers found in a scope
+    assert_eq!(
+        v("/nodes/worker-1<--(/pods/*::node)::name"),
+        ["web-1", "db-1"]
+    );
+    assert!(refused("/nodes/worker-1<-node").contains("'<--(/scope/*::a)'"));
     assert_eq!(v("/pods/sys-1::namespace-->::phase"), ["Active"]);
 
     // Kind traits; the namespace hybrid answers fields and holds

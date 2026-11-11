@@ -105,6 +105,21 @@ fn a_foreign_key_labels_its_edge_without_the_suffix() {
         ),
         ["1"]
     );
+    // and after the step as in its predicate (the review of
+    // 2026-11-10, graph T1: the edge read after a resolution said
+    // the column's full name, which its own predicate did not match)
+    assert_eq!(qua(&dir, "/employees/6::manager_id--> | $-"), ["manager"]);
+    assert_eq!(
+        qua(&dir, "/employees/1<--(/employees/*::manager_id) | $-"),
+        ["manager", "manager"]
+    );
+    assert_eq!(
+        qua(
+            &dir,
+            "/employees/1<--(/employees/*::manager_id)[$- = \"manager\"] @| count"
+        ),
+        ["2"]
+    );
     // the column's full name no longer names an edge
     assert_eq!(qua(&dir, "/employees/*->manager_id @| count"), ["0"]);
     // the reverse resolution still reads the property

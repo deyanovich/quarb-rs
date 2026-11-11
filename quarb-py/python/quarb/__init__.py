@@ -22,7 +22,7 @@ Quick start::
     doc.values('/books/*/title::')        # ['Emma', 'Iliad']
     doc.values('/books/*/price::')        # [22.5, 9.99] — floats
     doc.value('/books/*/price:: @| mean') # 16.245
-    doc.records('/books/* | rec("t", /title::)')
+    doc.records('/books/* | %(t = /title::)')
     #                                # [{'t': 'Emma'}, {'t': 'Iliad'}]
 
 ``loads(text, format)`` / ``load(path)`` parse once into a
@@ -54,8 +54,10 @@ archives, XLSX workbooks, and source files — and
 ``quarb.translate(src, "jq"|"xpath"|"sql")`` turns queries you
 already have into Quarb text.
 
-The ``qua`` console command installed with this package covers the
-same text formats; the full CLI (files, git, databases, mail) is
+The ``qua`` console command installed with this package runs one
+query over one input: standard input as JSON unless ``--format``
+names another notation, a path as ``quarb.open`` opens it. The full
+CLI (several mounts, the networked adapters, mail, every flag) is
 the Rust binary: ``cargo install qua``.
 """
 
@@ -80,6 +82,8 @@ diagnostics_html = _ext.diagnostics_html
 parse_defs = _ext.parse_defs
 defs_only = _ext.defs_only
 man = _ext.man
+# (the session's own: a closing `| copy` taken off a cell's query)
+take_copy = _ext.take_copy
 
 # The string-faithful layer: the qua CLI's exact rendering.
 run = _ext.run

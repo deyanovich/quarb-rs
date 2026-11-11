@@ -153,6 +153,25 @@ pub const QUANTIFIER_BOUND: &str = "QUANTIFIER_BOUND";
 pub const FRONTIER_BOUND: &str = "FRONTIER_BOUND";
 /// Debug: the walk engine's account of one round.
 pub const WALK: &str = "WALK";
+/// Lone values of a kind a numeric command does not take (text with
+/// no numeric reading under `sqrt`, a boolean under `round`): each
+/// answered null; one warning per command, counting them.
+pub const NOT_NUMERIC: &str = "NOT_NUMERIC";
+/// Warning: a hop names a label that the surface its source
+/// declares lacks (a table's keys); the labels there are named. A
+/// source that declares nothing raises nothing (ruling 2026-11-10).
+pub const UNKNOWN_LABEL: &str = "UNKNOWN_LABEL";
+/// Warning: a projection or a predicate names a property that the
+/// surface its source declares lacks (a table's columns, a CSV's
+/// header); the properties there are named.
+pub const UNKNOWN_PROPERTY: &str = "UNKNOWN_PROPERTY";
+/// Info: two indexes met and the labels of a side were cast to the
+/// type they agreed on (a declared index won, two undeclared were
+/// upcast to their common type, an integer met a float).
+pub const INDEX_CAST: &str = "INDEX_CAST";
+/// Info: a transposition brought the cells of columns of several
+/// kinds to their common type.
+pub const TRANSPOSE_CAST: &str = "TRANSPOSE_CAST";
 
 #[cfg(test)]
 mod tests {

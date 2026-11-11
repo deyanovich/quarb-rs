@@ -19,8 +19,8 @@ use quarb_session::{
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
-/// Interactive Quarb: each line becomes a reusable query macro
-/// (&1, &2, …) over a standing session.
+/// Interactive Quarb: each line becomes a labelled fragment
+/// (&1, &2, …), reusable over a standing session.
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
@@ -84,7 +84,7 @@ struct Cli {
     #[arg(long, value_name = "ISO")]
     now: Option<String>,
 
-    /// Seed the macro table with fragment definitions from a file
+    /// Seed the fragment table with definitions from a file
     /// before the session starts.
     #[arg(long, value_name = "FILE")]
     defs: Option<PathBuf>,
@@ -110,7 +110,7 @@ struct Cli {
     /// Back the session with a resident `qua` daemon: materialize the
     /// source once in a background process (shared across quai runs
     /// and with other clients) instead of in-process, and persist the
-    /// macro history under ~/.quarb. Best for expensive sources
+    /// fragment history under ~/.quarb. Best for expensive sources
     /// reused across sessions; for a RAM-sized source the default
     /// in-process mode is faster.
     #[arg(long)]
@@ -339,6 +339,13 @@ fn main() -> Result<()> {
     if std::env::var_os("KAIV_OFFLINE").is_none() {
         unsafe {
             std::env::set_var("KAIV_OFFLINE", "1");
+        }
+    }
+    // A refusal is a message, as in qua: `RUST_BACKTRACE=1` is a
+    // panic's; an error's stack is asked for by `RUST_LIB_BACKTRACE=1`.
+    if std::env::var_os("RUST_LIB_BACKTRACE").is_none() {
+        unsafe {
+            std::env::set_var("RUST_LIB_BACKTRACE", "0");
         }
     }
     let mut cli = Cli::parse();
@@ -585,7 +592,7 @@ fn run_file(
             println!();
             continue;
         }
-        if MODEL_KEYWORDS.contains(&first) {
+        if quarb_model::STATEMENTS.contains(&first) {
             if let Err(e) = apply_model_cell(session, remount, &q, base_dir) {
                 failed = true;
                 println!("    error: {e:#}");
@@ -605,16 +612,24 @@ fn run_file(
         // query's own.
         let reference = match history_head(q.trim()) {
             Some((n, '#', "")) => Some(Prepared::Frozen(n)),
-            Some((n, '#', tail)) => match frozen_head_query(&session.borrow(), n, tail) {
-                Ok(headed) => Some(Prepared::Eval(headed)),
-                Err(e) => {
-                    failed = true;
-                    println!("    error: {e}");
-                    session.borrow_mut().commit(&q, Vec::new());
-                    println!();
-                    continue;
+            Some((n, '#', tail)) => {
+                // Bound first: matched in place, the session's borrow
+                // lived across the arms, and the error arm's
+                // `borrow_mut` panicked ("RefCell already borrowed"),
+                // losing the rest of the notebook. The REPL binds it
+                // the same way.
+                let headed = frozen_head_query(&session.borrow(), n, tail);
+                match headed {
+                    Ok(headed) => Some(Prepared::Eval(headed)),
+                    Err(e) => {
+                        failed = true;
+                        println!("    error: {e}");
+                        session.borrow_mut().commit(&q, Vec::new());
+                        println!();
+                        continue;
+                    }
                 }
-            },
+            }
             Some((n, '!', tail)) => Some(Prepared::Live(
                 format!("&{n} {tail}").trim_end().to_string(),
             )),
@@ -717,13 +732,6 @@ fn run_file(
 /// a relative path behind one resolves against the file's directory.
 const READING_SCHEMES: [&str; 5] = ["text", "corpus", "lit", "koine", "json2"];
 
-/// The model-file keywords that open a model cell (spec: .quai,
-/// Kinds), `def` and `macro` among them.
-const MODEL_KEYWORDS: [&str; 13] = [
-    "def", "macro", "node", "ref", "rel", "edge", "alias", "trait", "index", "units", "tree",
-    "mount", "use",
-];
-
 /// Apply a model cell to the session: parse it as a model file, mount
 /// what it mounts (named, relative targets against `base_dir`), join
 /// its declarations to the session's model, seed its defs, and
@@ -769,21 +777,7 @@ fn apply_model_cell(
     let merged = match ctx.model.take() {
         None => m.clone(),
         Some(mut base) => {
-            base.mounts.extend(m.mounts.iter().cloned());
-            base.nodes.extend(m.nodes.iter().cloned());
-            base.refs.extend(m.refs.iter().cloned());
-            base.rels.extend(m.rels.iter().cloned());
-            base.edges.extend(m.edges.iter().cloned());
-            base.aliases.extend(m.aliases.iter().cloned());
-            base.traits.extend(m.traits.iter().cloned());
-            base.indexes.extend(m.indexes.iter().cloned());
-            base.trees.extend(m.trees.iter().cloned());
-            base.units.extend(m.units.iter().cloned());
-            base.unit_files.extend(m.unit_files.iter().cloned());
-            if !m.defs_text.trim().is_empty() {
-                base.defs_text.push('\n');
-                base.defs_text.push_str(&m.defs_text);
-            }
+            base.absorb(&m);
             base
         }
     };
@@ -1149,7 +1143,7 @@ fn run_and_commit(session: &mut Session, remount: &mut Option<Remount>, q: &str,
             print_diagnostics(session, "");
             let n = session.line_no();
             if !session.commit(&q, cells) {
-                eprintln!("note: &{n} is not referenceable (its shape can't be a macro body)");
+                eprintln!("note: &{n} is not referenceable (its shape can't be a fragment's body)");
             }
         }
         Err(e) => eprintln!("{}: {e:#}", error_prefix()),
@@ -1348,7 +1342,7 @@ fn command(session: &mut Session, remount: &mut Option<Remount>, line: &str) -> 
         ":help" | ":?" => {
             println!(
                 "  <query>       run a query; its result is labelled &N and reusable\n  \
-                 &N            re-run line N (a macro); continue with a pipe: &N | /key::\n  \
+                 &N            re-run line N (a labelled fragment); continue with a pipe: &N | /key::\n  \
                  &N#           replay line N's frozen output (as it was when it ran)\n  \
                  &N!           re-run line N live — re-reads the source; diverges from &N# under drift\n  \
                  def &x: …;    add a named fragment to the session\n  \
@@ -1356,7 +1350,7 @@ fn command(session: &mut Session, remount: &mut Option<Remount>, line: &str) -> 
                  :follow [on|off|N]  acquisition rounds per line for ::href--> refs (interactive default: on)\n  \
                  :plan QUERY   price a query before it runs: its static plan as kaiv (--budget sets the bound)\n  \
                  :man [NAME]   the command inventory: every command, or one command's page (:man @| for a pipe, --ru for Russian)\n  \
-                 :history      show the macro table (&1, &2, …)\n  \
+                 :history      show the fragment table (&1, &2, …)\n  \
                  :reset        clear the history and restart numbering\n  \
                  :quit         leave (also Ctrl-D)"
             );

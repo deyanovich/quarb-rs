@@ -379,11 +379,15 @@ pub(crate) fn value_eq(a: &Value, b: &Value, scale: UnitScale) -> bool {
         // a quantity never equals a bare number, dimension one included
         // (`12_% = 0.12` is false, as `30_km = 30` is; ruling
         // 2026-11-09); they order in the base
-        if matches!(
-            (a, b),
-            (Value::Quantity { .. }, Value::Int(_) | Value::Float(_))
-                | (Value::Int(_) | Value::Float(_), Value::Quantity { .. })
-        ) {
+        // … and never the text of one (`50_% = "0.5"` was true
+        // where `50_% = 0.5` is false): numeric text is a bare
+        // number here as everywhere
+        let bare = |v: &Value| match v {
+            Value::Int(_) | Value::Float(_) => true,
+            Value::Str(_) => v.numeric_reading().is_some(),
+            _ => false,
+        };
+        if bare(a) || bare(b) {
             return false;
         }
         return match crate::value::quantital_pair_with(a, b, scale) {
@@ -442,6 +446,138 @@ pub(crate) fn value_eq(a: &Value, b: &Value, scale: UnitScale) -> bool {
             x.len() == y.len() && x.iter().zip(y.iter()).all(|(a, b)| value_eq(a, b, scale))
         }
         _ => false,
+    }
+}
+
+/// What two values that `=` holds between must share: one key per
+/// reading a value has. `value_eq` compares a pair under the first
+/// reading both sides take (the timeline beside an instant, the
+/// dimension beside a quantity, the number, the text), so two equal
+/// values always share a key; two values sharing one need not be
+/// equal, and every candidate is still tested.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum EqKey {
+    Null,
+    Bool(bool),
+    /// The numeric reading as a double's bits: two integers a double
+    /// cannot tell apart share the key and are told apart by the
+    /// test.
+    Number(u64),
+    Text(String),
+    /// The temporal reading, or the first instant of the calendar
+    /// reading: what a value is beside an instant or a period.
+    Instant(i64, u32),
+    /// The unital reading: the dimension's base and the magnitude
+    /// in it.
+    Quantity(String, u64),
+    Node(u64),
+}
+
+fn eq_bits(f: f64) -> u64 {
+    if f == 0.0 {
+        0.0f64.to_bits()
+    } else {
+        f.to_bits()
+    }
+}
+
+/// The keys of `v`, or `None` for a value that has no complete set
+/// (a structure, a foreign value, a projection, a quarq): such a
+/// value is tested against every other.
+fn eq_keys(v: &Value, scale: UnitScale) -> Option<Vec<EqKey>> {
+    let mut keys = Vec::with_capacity(2);
+    match v {
+        Value::Null => keys.push(EqKey::Null),
+        Value::Bool(b) => keys.push(EqKey::Bool(*b)),
+        Value::Int(_) | Value::Float(_) => {
+            if let Some(n) = v.numeric() {
+                keys.push(EqKey::Number(eq_bits(n)));
+            }
+        }
+        Value::Str(s) => {
+            keys.push(EqKey::Text(s.clone()));
+            if let Some(n) = v.numeric_reading().and_then(|n| n.numeric()) {
+                keys.push(EqKey::Number(eq_bits(n)));
+            }
+            if let Some((bv, base, ..)) = crate::value::quantity::parse_unit_text_with(s, scale) {
+                keys.push(EqKey::Quantity(base, eq_bits(bv)));
+            } else if let Some((secs, nanos)) = crate::temporal::parse_span(s) {
+                keys.push(EqKey::Quantity(
+                    "s".to_string(),
+                    eq_bits(secs as f64 + nanos as f64 / 1e9),
+                ));
+            }
+        }
+        Value::Instant { .. } | Value::Period { .. } => {}
+        Value::Quantity { value, base, .. } => {
+            keys.push(EqKey::Quantity(base.clone(), eq_bits(*value)));
+        }
+        Value::Node(n) => keys.push(EqKey::Node(n.id)),
+        _ => return None,
+    }
+    if let Some((secs, nanos)) = first_instant(v) {
+        keys.push(EqKey::Instant(secs, nanos));
+    }
+    Some(keys)
+}
+
+/// Values gathered so that the ones `=` holds with are found
+/// without testing every pair (spec: Relations): the labels a join
+/// key is matched against. A probe looks under each of its keys,
+/// tests what it finds with the comparison itself, and tests the
+/// values that have no keys; the answer is exactly the entries the
+/// comparison would pick, in the order they were pushed.
+pub(crate) struct EqIndex<'s> {
+    scale: UnitScale<'s>,
+    values: Vec<Value>,
+    keyed: std::collections::HashMap<EqKey, Vec<usize>>,
+    unkeyed: Vec<usize>,
+}
+
+impl<'s> EqIndex<'s> {
+    pub(crate) fn new(scale: UnitScale<'s>) -> EqIndex<'s> {
+        EqIndex {
+            scale,
+            values: Vec::new(),
+            keyed: std::collections::HashMap::new(),
+            unkeyed: Vec::new(),
+        }
+    }
+
+    /// Add `v`; its position among the entries.
+    pub(crate) fn push(&mut self, v: Value) -> usize {
+        let at = self.values.len();
+        match eq_keys(&v, self.scale) {
+            Some(keys) => {
+                for k in keys {
+                    self.keyed.entry(k).or_default().push(at);
+                }
+            }
+            None => self.unkeyed.push(at),
+        }
+        self.values.push(v);
+        at
+    }
+
+    /// The entries `=` holds with, in order.
+    pub(crate) fn matching(&self, v: &Value) -> Vec<usize> {
+        let mut candidates: Vec<usize> = match eq_keys(v, self.scale) {
+            Some(keys) => {
+                let mut c: Vec<usize> = keys
+                    .iter()
+                    .filter_map(|k| self.keyed.get(k))
+                    .flatten()
+                    .copied()
+                    .collect();
+                c.extend(&self.unkeyed);
+                c
+            }
+            None => (0..self.values.len()).collect(),
+        };
+        candidates.sort_unstable();
+        candidates.dedup();
+        candidates.retain(|&i| value_eq(&self.values[i], v, self.scale));
+        candidates
     }
 }
 

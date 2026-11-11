@@ -105,7 +105,7 @@ const COMMANDS: &[Synopsis] = &[
     ),
     kind!(
         "group",
-        "a path-pattern group: its quantifier's min and max, its reach mark; the alternatives beneath, each a walk",
+        "a path-pattern group: its quantifier's min and max, its reach selector; the alternatives beneath, each a walk",
         [
             op("min", "the least repetitions", false),
             op("max", "the most, null for open", false),
@@ -202,7 +202,7 @@ const COMMANDS: &[Synopsis] = &[
     kind!("nav", "a navigation command: the branch beneath", []),
     kind!(
         "cmd",
-        "a command by name: the arguments beneath",
+        "a command by name: the operands beneath",
         [
             op("name", "the command's name", true),
             op("lib", "its library's prefix", false)
@@ -210,7 +210,7 @@ const COMMANDS: &[Synopsis] = &[
     ),
     kind!(
         "agg",
-        "an aggregate command by name: the arguments beneath",
+        "a command after the aggregation pipe, by name: the operands beneath",
         [
             op("name", "the command's name", true),
             op("lib", "its library's prefix", false)
@@ -225,7 +225,7 @@ const COMMANDS: &[Synopsis] = &[
     ),
     kind!(
         "recall",
-        "a register read",
+        "a capsa read",
         [op(
             "ref",
             "the reference as spelled: $., $.N, $.-N, $.name, $,name, @., %., %.*",
@@ -262,7 +262,11 @@ const COMMANDS: &[Synopsis] = &[
         "a piped operand: the expression, then the commands beneath",
         []
     ),
-    kind!("map", "the map pipe's command: the command beneath", []),
+    kind!(
+        "map",
+        "the iteration pipe's command: the command beneath",
+        []
+    ),
     kind!(
         "repeat",
         "a quantified command: the command beneath",
@@ -444,6 +448,18 @@ fn call_named(name: &str) -> FnCall {
     }
 }
 
+/// A group's quantifier is a range: its most at least its least, as
+/// the parser refuses it written (`{9;3}`).
+pub(crate) fn group_shape(quant: &crate::syntax::ast::Quant) -> Result<(), String> {
+    match quant.max {
+        Some(max) if max < quant.min => Err(format!(
+            "quantifier {{{};{max}}} has max below min",
+            quant.min
+        )),
+        _ => Ok(()),
+    }
+}
+
 impl Form {
     /// A bare node of the kind, its properties at their defaults,
     /// no children: what a constructor rewrites and fills.
@@ -469,6 +485,7 @@ impl Form {
                 predicates: Vec::new(),
                 traits: Vec::new(),
                 reach: Reach::All,
+                marks: Vec::new(),
             })),
             "mark" => Form::Elem(PathElem::Mark(None)),
             "push" => Form::Command(Command::Push(None)),
@@ -603,6 +620,18 @@ impl Form {
                     }
                     alts.push(w.elems);
                 }
+                // the shape checks a written group gets (the review
+                // of 2026-11-10, syntax B18: a group built with no
+                // alternative expanded to `()`, one built `{9;3}` to
+                // that brace, and both answered nothing)
+                if alts.is_empty() {
+                    return Err(
+                        "a group node holds one alternative or more, each a walk of at least \
+                         one hop; none given"
+                            .to_string(),
+                    );
+                }
+                group_shape(&g.quant)?;
                 g.alts = alts;
                 Form::Elem(PathElem::Group(g))
             }

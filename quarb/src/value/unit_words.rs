@@ -518,9 +518,32 @@ pub fn is_unit_word(word: &str) -> bool {
 /// `--units`, a scoped `--unit:col`), then the dictionary.
 pub type Override<'a> = &'a dyn Fn(&str) -> Option<String>;
 
-/// The words of a tail, lowercased, the brackets and the
-/// punctuation that frames them dropped, a `/` kept as its own word.
-fn tokenize(tail: &str) -> Vec<String> {
+/// One word of a tail: lowercased for the dictionary, which reads
+/// words whatever their case (`Metric Tonnes`, `EUR`), and as it is
+/// written for the symbol road, where the case is the unit (`Mt` the
+/// megatonne and `mt` the millitonne, `A` the ampere and `a` the
+/// year, `kB` and `kb`).
+#[derive(Clone, Debug)]
+struct Word {
+    folded: String,
+    written: String,
+}
+
+impl Word {
+    fn as_str(&self) -> &str {
+        &self.folded
+    }
+}
+
+/// The folded words of a run, joined as the dictionary and an
+/// override read them.
+fn run(words: &[Word]) -> String {
+    words.iter().map(Word::as_str).collect::<Vec<_>>().join(" ")
+}
+
+/// The words of a tail, the brackets and the punctuation that frames
+/// them dropped, a `/` kept as its own word.
+fn tokenize(tail: &str) -> Vec<Word> {
     let mut cleaned = String::with_capacity(tail.len() + 8);
     for c in tail.chars() {
         match c {
@@ -531,7 +554,10 @@ fn tokenize(tail: &str) -> Vec<String> {
     }
     cleaned
         .split_whitespace()
-        .map(|w| w.to_lowercase())
+        .map(|w| Word {
+            folded: w.to_lowercase(),
+            written: w.to_string(),
+        })
         .collect()
 }
 
@@ -568,7 +594,7 @@ fn digit_power(word: &str) -> Option<(String, u8)> {
 /// the unit factor-expression term, the scale it carried, and the
 /// index past it.
 fn phrase(
-    words: &[String],
+    words: &[Word],
     mut i: usize,
     resolve: Override<'_>,
     symbol_known: &dyn Fn(&str) -> bool,
@@ -599,7 +625,7 @@ fn phrase(
         if i + len > words.len() {
             continue;
         }
-        if let Some(u) = resolve(&words[i..i + len].join(" ")) {
+        if let Some(u) = resolve(&run(&words[i..i + len])) {
             found = Some((u, len));
             break;
         }
@@ -609,7 +635,7 @@ fn phrase(
             if i + len > words.len() {
                 continue;
             }
-            if let Some(sym) = word_symbol(&words[i..i + len].join(" ")) {
+            if let Some(sym) = word_symbol(&run(&words[i..i + len])) {
                 found = Some((sym.to_string(), len));
                 break;
             }
@@ -619,27 +645,38 @@ fn phrase(
         Some(f) => f,
         None => {
             let Some(w) = words.get(i) else {
-                return Err(WordRefusal::Unknown(words.join(" ")));
+                return Err(WordRefusal::Unknown(run(words)));
             };
-            if let Some((_, pointer)) = AMBIGUOUS.iter().find(|(a, _)| a == w) {
+            if let Some((_, pointer)) = AMBIGUOUS.iter().find(|(a, _)| *a == w.folded) {
                 return Err(WordRefusal::Ambiguous {
-                    word: w.clone(),
+                    word: w.folded.clone(),
                     pointer: pointer.to_string(),
                 });
             }
-            if let Some((sym, f)) = sign_scaled(w) {
+            // The symbol road reads the word as it is written: a
+            // symbol's case is the unit. (It read the lowercased
+            // word, so `Mt per year` was millitonnes, `kB` kilobits,
+            // `A per m` years per metre.) A word form with a digit
+            // exponent (`feet2`) is still the dictionary's.
+            if let Some((sym, f)) = sign_scaled(&w.folded) {
                 factor *= f;
                 (sym.to_string(), 1)
-            } else if let Some((stem, p)) = digit_power(w)
+            } else if let Some((stem, p)) = digit_power(&w.written)
                 && (symbol_known(&stem) || word_symbol(&stem).is_some())
             {
                 power = p;
-                (word_symbol(&stem).map_or(stem, str::to_string), 1)
-            } else if symbol_known(w) {
-                (w.clone(), 1)
+                (
+                    if symbol_known(&stem) {
+                        stem
+                    } else {
+                        word_symbol(&stem).map_or(stem, str::to_string)
+                    },
+                    1,
+                )
+            } else if symbol_known(&w.written) {
+                (w.written.clone(), 1)
             } else {
-                // the original spelling for the symbol road's case
-                return Err(WordRefusal::Unknown(words[i..].join(" ")));
+                return Err(WordRefusal::Unknown(run(&words[i..])));
             }
         }
     };
@@ -688,7 +725,7 @@ pub fn parse_unit_words(
             factor *= f;
             i += 1;
         } else {
-            return Err(WordRefusal::Unknown(words[i..].join(" ")));
+            return Err(WordRefusal::Unknown(run(&words[i..])));
         }
     }
     Ok(Some(WordUnit { expr, factor }))

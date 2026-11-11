@@ -674,7 +674,18 @@ pub fn route(
                     pred[v] = u;
                     heap.push(Nearest(nd, v));
                 }
-                Some(x) if (nd - x).abs() <= 1e-12 * x.abs().max(1.0) && u < pred[v] => {
+                // A tie takes the lower predecessor only over an edge of
+                // positive length, where `u` is strictly nearer than `v`
+                // and no cycle can close. Over a zero-weight edge the two
+                // stand at one distance: the tie gave a seed a predecessor
+                // (and two such nodes each other), and the walk back below
+                // never ended, allocating until memory was gone.
+                Some(x)
+                    if nd > d
+                        && pred[v] != usize::MAX
+                        && (nd - x).abs() <= 1e-12 * x.abs().max(1.0)
+                        && u < pred[v] =>
+                {
                     pred[v] = u;
                 }
                 Some(_) => {}
@@ -686,7 +697,9 @@ pub fn route(
             dist[v]?;
             let mut path = vec![v];
             let mut at = v;
-            while pred[at] != usize::MAX {
+            // a path visits a node once: the bound holds whatever the
+            // predecessors say
+            while pred[at] != usize::MAX && path.len() <= n {
                 at = pred[at];
                 path.push(at);
             }
@@ -776,12 +789,17 @@ pub fn closeness(edges: &Edges, weighted: bool, harmonic: bool) -> Result<Vec<f6
             if v == s {
                 continue;
             }
-            if let Some(d) = d
-                && *d > 0.0
-            {
+            // A node at distance zero (a zero weight on the way) is
+            // reached: it counts in `r` and adds nothing to `Σd`,
+            // and it is left out of the harmonic sum, where its
+            // term has no value (ruling 2026-11-10). It was left
+            // out of `r` as well.
+            if let Some(d) = d {
                 reached += 1.0;
                 total += d;
-                inverse += 1.0 / d;
+                if *d > 0.0 {
+                    inverse += 1.0 / d;
+                }
             }
         }
         let others = (n - 1) as f64;
@@ -1387,6 +1405,13 @@ mod tests {
             closeness(&Edges::fold(1, []), false, false).unwrap(),
             vec![0.0]
         );
+        // a node at distance zero is reached (ruling 2026-11-10):
+        // from 0, node 1 lies at 0 and node 2 at 4, so r is 2 and
+        // Σd is 4, 2/2 × 2/4; the harmonic sum leaves the zero out,
+        // (1/4)/2
+        let z = Edges::fold(3, [(0, 1, Some(0.0)), (1, 2, Some(4.0))]);
+        assert!(close(closeness(&z, true, false).unwrap()[0], 0.5));
+        assert!(close(closeness(&z, true, true).unwrap()[0], 0.125));
     }
 
     fn two_triangles() -> Edges {

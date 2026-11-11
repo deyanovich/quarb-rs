@@ -502,20 +502,9 @@ impl QuaiSession {
         // (`mountWithModel`); here it takes its ordinal, so the
         // labels match the file's, and answers nothing.
         let first = t.split_whitespace().next().unwrap_or_default();
-        if matches!(
-            first,
-            "node"
-                | "ref"
-                | "rel"
-                | "edge"
-                | "alias"
-                | "trait"
-                | "index"
-                | "units"
-                | "tree"
-                | "mount"
-                | "use"
-        ) {
+        // the model crate's one list of statement keywords (`def` and
+        // `macro` are cells of their own above)
+        if quarb_model::STATEMENTS.contains(&first) && !matches!(first, "def" | "macro") {
             self.session.commit(t, Vec::new());
             return envelope(
                 &label,

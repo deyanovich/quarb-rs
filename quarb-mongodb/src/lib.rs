@@ -109,17 +109,18 @@ fn decode(v: &Bson) -> Field {
         Bson::ObjectId(o) => Field::Scalar(Value::Str(o.to_hex())),
         Bson::DateTime(dt) => {
             let ms = dt.timestamp_millis();
+            // a BSON date is milliseconds since the epoch: `Z`
             Field::Scalar(Value::Instant {
                 secs: ms.div_euclid(1000),
                 nanos: (ms.rem_euclid(1000) * 1_000_000) as u32,
-                offset_min: None,
+                offset_min: Some(0),
                 calendar: Default::default(),
             })
         }
         Bson::Timestamp(t) => Field::Scalar(Value::Instant {
             secs: t.time as i64,
             nanos: 0,
-            offset_min: None,
+            offset_min: Some(0),
             calendar: Default::default(),
         }),
         Bson::Decimal128(d) => Field::Scalar(Value::Str(d.to_string())),
@@ -517,6 +518,13 @@ impl AstAdapter for MongodbAdapter {
         self.doc_node(&coll, &id, db.as_deref())
     }
 
+    /// The links are read off the node they leave, and nothing here
+    /// records what points at a document: the hop back is refused rather
+    /// than answered empty (spec: The adapter contract).
+    fn backlinks_unsupported(&self, node: NodeId, _label: Option<&str>) -> bool {
+        matches!(self.nodes.borrow()[node.0 as usize].kind, Kind::Doc { .. })
+    }
+
     /// Every DBRef field is an outgoing crosslink, labeled by the
     /// field name.
     fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
@@ -592,7 +600,8 @@ mod tests {
             }) => {
                 assert_eq!(secs, 1_700_000_000);
                 assert_eq!(nanos, 250_000_000);
-                assert_eq!(offset_min, None);
+                // a BSON date is an epoch: `Z` (ruling 2026-11-10)
+                assert_eq!(offset_min, Some(0));
             }
             _ => panic!("expected instant"),
         }
