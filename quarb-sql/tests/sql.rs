@@ -254,6 +254,16 @@ fn export_refusals() {
     assert!(err("/t/* @| [..5] @| sort_by(::c) | ::c").contains("before LIMIT"));
     assert!(err("/t/* @| [..5] | ::c @| unique").contains("DISTINCT before LIMIT"));
     assert!(err("/t/* @| sort_by(::a) @| sort_by(::b) | ::a").contains("second sort"));
+    // the keyed sort's options are its own: the direction is said, a
+    // named collation and a second key are not SQL's to say
+    assert_eq!(
+        x("/t/* @| sort_by(::c; --desc) | ::c"),
+        "SELECT c FROM t ORDER BY c DESC"
+    );
+    assert!(
+        err("/t/* @| sort_by(::c; --locale=de) | ::c").contains("names the engine's collation")
+    );
+    assert!(err("/t/* @| sort_by(::a; ::b) | ::a").contains("a sort by several keys"));
     // A '*=' pattern must be a text literal — a column operand
     // holds a value, not a pattern.
     assert!(err("/t/*[::a *= ::b] | ::a").contains("non-literal"));
@@ -495,6 +505,39 @@ fn pushdown_join_soundness_metadata() {
             .join_left
             .is_none()
     );
+}
+
+/// An every-witness join (`<=>*`, ruling 2026-11-11) is the JOIN
+/// as SQL means it: no uniqueness to verify, and the joined table's
+/// order owed after the driver's.
+#[test]
+fn pushdown_of_the_every_witness_join() {
+    let pushdown = |q: &str| quarb_sql::pushdown(q, None);
+    let p =
+        pushdown("/albums/* <=>* /tracks/*[::album_id = $$0::id] | %(a = ::title; t = $$1::title)")
+            .expect("the every-witness join pushes down");
+    assert_eq!(
+        p.sql,
+        "SELECT albums.title AS a, tracks.title AS t FROM albums JOIN tracks \
+         ON tracks.album_id = albums.id"
+    );
+    assert!(p.join_left.is_none(), "no uniqueness obligation");
+    assert_eq!(p.order_table.as_deref(), Some("albums"));
+    assert_eq!(p.order_then.as_deref(), Some("tracks"));
+    // the outer form is the LEFT JOIN
+    let p = pushdown(
+        "/albums/* <=>*? /tracks/*[::album_id = $$0::id] | %(a = ::title; t = $$1::title)",
+    )
+    .expect("the outer every-witness join pushes down");
+    assert!(p.sql.contains(" LEFT JOIN tracks ON "), "{}", p.sql);
+    assert_eq!(p.order_then.as_deref(), Some("tracks"));
+    // an aggregate over it has no rows to order
+    let p = pushdown("/albums/* <=>* /tracks/*[::album_id = $$0::id] @| count")
+        .expect("the count pushes down");
+    assert!(p.order_then.is_none() && p.join_left.is_none());
+    // the plain witness join keeps its obligation and owes no second order
+    let p = pushdown("/albums/* <=> /tracks/*[::album_id = $$0::id] | %(a = ::title)").unwrap();
+    assert!(p.join_left.is_some() && p.order_then.is_none());
 }
 
 #[test]

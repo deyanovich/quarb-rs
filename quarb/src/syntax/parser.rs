@@ -1556,6 +1556,16 @@ impl Parser<'_> {
         }
         while matches!(self.peek(), Some(Token::Correlate)) {
             self.pos += 1;
+            // `<=>*` — every witness (ruling 2026-11-11): the
+            // thread forks once per joined node that satisfies the
+            // ON, the SQL JOIN. The star is its own token and needs
+            // no space on either side; no joined expression opens
+            // with one.
+            let star = |t: Option<&Token>| matches!(t, Some(Token::Name { text, quoted: false, .. }) if text == "*");
+            let every = star(self.peek());
+            if every {
+                self.pos += 1;
+            }
             // `<=>?` — the outer marker flags the expression it
             // precedes: that context may bind null (LEFT JOIN).
             let outer = if matches!(self.peek(), Some(Token::Question { .. })) {
@@ -1564,6 +1574,13 @@ impl Parser<'_> {
             } else {
                 false
             };
+            // the marks in their one order
+            if outer && !every && star(self.peek()) {
+                return Err(QuarbError::parse(
+                    "the star stands before the outer mark: write '<=>*?' (every witness, \
+                     the driver kept where there is none)",
+                ));
+            }
             self.correlation_depth += 1;
             let entry = self.parse_query();
             self.correlation_depth -= 1;
@@ -1576,6 +1593,7 @@ impl Parser<'_> {
                 ));
             }
             entry.outer = outer;
+            entry.every = every;
             query.correlations.push(entry);
         }
         // The pipeline written after the last joined expression is
@@ -1639,6 +1657,7 @@ impl Parser<'_> {
         Ok(Query {
             correlations,
             outer: false,
+            every: false,
             branches,
             pipeline,
             join_at,
@@ -2140,7 +2159,7 @@ impl Parser<'_> {
     /// recall, a push, a subcontext, or a command. `mode` is the
     /// static execution mode entering this command: path-shaped
     /// commands are navigation in navigation mode and an error in
-    /// value mode (a live topic would be dropped — file it first).
+    /// value mode (a live topic would be dropped — push it first).
     /// The rest of a push after its name: the record push
     /// (`.name%(…)`), the subcontext or computed body
     /// (`.name(body)`), else the bare push (a mark in navigation
@@ -2430,7 +2449,7 @@ impl Parser<'_> {
                     if !matches!(self.peek(), Some(Token::LParen)) {
                         return Err(QuarbError::parse(
                             "cannot navigate in value mode — the topic is live \
-                             and a hop would drop it; file it first with '| .' \
+                             and a hop would drop it; push it first with '| .' \
                              (or '| .name') and navigation resumes. \
                              (Parenthesize the path for a value expression.)",
                         ));
@@ -3614,6 +3633,7 @@ impl Parser<'_> {
             pipeline: Vec::new(),
             join_at: 0,
             outer: false,
+            every: false,
         };
         let mut steps: Vec<PathElem> = Vec::new();
         let mut projection: Option<Projection> = None;
@@ -3867,6 +3887,7 @@ impl Parser<'_> {
             pipeline: Vec::new(),
             join_at: 0,
             outer: false,
+            every: false,
         };
         let op = match form {
             Form::Operand(op) | Form::Arg(Arg::Expr(op)) => op,
@@ -13418,11 +13439,15 @@ fn func_command_at(call: FnCall, nested: bool) -> Result<Command> {
                 call.name
             )));
         }
-        return Err(if spec.is_some_and(|s| s.agg == Some(Agg::Context)) {
-            err.with_hint(format!(" ('{}' uses '@|')", call.name))
-        } else {
-            err
-        });
+        // A command of the whole context after a plain pipe: it
+        // exists, and the refusal says where it is written.
+        if spec.is_some_and(|s| s.agg == Some(Agg::Context)) {
+            return Err(QuarbError::parse(format!(
+                "'{0}' takes the whole context: write '@| {0}'",
+                call.name
+            )));
+        }
+        return Err(err);
     }
     // The shape checks see the operands; `--of=expr` is read apart.
     let shaped = if crate::syntax::registry::takes_of(&call.name) {
@@ -13709,7 +13734,23 @@ fn validate_keyed(call: &FnCall) -> Result<()> {
             call.name, call.name, call.name, call.name
         )));
     }
-    // the options (`--desc`) are not keys
+    // `--locale=tag` (ruling 2026-11-11): the tag's shape is held
+    // here, as `sort`'s operand is, so a typo fails the parse
+    if let Some(tag) = call.args.iter().find_map(|a| match a {
+        Arg::Opt {
+            name,
+            value: Some(Operand::Lit(v)),
+        } if name == "--locale" => Some(v.to_string()),
+        _ => None,
+    }) && !valid_locale_tag(&tag)
+    {
+        return Err(QuarbError::parse(format!(
+            "{}: '{tag}' is not a Unicode locale identifier \
+             (try ru-RU, de-DE, zh-Hant, ...)",
+            call.name
+        )));
+    }
+    // the options (`--desc`, `--locale=`) are not keys
     let mut keys = args.filter(|a| !matches!(a, Arg::Opt { .. })).peekable();
     // a quarq written as a key is applied on each capsa (spec: Quarqs)
     if keys.peek().is_none()

@@ -421,6 +421,7 @@ fn empty_query() -> Query {
         pipeline: Vec::new(),
         join_at: 0,
         outer: false,
+        every: false,
     }
 }
 

@@ -152,4 +152,7 @@ fn the_refusal_says_value_mode() {
     let d = fixture("mode");
     let e = refused(&d, &["/books/*:title | /x", "books.json"]);
     assert!(e.contains("cannot navigate in value mode"), "{e}");
+    // push is the one term (ruling 2026-11-10): the pointer says it
+    assert!(e.contains("push it first with '| .'"), "{e}");
+    assert!(!e.contains("file it"), "{e}");
 }

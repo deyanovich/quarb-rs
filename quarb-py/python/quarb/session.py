@@ -32,6 +32,7 @@ from . import (
     open as _open,
     defs_only as _defs_only,
     parse_defs as _parse_defs,
+    resolve_previous_line as _resolve_previous_line,
 )
 
 
@@ -267,6 +268,40 @@ class Session:
         # to every query so `&name` refs resolve across cells — the
         # same text-level mechanism quai uses for its `&N` history.
         self.defs_text = ""
+        # The cells that ran, as fragments under their labels
+        # (`def &7: … ;`), prepended like the table above: `&7` is
+        # the query of the cell labelled 7, `&_` the last of them,
+        # `&-N` the N-th back (ruling 2026-11-11). The notebook
+        # kernel labels a cell by its execution count.
+        self.labels: list[int] = []
+        self.history_text = ""
+
+    # -- the cells that ran --------------------------------------
+    def resolve_previous(self, query: str) -> str:
+        """`query` with `&_` / `&-N` (and `(=_)` / `(=-N)`) written
+        as the labels they name; raises ValueError where a form
+        reaches before the first labelled cell."""
+        resolved = _resolve_previous_line(query, self.labels)
+        return query if resolved is None else resolved
+
+    def remember(self, label: int, query: str) -> bool:
+        """Keep a query that ran as the fragment `&label`.
+
+        False, and nothing kept, where the query cannot stand as a
+        fragment's body (it carries definitions of its own) or the
+        label is not past the last one: such a cell has no label,
+        and `&_` skips it.
+        """
+        if self.labels and label <= self.labels[-1]:
+            return False
+        candidate = f"{self.history_text}def &{label}: {query.strip()} ;\n"
+        try:
+            _parse_defs(f"{self.defs_text}{candidate}")
+        except ValueError:
+            return False
+        self.history_text = candidate
+        self.labels.append(label)
+        return True
 
     # -- definitions ---------------------------------------------
     @staticmethod
@@ -426,10 +461,10 @@ class Session:
 
     def run(self, query: str, name: str | None = None) -> QuarbResult:
         picked = self._pick(name)
-        if self.defs_text:
-            # Prepend the fragment table; the engine takes inline
-            # defs ahead of the query in one text.
-            query = f"{self.defs_text}{query}"
+        if self.defs_text or self.history_text:
+            # Prepend the fragment table and the labelled cells; the
+            # engine takes inline defs ahead of the query in one text.
+            query = f"{self.defs_text}{self.history_text}{query}"
         if picked in self.resident:
             argv = [self.qua, "--resident", query, *self.resident[picked]]
             proc = subprocess.run(argv, capture_output=True, text=True)

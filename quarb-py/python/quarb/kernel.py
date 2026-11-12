@@ -159,8 +159,18 @@ def _make_kernel_class():
                         if not silent and out:
                             self._send_text(out + "\n")
                     else:
+                        # `&_` is the last query cell that ran, `&-N`
+                        # the N-th back, `&7` the cell of `In [7]`
+                        # (ruling 2026-11-11): resolved to the label
+                        # before the engine reads the cell
+                        text = self.qsession.resolve_previous(text)
                         result = self.qsession.run(text)
                         self.pyns["_"] = result
+                        # the cell that ran is `&N` by its execution
+                        # count; a failed cell never gets here and
+                        # takes none
+                        if store_history and not silent:
+                            self.qsession.remember(self.execution_count, text)
                         if not silent:
                             self._send_result(result)
             except Exception as e:  # noqa: BLE001 — kernel must not die

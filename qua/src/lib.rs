@@ -2603,6 +2603,7 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                 plan.join_left
                     .as_ref()
                     .map(|(t, c)| (t.as_str(), c.as_slice())),
+                plan.order_then.as_deref(),
             ) {
                 Ok((cols, rows)) => {
                     print_raw(&cols, rows, oc)?;
@@ -2992,6 +2993,22 @@ fn pushdown_plan(
             // ORDER BY key from the catalog), and the plan itself
             // is named where it does not run — the refusal branches.
             note_debug(PLAN, "query", || format!("pushdown plan: {}", plan.sql));
+            // An every-witness JOIN (`<=>*`) owes the joined table's
+            // order within each driver's rows: the SQLite driver
+            // keeps it; a driver that orders by one key only would
+            // answer the rows in the backend's order, so it scans.
+            if plan.order_then.is_some() && !matches!(dialect, Some(quarb_sql::Dialect::Sqlite)) {
+                note_info(
+                    NOT_PUSHED,
+                    "query",
+                    format!(
+                        "pushdown: an every-witness JOIN ('<=>*') pushes on SQLite only (the \
+                         joined rows' order is kept there); scanning — the plan: {}",
+                        plan.sql
+                    ),
+                );
+                return None;
+            }
             Some(plan)
         }
         Err(e) => {

@@ -444,7 +444,12 @@ fn paren_unit(chars: &[char], i: usize) -> Option<(Vec<Token>, usize)> {
         // `&3`); `(=name!)` the macro marker `&name!`.
         b if b.starts_with('=') && b.len() > 1 => {
             let stem = b[1..].trim_end_matches('!');
-            if stem.is_empty() || !stem.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            // `(=-2)`: the rounded twin of the hosts' `&-2`, the line
+            // two back (ruling 2026-11-11); it lexes as `&-2` does
+            let back = stem
+                .strip_prefix('-')
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()));
+            if stem.is_empty() || !(back || stem.chars().all(|c| c.is_alphanumeric() || c == '_')) {
                 return None;
             }
             let mut t = vec![Token::Amp, name(stem)];

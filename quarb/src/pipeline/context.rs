@@ -393,6 +393,53 @@ pub(crate) fn tree_command<H: Host>(
     }
 }
 
+/// `| tree[(operands)]` — each thread's node drawn as its own tree
+/// (ruling 2026-11-11): the drawing is the thread's topic, a text,
+/// and the thread keeps its node, its capsa and its place. With one
+/// thread the text is the one `@| tree` draws. A thread whose topic
+/// is a value has no node to draw, and the run is refused with the
+/// pointer. `apply_command`'s arm.
+pub(crate) fn tree_thread_command<H: Host>(
+    call: &FnCall,
+    caps: Vec<Thread<H::Ext>>,
+    host: &H,
+    trace: &H::Trace,
+    outer: Option<&Scope<'_, H::Ext>>,
+    peers: Option<&Peers<H::Ext>>,
+) -> Vec<Thread<H::Ext>> {
+    if let Some(c) = caps.iter().find(|c| c.topic.is_some()) {
+        record_refusal(format!(
+            "tree draws a node, and the thread holds a value ({}): draw the \
+             node before projecting it ('/path | tree')",
+            c.topic.as_ref().map_or(Value::Null, stdlib::type_of)
+        ));
+        return Vec::new();
+    }
+    let spec = crate::graph::tree::TreeSpec::from_call(call);
+    let mut out = Vec::with_capacity(caps.len());
+    for (i, mut c) in caps.into_iter().enumerate() {
+        let drawn = {
+            // a column expression reads under the thread's own capsa
+            let column = |ext: &H::Ext, op: &Operand| {
+                operand_value(host, ext, op, trace, c.scope(Some(i + 1), peers, outer))
+            };
+            host.render_tree(&[c.ext.bare()], &spec, &column)
+        };
+        match drawn {
+            Ok(text) => {
+                c.prov = effective_prov(host, &c);
+                c.topic = Some(Value::Str(text));
+                out.push(c);
+            }
+            Err(why) => {
+                record_refusal(why);
+                return Vec::new();
+            }
+        }
+    }
+    out
+}
+
 /// `@| edges(->road; --weight=km)` / `@| nodes`: the context's graph
 /// as one table value (spec: The graph as a table).
 pub(crate) fn graph_table_command<H: Host>(

@@ -825,9 +825,9 @@ pub const SPECS: &[FnSpec] = &[
         Check::Command,
     ),
     with_check(
-        on_node(context(
+        on_node(rendering(
             "tree",
-            "the context drawn as a tree, the mount root on top, each node a starting point with its subtree and its crosslinks; operands: column expressions; --depth=n (-d=n) the depth; switches --kind (-k), --traits (-t), --props (-p), --record (-r); --sample=n (-s=n) draws the first n children of every node that has more",
+            "the context drawn as a tree, the mount root on top, each node a starting point with its subtree and its crosslinks; after a plain pipe each thread's node drawn as its own tree, the drawing the thread's topic; operands: column expressions; --depth=n (-d=n) the depth; switches --kind (-k), --traits (-t), --props (-p), --record (-r); --sample=n (-s=n) draws the first n children of every node that has more",
         )),
         Check::Command,
     ),

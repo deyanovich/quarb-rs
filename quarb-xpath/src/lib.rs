@@ -546,14 +546,17 @@ impl Parser {
                     Some(Tok::Name(n, false)) => {
                         write!(out, "{hop}{}", quarb_name(&n)).unwrap();
                     }
+                    // any node on the axis: the upward hops are
+                    // canonical bare (`\`, `\\`), the sibling hops
+                    // keep their star (`>>*`, `<<*`)
                     Some(Tok::Star) => {
-                        write!(out, "{hop}*").unwrap();
+                        write!(out, "{hop}{}", wildcard(hop)).unwrap();
                     }
                     Some(Tok::Name(n, true)) if n == "node" => {
                         self.expect(Tok::LParen, "'('")?;
                         self.expect(Tok::RParen, "')'")?;
                         if axis != "self" {
-                            write!(out, "{hop}*").unwrap();
+                            write!(out, "{hop}{}", wildcard(hop)).unwrap();
                         }
                     }
                     _ => {
@@ -575,7 +578,9 @@ impl Parser {
             }
             Some(Tok::Dot) => return Ok(StepOut::Element),
             Some(Tok::DotDot) => {
-                write!(out, "\\*").unwrap();
+                // the parent hop, as the engine prints it: the bare
+                // backslash (`\*` is the same hop, and not the canon)
+                write!(out, "\\").unwrap();
                 return Ok(StepOut::Element);
             }
             Some(Tok::Name(n, true)) if n == "text" => {
@@ -934,6 +939,12 @@ enum StepOut {
     Projection(String),
 }
 
+/// The wildcard after a hop, as the engine's canon writes it: none
+/// after the upward hops, a star after the others.
+fn wildcard(hop: &str) -> &'static str {
+    if hop.starts_with('\\') { "" } else { "*" }
+}
+
 /// Render a name as a Quarb name segment, quoting it when it
 /// contains characters outside Quarb's bare-name set (e.g. the `:`
 /// of a namespace-prefixed name).
@@ -1004,8 +1015,14 @@ mod tests {
         assert_eq!(t("/descendant::title"), "//title");
         assert_eq!(t("/descendant::p/ancestor::chapter"), "//p\\\\chapter");
         assert_eq!(t("//image/parent::chapter"), "//image\\chapter");
-        assert_eq!(t("//image/.."), "//image\\*");
-        assert_eq!(t("//image/../title"), "//image\\*/title");
+        assert_eq!(t("//image/.."), "//image\\");
+        assert_eq!(t("//image/../title"), "//image\\/title");
+        // any node on an axis, as the engine's canon writes it: bare
+        // on the upward hops, starred on the sibling hops
+        assert_eq!(t("//image/parent::*"), "//image\\");
+        assert_eq!(t("//image/ancestor::*"), "//image\\\\");
+        assert_eq!(t("//title/following-sibling::*"), "//title>>*");
+        assert_eq!(t("//p/preceding-sibling::node()"), "//p<<*");
         assert_eq!(t("//p/self::p"), "//p[:name = \"p\"]");
     }
 

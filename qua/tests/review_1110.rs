@@ -586,7 +586,12 @@ fn a_colon_in_a_sources_title_is_one_name() {
     );
     // the title reads whole, and its first part names no sub-table
     assert_eq!(q(r#"/* @| # | $_:"dc:title""#), r#"@("Iliad"; "Odyssey")"#);
-    assert_eq!(q("/* @| # | $_:dc"), "null");
+    // (a read of a column the table lacks is refused, ruling 2026-11-11)
+    let e = refused(&d, &["/* @| # | $_:dc", "dc.csv"]);
+    assert!(
+        e.contains("no column 'dc' (the columns: dc:title, dc:creator, Time (HH:MM), note)"),
+        "{e}"
+    );
     // `stack` and `transpose` take a title for one name: one `value`
     // column, one label column
     assert_eq!(q("/* @| #(-i=:note) | stack | dim"), "@(6; 3)");

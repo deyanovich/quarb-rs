@@ -653,6 +653,8 @@ pub(crate) fn eval_query_caps_outer(
     let first_new = base.contexts.len();
     let mut contexts = base.contexts.clone();
     let mut outers = base.outer.clone();
+    let mut everys = base.every.clone();
+    everys.resize(first_new, false);
     // Driver-first: the query's own branches drive; each joined
     // expression materializes as a context, its correlated final-
     // step predicates (the ON clause) lifted out for the gate below.
@@ -665,11 +667,13 @@ pub(crate) fn eval_query_caps_outer(
         };
         contexts.push(ctx);
         outers.push(corr.outer);
+        everys.push(corr.every);
         on_preds.push(on);
     }
     let trace = Correlation {
         contexts,
         outer: outers,
+        every: everys,
         witnesses: Default::default(),
         join_keys: Default::default(),
     };
@@ -737,7 +741,8 @@ pub(crate) fn eval_query_caps_outer(
         outer,
     );
     if !query.correlations.is_empty() {
-        caps = correlate_gate(adapter, caps, &trace, first_new, &on_preds, outer);
+        let read = witnesses_read(&query.pipeline[at..], &on_preds);
+        caps = correlate_gate(adapter, caps, &trace, first_new, &on_preds, outer, &read);
     }
     caps = apply_commands(
         &query.pipeline[at..],
@@ -750,6 +755,52 @@ pub(crate) fn eval_query_caps_outer(
         outer,
     );
     (caps, pipeline_projected(query))
+}
+
+/// Per joined expression of a chain: whether its witness is read
+/// after it binds — `$$k` in the commands that follow the join, or
+/// in the ON of a later entry (whose own binding then depends on
+/// it). A join that only filters reads none, and the bare test of
+/// the slot (`[$$k]`, `[!$$k]`, alone or under `&&`, `||`, `!`) is
+/// the join filtering: it asks whether a witness was bound, the
+/// anti-join's question, and its answer is the same whichever
+/// candidate was (lang's finding on the candidate, 2026-11-11). A
+/// property of the slot tested for null is a read.
+fn witnesses_read(tail: &[Command], on_preds: &[Vec<PredExpr>]) -> Vec<bool> {
+    struct Reads(Vec<bool>);
+    impl crate::syntax::ast::visit::Visitor for Reads {
+        fn pred(&mut self, e: &PredExpr) {
+            if let PredExpr::Truthy(Operand::Ctx {
+                index: Some(_),
+                steps,
+                projection: None,
+            }) = e
+                && steps.is_empty()
+            {
+                return;
+            }
+            crate::syntax::ast::visit::walk_pred(self, e);
+        }
+        fn operand(&mut self, o: &Operand) {
+            if let Operand::Ctx { index: Some(k), .. } = o
+                && let Some(slot) = k.checked_sub(1).and_then(|i| self.0.get_mut(i))
+            {
+                *slot = true;
+            }
+            crate::syntax::ast::visit::walk_operand(self, o);
+        }
+    }
+    use crate::syntax::ast::visit::Visitor;
+    let mut v = Reads(vec![false; on_preds.len()]);
+    for command in tail {
+        v.command(command);
+    }
+    for on in on_preds {
+        for e in on {
+            v.pred(e);
+        }
+    }
+    v.0
 }
 
 /// Split a joined expression into its plain navigation and its ON
@@ -777,15 +828,27 @@ pub(crate) fn split_on(entry: &Query) -> (Query, Vec<PredExpr>) {
 }
 
 /// The join gate: for each driving capsa, search the joined
-/// contexts for a tuple satisfying every ON clause — entry `i`'s
+/// contexts for the tuples satisfying every ON clause — entry `i`'s
 /// predicates evaluated against entry `i`'s candidate node, with
 /// the driver reachable as `$$…` and earlier entries as `$*k`. A
 /// key comparison with a null on either side does not hold
-/// (ruling 2026-11-10, `eval_join_condition`). The
-/// first satisfying tuple (document order) is kept as the witness;
-/// an outer entry (`<=>?`) offers a null binding after its real
-/// candidates are exhausted, its own ON vacuous under it. A capsa
-/// no tuple admits is dropped.
+/// (ruling 2026-11-10, `eval_join_condition`).
+///
+/// A plain entry (`<=>`) keeps the first of its candidates under
+/// which the rest of the chain binds, in document order: one
+/// witness, the driver's cardinality unchanged. A starred entry
+/// (`<=>*`, ruling 2026-11-11) keeps every such candidate, and the
+/// capsa forks into one thread per tuple, entry by entry in each
+/// context's order: the SQL JOIN. An outer entry (`<=>?`, `<=>*?`)
+/// offers a null binding where it has no candidate, its own ON
+/// vacuous under it. A capsa no tuple admits is dropped.
+///
+/// `read` says, per entry, whether the query reads its witness
+/// after the join: a plain entry that binds the first of several
+/// candidates for some driver is then told ([`SEVERAL_WITNESSES`]),
+/// the answer depending on which one was bound.
+///
+/// [`SEVERAL_WITNESSES`]: crate::diagnostic::SEVERAL_WITNESSES
 pub(crate) fn correlate_gate(
     adapter: &impl AstAdapter,
     caps: Vec<Capsa>,
@@ -793,51 +856,126 @@ pub(crate) fn correlate_gate(
     first_new: usize,
     on_preds: &[Vec<PredExpr>],
     outer: Option<&Scope<'_, GraphExt>>,
+    read: &[bool],
 ) -> Vec<Capsa> {
-    caps.into_iter()
-        .filter_map(|mut c| {
-            let tuple = {
-                // The driver's state as the ON clause sees it: its
-                // marks and arrivals, borrowed, under no witness (that
-                // is what is being found): the empty witness in the
-                // slot hides the driver's own bindings.
-                let driver = Scope {
-                    prov: Some(&c.prov),
-                    register: &c.register,
-                    members: &c.members,
-                    topic: c.topic.as_ref(),
-                    ordinal: None,
-                    captures: &c.captures,
-                    named: &c.named,
-                    peers: None,
-                    outer,
-                    driver: None,
-                    ext: &c.ext,
-                    view: c.ext.view(),
-                    crossing: None,
-                    walk: None,
-                    witness: Some(&[]),
-                };
-                // Base contexts (an enclosing trace) stay unbound —
-                // the placement rules keep ON clauses from
-                // referencing them.
-                let mut bound: Vec<Option<NodeId>> = vec![None; first_new];
-                if bind_entries(adapter, &driver, on_preds, trace, first_new, &mut bound) {
-                    Some(bound)
-                } else {
-                    None
-                }
+    // per entry: the drivers for which a plain `<=>` chose among
+    // several candidates
+    let mut chosen = vec![0usize; on_preds.len()];
+    let mut out = Vec::with_capacity(caps.len());
+    for c in caps {
+        let tuples = {
+            // The driver's state as the ON clause sees it: its
+            // marks and arrivals, borrowed, under no witness (that
+            // is what is being found): the empty witness in the
+            // slot hides the driver's own bindings.
+            let driver = Scope {
+                prov: Some(&c.prov),
+                register: &c.register,
+                members: &c.members,
+                topic: c.topic.as_ref(),
+                ordinal: None,
+                captures: &c.captures,
+                named: &c.named,
+                peers: None,
+                outer,
+                driver: None,
+                ext: &c.ext,
+                view: c.ext.view(),
+                crossing: None,
+                walk: None,
+                witness: Some(&[]),
             };
-            let tuple = tuple?;
-            trace
-                .witnesses
-                .borrow_mut()
-                .entry(c.ext.node.0)
-                .or_insert_with(|| tuple.clone());
-            c.ext.bindings = tuple;
-            Some(c)
-        })
-        .collect()
+            // Base contexts (an enclosing trace) stay unbound —
+            // the placement rules keep ON clauses from
+            // referencing them.
+            let mut bound: Vec<Option<NodeId>> = vec![None; first_new];
+            let mut tuples = Vec::new();
+            bind_entries(
+                adapter,
+                &driver,
+                on_preds,
+                trace,
+                first_new,
+                &mut bound,
+                &mut tuples,
+            );
+            // a second candidate under a plain entry whose witness
+            // the query reads: looked for only then, and only as
+            // far as the first one found
+            if let Some(first) = tuples.first() {
+                for (i, on) in on_preds.iter().enumerate() {
+                    let ctx_idx = first_new + i;
+                    if !read.get(i).copied().unwrap_or(false)
+                        || trace.every.get(ctx_idx).copied().unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    let Some(kept) = first[ctx_idx] else { continue };
+                    let before = &first[..ctx_idx];
+                    let another = join_candidates(adapter, &driver, on, trace, ctx_idx, before)
+                        .into_iter()
+                        .filter(|cand| *cand != kept)
+                        .any(|cand| {
+                            let mut probe = before.to_vec();
+                            probe.push(Some(cand));
+                            let scope = Scope {
+                                prov: None,
+                                register: driver.register,
+                                topic: driver.topic,
+                                captures: driver.captures,
+                                named: driver.named,
+                                driver: Some(&driver),
+                                outer: driver.outer,
+                                ..Scope::at(driver.ext)
+                            };
+                            on.iter().all(|e| {
+                                eval_join_condition_at(adapter, cand, e, trace, &probe, scope)
+                            })
+                        });
+                    if another {
+                        chosen[i] += 1;
+                    }
+                }
+            }
+            tuples
+        };
+        let Some(first) = tuples.first() else {
+            continue;
+        };
+        trace
+            .witnesses
+            .borrow_mut()
+            .entry(c.ext.node.0)
+            .or_insert_with(|| first.clone());
+        let last = tuples.len() - 1;
+        let mut c = Some(c);
+        for (n, tuple) in tuples.into_iter().enumerate() {
+            // the last tuple takes the capsa itself
+            let mut thread = if n == last {
+                c.take().expect("one capsa per tuple")
+            } else {
+                c.as_ref().expect("one capsa per tuple").clone()
+            };
+            thread.ext.bindings = tuple;
+            out.push(thread);
+        }
+    }
+    for (i, n) in chosen.into_iter().enumerate() {
+        if n > 0 {
+            crate::value::ambient::record_warning_once(
+                crate::diagnostic::SEVERAL_WITNESSES,
+                &format!("$${}", i + 1),
+                format!(
+                    "'<=>' bound the first of several candidates for {n} driver{}, and the \
+                     query reads the witness ($${}): the answer depends on the joined \
+                     expression's order; '<=>*' binds every candidate",
+                    if n == 1 { "" } else { "s" },
+                    i + 1
+                ),
+            );
+        }
+    }
+    out
 }
 
 /// The candidates of joined context `ctx_idx` worth testing for
@@ -957,7 +1095,11 @@ pub(crate) fn join_candidates(
 
 /// Depth-first search over the joined contexts, one entry at a
 /// time. `bound` holds the partial tuple; entry `i` binds context
-/// `first_new + i`.
+/// `first_new + i`. Every complete tuple the search keeps is pushed
+/// onto `tuples`: under a plain entry the first candidate that
+/// leads to one ends that entry's search, under a starred entry
+/// (`<=>*`) every candidate is followed. Answers whether a tuple
+/// was kept below this point.
 pub(crate) fn bind_entries(
     adapter: &impl AstAdapter,
     driver: &Scope<'_, GraphExt>,
@@ -965,14 +1107,18 @@ pub(crate) fn bind_entries(
     trace: &Trace,
     first_new: usize,
     bound: &mut Vec<Option<NodeId>>,
+    tuples: &mut Vec<Vec<Option<NodeId>>>,
 ) -> bool {
     let i = bound.len() - first_new;
     if i == on_preds.len() {
+        tuples.push(bound.clone());
         return true;
     }
     let ctx_idx = bound.len();
+    let every = trace.every.get(ctx_idx).copied().unwrap_or(false);
     let candidates: Vec<NodeId> =
         join_candidates(adapter, driver, &on_preds[i], trace, ctx_idx, bound);
+    let mut found = false;
     for cand in candidates {
         bound.push(Some(cand));
         // One capsa, two nodes: the condition reads the driver's
@@ -991,20 +1137,21 @@ pub(crate) fn bind_entries(
         let ok = on_preds[i]
             .iter()
             .all(|e| eval_join_condition_at(adapter, cand, e, trace, bound, scope))
-            && bind_entries(adapter, driver, on_preds, trace, first_new, bound);
+            && bind_entries(adapter, driver, on_preds, trace, first_new, bound, tuples);
+        bound.pop();
         if ok {
-            return true;
+            found = true;
+            if !every {
+                return true;
+            }
         }
-        bound.pop();
     }
-    if trace.outer.get(ctx_idx).copied().unwrap_or(false) {
+    if !found && trace.outer.get(ctx_idx).copied().unwrap_or(false) {
         bound.push(None);
-        if bind_entries(adapter, driver, on_preds, trace, first_new, bound) {
-            return true;
-        }
+        found = bind_entries(adapter, driver, on_preds, trace, first_new, bound, tuples);
         bound.pop();
     }
-    false
+    found
 }
 
 /// Navigate every branch from `start`, projecting where asked, and
@@ -1126,9 +1273,18 @@ pub(crate) fn dedup_merge(caps: Vec<Capsa>) -> Vec<Capsa> {
     // threads at one node, by arrival and register; among them, one
     // per topic — a union's node and the value another branch reads
     // at that node (`/b/1 || /b/*::title`) are two answers
-    let mut index: HashMap<(NodeId, ArrivalKey, RegKey), Vec<usize>> = HashMap::new();
+    // (and by witness: the threads of a starred correlation stand on
+    // one node and differ by the tuple they bound, ruling 2026-11-11)
+    #[allow(clippy::type_complexity)]
+    let mut index: HashMap<(NodeId, ArrivalKey, RegKey, Vec<Option<NodeId>>), Vec<usize>> =
+        HashMap::new();
     for c in caps {
-        let key = (c.ext.node, arrival_key(&c.ext), reg_key(&c.register));
+        let key = (
+            c.ext.node,
+            arrival_key(&c.ext),
+            reg_key(&c.register),
+            c.ext.bindings.clone(),
+        );
         let slots = index.entry(key).or_default();
         match slots.iter().find(|&&i| kept[i].topic == c.topic) {
             Some(&i) => {
@@ -1162,6 +1318,9 @@ pub(crate) struct Correlation {
     /// Per-context outer flags (`<=>?`): an outer context may bind
     /// null when no real tuple admits a row.
     pub(crate) outer: Vec<bool>,
+    /// Per-context every flags (`<=>*`): every satisfying node of
+    /// the context binds, one thread each.
+    pub(crate) every: Vec<bool>,
     pub(crate) contexts: Vec<Vec<NodeId>>,
     pub(crate) witnesses: std::cell::RefCell<std::collections::HashMap<u64, Vec<Option<NodeId>>>>,
     /// Per joined context and property: the context's nodes by the

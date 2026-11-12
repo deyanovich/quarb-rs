@@ -81,6 +81,8 @@ rich_css = _ext.rich_css
 diagnostics_html = _ext.diagnostics_html
 parse_defs = _ext.parse_defs
 defs_only = _ext.defs_only
+# (the session's own: `&_` / `&-N` resolved to a cell's label)
+resolve_previous_line = _ext.resolve_previous_line
 man = _ext.man
 # (the session's own: a closing `| copy` taken off a cell's query)
 take_copy = _ext.take_copy

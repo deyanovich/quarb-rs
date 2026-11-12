@@ -109,6 +109,68 @@ def test_kernel_cross_cell_defs(kernel, tmp_path_factory):
     assert status == "ok"
 
 
+def test_kernel_previous_line(kernel, tmp_path_factory):
+    """`&_` is the last query cell that ran, `&-N` the N-th back,
+    `&N` the cell of `In [N]` (ruling 2026-11-11): a cell that ran
+    takes its execution count as its label."""
+    tmp = tmp_path_factory.mktemp("kprev")
+    (tmp / "books.json").write_text(
+        '{"books": [{"title": "Emma"}, {"title": "Iliad"}]}'
+    )
+    run_cell(kernel, f"%mount {tmp / 'books.json'}")
+
+    def plain(code):
+        status, out = run_cell(kernel, code)
+        result = [o for o in out if o["msg_type"] == "execute_result"]
+        text = result[0]["content"]["data"]["text/plain"] if result else ""
+        count = result[0]["content"]["execution_count"] if result else None
+        errors = [o["content"]["evalue"] for o in out if o["msg_type"] == "error"]
+        return status, text, count, errors
+
+    status, text, titles_at, _ = plain("/books/*::title")
+    assert status == "ok" and "Emma" in text and "Iliad" in text
+    # the line before this one, with a tail
+    status, text, _, _ = plain("&_ @| count")
+    assert status == "ok" and text.strip() == "2", text
+    # a cell that fails takes no label: `&_` is still the count
+    status, _, _, _ = plain("/books/*::titel |")
+    assert status == "error"
+    status, text, _, _ = plain("&_")
+    assert status == "ok" and text.strip() == "2", text
+    # three labelled cells back: the titles; and by its number
+    status, text, _, _ = plain("&-3 | upper")
+    assert status == "ok" and "EMMA" in text, text
+    status, text, _, _ = plain(f"&{titles_at} | upper")
+    assert status == "ok" and "ILIAD" in text, text
+    # the rounded twin
+    status, text, _, _ = plain("(=_) @| count")
+    assert status == "ok" and text.strip() == "2", text
+    # past the first labelled cell
+    status, _, _, errors = plain("&-99")
+    assert status == "error"
+    assert errors and "'&-99': no line 99 back" in errors[0], errors
+
+
+def test_session_labels_and_previous():
+    """The session's own: labels oldest first, a query that cannot
+    be a fragment's body takes none."""
+    from quarb.session import Session
+
+    s = Session()
+    with pytest.raises(ValueError, match="no line before this one"):
+        s.resolve_previous("&_ | count")
+    assert s.remember(3, "/books/*::title")
+    assert s.remember(7, "&3 @| count")
+    assert not s.remember(7, "/again"), "a label is past the last one"
+    assert not s.remember(9, "def &x: /a ; /b"), "inline definitions"
+    assert s.labels == [3, 7]
+    assert s.resolve_previous("&_ | upper") == "&7 | upper"
+    assert s.resolve_previous("&-2") == "&3"
+    assert s.resolve_previous("(=_)") == "(=7)"
+    assert s.resolve_previous('= "&_"') == '= "&_"'
+    assert "def &3: /books/*::title ;" in s.history_text
+
+
 def test_kernel_completion(kernel, tmp_path_factory):
     import json as _json
     tmp = tmp_path_factory.mktemp("kc")

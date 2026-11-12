@@ -300,7 +300,15 @@ fn the_table_literal_its_laws_and_its_readings() {
     assert_eq!(one("= #(%(1; 2); %(3; 4)) | % | :2"), "@(2; 4)");
     // the positions are the array's column names for `:2` too
     assert_eq!(one("= #(%(1; 2); %(3; 4)) | :2"), "@(2; 4)");
-    assert_eq!(one("= #(%(1; 2); %(3; 4)) | :3"), "null");
+    // a position past the width names no column (ruling 2026-11-11:
+    // a read of a column a table lacks is refused; it was null)
+    let e = refuse("= #(%(1; 2); %(3; 4)) | :3");
+    assert!(
+        e.contains(
+            "'3' names no column: the table has no header, its columns are positions (1 to 2)"
+        ),
+        "{e}"
+    );
     assert_eq!(one("= #(%(1; 2); %(3; 4)) | [1]"), "@(1; 2)");
     assert!(refuse("= 5 | [2]").contains("whole-context"));
     // over nodes, each contributes the record of its properties

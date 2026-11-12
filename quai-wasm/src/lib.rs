@@ -489,6 +489,11 @@ impl QuaiSession {
         if t.is_empty() {
             return envelope("", vec![], None, None);
         }
+        // A notebook names its cell: the previous-line forms are the
+        // interactive line's (ruling 2026-11-11).
+        if let Some(why) = quarb::previous_line_in_a_file(t) {
+            return envelope("", vec![], None, Some(why));
+        }
         let label = format!("&{}", self.session.line_no());
         // A definition cell takes its ordinal and answers nothing.
         if (t.starts_with("def ") || t.starts_with("macro ")) && quarb::parse_defs(t).is_ok() {
@@ -538,6 +543,16 @@ impl QuaiSession {
         if line.is_empty() {
             return envelope("", vec![], None, None);
         }
+        // `&_` — the line before this one, `&-N` the line N back
+        // (ruling 2026-11-11): resolved to the label it names before
+        // anything reads the line, so the history and a saved
+        // notebook carry the `&N` line it is.
+        let last = self.session.line_no().saturating_sub(1);
+        let resolved = match quarb::resolve_previous_line(line, last) {
+            Ok(resolved) => resolved,
+            Err(e) => return envelope("", vec![], None, Some(e)),
+        };
+        let line = resolved.as_deref().unwrap_or(line);
 
         let label = format!("&{}", self.session.line_no());
 
@@ -654,6 +669,45 @@ mod tests {
             "{doc}"
         );
         assert!(rich_css().contains(".quarb-table th .type"));
+    }
+
+    /// `&_` and `&-N` (ruling 2026-11-11): the line form resolves
+    /// them to a label, the history carries the label, and a
+    /// notebook cell is told to name its cell.
+    #[test]
+    fn the_previous_line_forms_are_the_line_s() {
+        let csv = "Port,Draught (m)\nPiraeus,18.5\nKoper,14\n";
+        let mut s = QuaiSession::new("csv", csv, 1_753_500_000_000.0).unwrap();
+        let run = |s: &mut QuaiSession, line: &str| -> serde_json::Value {
+            serde_json::from_str(&s.run(line)).unwrap()
+        };
+        let r = run(&mut s, "&_");
+        assert_eq!(r["error"], "'&_': no line before this one", "{r}");
+        let r = run(&mut s, "/row::Port");
+        assert_eq!(r["label"], "&1", "{r}");
+        let r = run(&mut s, "&_ @| count");
+        assert_eq!(r["label"], "&2", "{r}");
+        assert_eq!(r["lines"][0], "2", "{r}");
+        // a failed line takes no label and is not the previous line
+        let r = run(&mut s, "/row::Port |");
+        assert!(r["error"].is_string(), "{r}");
+        let r = run(&mut s, "&-2 | upper");
+        assert_eq!(r["label"], "&3", "{r}");
+        assert_eq!(r["lines"][0], "PIRAEUS", "{r}");
+        let r = run(&mut s, "&_#");
+        assert_eq!(r["lines"][1], "KOPER", "{r}");
+        // what a saved notebook is written from
+        let history = s.history();
+        assert!(history.contains("def &2: &1 @| count ;"), "{history}");
+        assert!(history.contains("def &3: &1 | upper ;"), "{history}");
+        assert!(!history.contains("&_"), "{history}");
+        // a notebook cell names its cell
+        let r: serde_json::Value = serde_json::from_str(&s.run_cell("&_ @| count")).unwrap();
+        assert_eq!(
+            r["error"],
+            "'&_' is the interactive form of a session: a notebook names its cell ('&N')",
+            "{r}"
+        );
     }
 
     #[test]

@@ -231,6 +231,13 @@ pub(crate) struct RunState {
     /// path navigated inside such a body, whose predicates stand on
     /// nodes and read a node's own fields ([`out_of_row_reach`]).
     pub(crate) row_in_reach: Vec<Option<Value>>,
+    /// The headers of the tables whose rows stand as the topic's
+    /// record, innermost last (ruling 2026-11-11): a row predicate
+    /// on a table, a keyed command over one, `--of=` read on its
+    /// rows. A field read on such a record that names no column is
+    /// refused ([`missing_row_column`]); the flag is whether the
+    /// table has a header (else its columns are positions).
+    pub(crate) row_headers: Vec<(Vec<String>, bool)>,
     /// The prefix the pipeline keeps right after the one branch's
     /// last step (`@| [..n]`, `@| [n]`, `@| first(n)`), computed once
     /// per top-level query (ruling 2026-11-05: a slice right after the
@@ -397,6 +404,32 @@ pub(crate) fn with_row_in_reach<R>(row: Value, f: impl FnOnce() -> R) -> R {
         s.row_in_reach.pop();
     });
     out
+}
+
+/// Run `f` while the rows of a table stand as the topic's record,
+/// each keyed by `columns`: a field read on such a row that names
+/// no column is refused, where a plain record's missing field is
+/// null.
+pub(crate) fn with_table_rows<R>(columns: Vec<String>, headed: bool, f: impl FnOnce() -> R) -> R {
+    with_run(|s| s.row_headers.push((columns, headed)));
+    let out = f();
+    with_run(|s| {
+        s.row_headers.pop();
+    });
+    out
+}
+
+/// The refusal a read of `name` on `record` earns, where the record
+/// is a row of the table whose rows are being read (its keys are
+/// that table's columns, in order) and has no such field; `None`
+/// for any other record: its missing field is null.
+pub(crate) fn missing_row_column(record: &crate::value::Record, name: &str) -> Option<String> {
+    with_run(|s| {
+        let (columns, headed) = s.row_headers.last()?;
+        (columns.len() == record.len()
+            && columns.iter().zip(record.iter()).all(|(c, (k, _))| c == k))
+        .then(|| crate::value::no_column(name, columns, *headed))
+    })
 }
 
 /// Run `f`, a navigation, with no row in reach: the predicates of a

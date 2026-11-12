@@ -32,6 +32,13 @@ pub struct Query {
     /// trace-referencing predicates vacuous (the ON clause of a
     /// LEFT JOIN).
     pub outer: bool,
+    /// Meaningful on a correlation entry: `true` when the marker
+    /// was `<=>*` (or `<=>*?`) — every witness (ruling 2026-11-11).
+    /// The driver's thread forks once per node of the entry's
+    /// context that satisfies its ON, in the context's order: the
+    /// SQL JOIN, where the plain `<=>` binds the first and keeps
+    /// the driver's cardinality.
+    pub every: bool,
 }
 
 /// Where a navigation (a branch, a navigation command, or an operand

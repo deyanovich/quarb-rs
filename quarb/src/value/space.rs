@@ -2229,6 +2229,20 @@ impl<'a> Row<'a> {
     }
 }
 
+/// The refusal of a read naming a column a table lacks: the name
+/// and the columns there are; on a table without a header the
+/// columns are positions.
+pub(crate) fn no_column(name: &str, columns: &[String], headed: bool) -> String {
+    if headed {
+        format!("no column '{name}' (the columns: {})", columns.join(", "))
+    } else {
+        format!(
+            "'{name}' names no column: the table has no header, its columns are positions (1 to {})",
+            columns.len()
+        )
+    }
+}
+
 impl Table {
     /// A table assembled from its parts as given — the cells kept
     /// as they are, no typing pass (the builders that carry a
@@ -2996,17 +3010,30 @@ impl Table {
             .collect()
     }
 
+    /// What a read of a column the table lacks is refused with: the
+    /// name and the columns there are.
+    pub fn no_column(&self, name: &str) -> String {
+        no_column(
+            name,
+            &(0..self.width())
+                .map(|j| self.column_name(j))
+                .collect::<Vec<_>>(),
+            self.header.is_some(),
+        )
+    }
+
     /// A column by name as the table answers it: on an indexed table
     /// the RECORD of the column keyed by the labels (refused where a
     /// label repeats, naming it), on a plain table the list; a name
-    /// no column bears is null.
+    /// no column bears is refused, naming the columns the table has
+    /// (ruling 2026-11-11; it was null).
     pub fn column_value(&self, name: &str) -> Result<Value, String> {
         let Some(list) = self.column(name) else {
             // `t:bar` on a header with levels: the columns under the name
-            return Ok(self
+            return self
                 .sub_columns(name)
                 .map(Value::table)
-                .unwrap_or(Value::Null));
+                .ok_or_else(|| self.no_column(name));
         };
         let Some(labels) = self.labels() else {
             return Ok(list);

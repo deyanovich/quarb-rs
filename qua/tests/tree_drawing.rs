@@ -168,13 +168,70 @@ fn a_document_hangs_its_starting_points_by_their_path() {
     );
     // the root itself as a starting point draws the whole document
     assert_eq!(text("^ @| tree(-d=2)", &d), "/\n└── archives\n    └── gro");
-    // a value context is refused; so is the pipe form and a stray word
+    // a value context is refused, and so is a stray word
     let e = refused("/archives/gro/entries/*::surname @| tree", &d);
     assert!(e.contains("tree draws nodes"), "{e}");
-    let e = refused("/archives/gro/entries/* | tree", &d);
-    assert!(e.contains("'tree' uses '@|'"), "{e}");
     let e = refused("/archives/gro/entries/* @| tree(sizes)", &d);
     assert!(e.contains("tree takes column expressions"), "{e}");
+}
+
+/// After a plain pipe `tree` draws each thread's node as its own
+/// tree (ruling 2026-11-11): the drawing is the thread's topic, a
+/// text, and with one thread it is the text `@| tree` draws.
+#[test]
+fn the_plain_pipe_draws_each_thread() {
+    let d = doc();
+    let drawings = |q: &str| match quarb::run(q, &d).unwrap() {
+        QueryResult::Values(vs) => vs
+            .iter()
+            .map(|v| match v {
+                Value::Str(s) => s.clone(),
+                other => panic!("{q}: expected text, got {other:?}"),
+            })
+            .collect::<Vec<_>>(),
+        other => panic!("{q}: expected values, got {other:?}"),
+    };
+    // one drawing per thread, each what `@| tree` draws of that node
+    let each = drawings("/archives/gro/entries/* | tree(-d=0)");
+    assert_eq!(
+        each,
+        [
+            text("/archives/gro/entries/0 @| tree(-d=0)", &d),
+            text("/archives/gro/entries/1 @| tree(-d=0)", &d),
+        ]
+    );
+    // the options and the column expressions mean what they mean
+    // under `@|`, the expression read on the thread's own node
+    assert_eq!(
+        drawings("/archives/gro/entries/* | tree(::given; -d=0)"),
+        [
+            "/\n└┄┄ archives/gro/entries\n    └── 0  Ahmed",
+            "/\n└┄┄ archives/gro/entries\n    └── 1  Ernest",
+        ]
+    );
+    // the thread keeps its node: the drawing is pushed and the node
+    // read after it
+    assert_eq!(
+        drawings("/archives/gro/entries/* | tree(-d=0) | .t | $$_::given"),
+        ["Ahmed", "Ernest"]
+    );
+    // a thread whose topic is a value has no node to draw
+    let e = refused("/archives/gro/entries/*::surname | tree", &d);
+    assert!(
+        e.contains("tree draws a node, and the thread holds a value (text)"),
+        "{e}"
+    );
+    // the commands of the whole context stay there, and say where
+    for name in ["threads", "collapse"] {
+        let e = refused(&format!("/archives/gro/entries/* | {name}"), &d);
+        assert!(
+            e.contains(&format!(
+                "'{name}' takes the whole context: write '@| {name}'"
+            )),
+            "{e}"
+        );
+        assert!(!e.contains("not yet supported"), "{e}");
+    }
 }
 
 #[test]

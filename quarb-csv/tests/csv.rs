@@ -427,7 +427,10 @@ fn window_shapes() {
         quarb::run(q, &adapter).unwrap_err().to_string()
     };
     // whole-context only: they read neighbors
-    assert!(err("/row | ::age | window(-1..0)").contains("'window' uses '@|'"));
+    assert!(
+        err("/row | ::age | window(-1..0)")
+            .contains("'window' takes the whole context: write '@| window'")
+    );
     // `| shift(n)` stands on a value (a list, a record, an indexed
     // table move their values, draft 166); a number has none to move
     assert!(

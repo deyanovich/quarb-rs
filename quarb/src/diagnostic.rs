@@ -165,6 +165,12 @@ pub const UNKNOWN_LABEL: &str = "UNKNOWN_LABEL";
 /// surface its source declares lacks (a table's columns, a CSV's
 /// header); the properties there are named.
 pub const UNKNOWN_PROPERTY: &str = "UNKNOWN_PROPERTY";
+/// Warning: a plain correlation (`<=>`, `<=>?`) bound the first of
+/// several satisfying candidates for some driver, and the query
+/// reads that witness: the answer depends on which one was bound.
+/// Quiet where the join only filters, and under `<=>*`, which binds
+/// every candidate (ruling 2026-11-11).
+pub const SEVERAL_WITNESSES: &str = "SEVERAL_WITNESSES";
 /// Info: two indexes met and the labels of a side were cast to the
 /// type they agreed on (a declared index won, two undeclared were
 /// upcast to their common type, an integer met a float).

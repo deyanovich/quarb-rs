@@ -628,6 +628,7 @@ pub fn raw_query(
     sql: &str,
     order_table: Option<&str>,
     join_left: Option<(&str, &[String])>,
+    order_then: Option<&str>,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>), SqliteError> {
     let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     // A witness-JOIN plan is only sound when the ON binds the left
@@ -644,12 +645,20 @@ pub fn raw_query(
     }
     let sql = match order_table {
         Some(t) => {
-            let key = specs(&conn, &[])?
-                .into_iter()
-                .find(|s| s.name == t)
-                .and_then(|s| s.pk.map(|i| s.columns[i].clone()))
-                .unwrap_or_else(|| "rowid".to_string());
-            format!("{sql} ORDER BY {t}.{key}")
+            let catalog = specs(&conn, &[])?;
+            let key_of = |t: &str| {
+                catalog
+                    .iter()
+                    .find(|s| s.name == t)
+                    .and_then(|s| s.pk.map(|i| s.columns[i].clone()))
+                    .unwrap_or_else(|| "rowid".to_string())
+            };
+            // an every-witness JOIN (`<=>*`): the rows of one driver
+            // in the joined table's own order, after the driver's
+            match order_then {
+                Some(j) => format!("{sql} ORDER BY {t}.{}, {j}.{}", key_of(t), key_of(j)),
+                None => format!("{sql} ORDER BY {t}.{}", key_of(t)),
+            }
         }
         None => sql.to_string(),
     };

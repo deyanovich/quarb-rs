@@ -299,6 +299,9 @@ pub fn registry_tsv() -> String {
             // `shift` is a context command with a value form (`| shift(1)`
             // on a list), not a renderer like csv or pretty
             (true, Some(Agg::Context)) if spec.name == "shift" => "context",
+            // `tree` draws the context on `@|` and each thread's node
+            // on `|` (ruling 2026-11-11): a context command still
+            (true, Some(Agg::Context)) if spec.name == "tree" => "context",
             (true, Some(Agg::Context)) => "rendering",
             (false, Some(Agg::Reducing)) => "reducing",
             // `collapse` and the positional selections by key are the
@@ -461,7 +464,7 @@ mod tests {
         assert!(
             registry_tsv()
                 .lines()
-                .any(|l| l.starts_with("tree\tcontext\t@|\tnode\t"))
+                .any(|l| l.starts_with("tree\tcontext\t| @|\tnode\t"))
         );
     }
 }

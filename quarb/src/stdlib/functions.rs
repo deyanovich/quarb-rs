@@ -389,6 +389,81 @@ pub fn atergo_flag(call: &FnCall) -> bool {
         .any(|a| matches!(a, Arg::Opt { name, value: None } if name == "--atergo" || name == "-a"))
 }
 
+/// `-v` (`--value`) on `sort`: a record's fields ordered by their
+/// values, where the bare `sort` orders them by key (ruling
+/// 2026-11-11).
+pub fn value_flag(call: &FnCall) -> bool {
+    call.args
+        .iter()
+        .any(|a| matches!(a, Arg::Opt { name, value: None } if name == "--value" || name == "-v"))
+}
+
+/// What `sort` answers `-v` with anywhere but on one record.
+pub(crate) const VALUE_FLAG_OFF_A_RECORD: &str = "sort: -v (--value) orders a record's fields by \
+     their values; a list has no keys: write '| sort(-v)' on the record";
+
+/// The text order a `sort` call sorts under: the one it names (a
+/// locale's collation, the a tergo order, or both), else the output
+/// locale's collation when the tool set one.
+pub(crate) fn sort_text_order(call: &FnCall) -> Option<Box<dyn Fn(&str, &str) -> Ordering>> {
+    text_order(call).or_else(default_text_order)
+}
+
+/// `sort`'s order over items read by one value each (ruling
+/// 2026-11-11): the standard value comparison, with text that has
+/// no reading ordered by the call's text order. Numbers, instants,
+/// quantities and text that reads whole as one keep their own order
+/// under any locale: a collation orders text and nothing else.
+/// Stable; `--desc` (`-d`) is the whole order flipped.
+pub(crate) fn sort_keyed<T>(
+    call: &FnCall,
+    items: Vec<(Value, T)>,
+    scale: Scale,
+) -> Vec<(Value, T)> {
+    let collate = sort_text_order(call);
+    // Keys once per value, not two per comparison.
+    let mut keyed: Vec<(crate::value::SortKey, Value, T)> = items
+        .into_iter()
+        .map(|(v, x)| (v.sort_key_with(scale), v, x))
+        .collect();
+    keyed.sort_by(|a, b| match (collate.as_deref(), &a.0, &b.0, &a.1, &b.1) {
+        (
+            Some(c),
+            crate::value::SortKey::Text(_),
+            crate::value::SortKey::Text(_),
+            Value::Str(x),
+            Value::Str(y),
+        ) => c(x, y),
+        _ => a.0.cmp_key(&b.0),
+    });
+    let mut out: Vec<(Value, T)> = keyed.into_iter().map(|(_, v, x)| (v, x)).collect();
+    if desc_flag(call) {
+        out.reverse();
+    }
+    out
+}
+
+/// The tag of a keyed command's `--locale=tag` (ruling 2026-11-11:
+/// `sort_by(:name; --locale=de)`), where the call carries one.
+pub fn locale_option(call: &FnCall) -> Option<String> {
+    call.args.iter().find_map(|a| match a {
+        Arg::Opt {
+            name,
+            value: Some(crate::syntax::ast::Operand::Lit(v)),
+        } if name == "--locale" => Some(v.to_string()),
+        _ => None,
+    })
+}
+
+/// The text order a keyed command's `--locale=tag` names: its text
+/// keys order under that locale's collation, every other key as it
+/// did. `None` without the option.
+pub(crate) fn locale_text_order(call: &FnCall) -> Option<Box<dyn Fn(&str, &str) -> Ordering>> {
+    let tag = locale_option(call)?;
+    collator_of(&call.name, &tag)
+        .map(|c| -> Box<dyn Fn(&str, &str) -> Ordering> { Box::new(move |a, b| c.compare(a, b)) })
+}
+
 /// The text ordering a `sort` call asks for, where it asks for one:
 /// a locale's collation, the a tergo order, or both — the mirror is
 /// then taken over the collation's elements, so a contracting
@@ -466,19 +541,29 @@ pub(crate) fn collator_for(call: &FnCall) -> Option<colligo::Collator> {
         Arg::Lit(l) => Some(l.to_string()),
         _ => None,
     })?;
-    match colligo::Collator::builder(&tag)
+    collator_of(&call.name, &tag)
+}
+
+/// The collator of one locale tag, for the command `name`.
+#[cfg(feature = "colligo")]
+pub(crate) fn collator_of(name: &str, tag: &str) -> Option<colligo::Collator> {
+    match colligo::Collator::builder(tag)
         .allow_approximate(true)
         .build()
     {
         Ok(c) => Some(c),
         Err(_) => {
             crate::value::ambient::record_refusal(format!(
-                "{}: no collation for locale {tag:?}",
-                call.name
+                "{name}: no collation for locale {tag:?}"
             ));
             None
         }
     }
+}
+
+#[cfg(not(feature = "colligo"))]
+pub(crate) fn collator_of(_name: &str, _tag: &str) -> Option<NeverCollator> {
+    None
 }
 
 /// Collation compiled out (`colligo` feature off): never a
@@ -3365,44 +3450,22 @@ fn apply_inner(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
         // and intercepted in the executor before this point.
         // `sort` orders by the standard value comparison; with a
         // locale argument (`sort(ru-RU)` — any Unicode locale
-        // identifier), values sort by their text under that
-        // locale's collation (colligo; CLDR-derived), and with the
-        // word `atergo` in the a tergo order. Reverse by piping
-        // into `| reverse`.
+        // identifier), text sorts under that locale's collation
+        // (colligo; CLDR-derived), and with `--atergo` in the a
+        // tergo order; numbers, instants and quantities keep their
+        // own order under either (`sort_keyed`). Reverse by piping
+        // into `| reverse`, or with `--desc`.
         "sort" => {
-            // Keys once per value, not two per comparison: the
-            // display form under a text order, the sort key (and
-            // the text, for a collation) under the default.
-            // `--desc` (`-d`) is the whole order flipped.
-            let v = input;
-            let mut sorted: Vec<Value> = match text_order(call) {
-                Some(cmp) => {
-                    let mut keyed: Vec<(String, Value)> =
-                        v.into_iter().map(|x| (x.to_string(), x)).collect();
-                    keyed.sort_by(|a, b| cmp(&a.0, &b.0));
-                    keyed.into_iter().map(|(_, x)| x).collect()
-                }
-                None => {
-                    let collate = default_text_order();
-                    let mut keyed: Vec<(crate::value::SortKey, Value)> =
-                        v.into_iter().map(|x| (x.sort_key_with(scale), x)).collect();
-                    keyed.sort_by(|a, b| match (collate.as_deref(), &a.0, &b.0, &a.1, &b.1) {
-                        (
-                            Some(c),
-                            crate::value::SortKey::Text(_),
-                            crate::value::SortKey::Text(_),
-                            Value::Str(x),
-                            Value::Str(y),
-                        ) => c(x, y),
-                        _ => a.0.cmp_key(&b.0),
-                    });
-                    keyed.into_iter().map(|(_, x)| x).collect()
-                }
-            };
-            if desc_flag(call) {
-                sorted.reverse();
+            // `-v` orders one record's fields; a list has no keys.
+            if value_flag(call) {
+                crate::value::ambient::record_refusal(VALUE_FLAG_OFF_A_RECORD.into());
+                input
+            } else {
+                sort_keyed(call, input.into_iter().map(|x| (x, ())).collect(), scale)
+                    .into_iter()
+                    .map(|(x, ())| x)
+                    .collect()
             }
-            sorted
         }
         "reverse" => {
             let mut v = input;
@@ -6314,12 +6377,39 @@ pub(crate) fn table_order_reading(
 /// `first` / `last` the first / last VALUE, with a count or a rank
 /// band the record of those fields; `reverse` the fields reversed.
 /// `None` for any other command.
-pub(crate) fn record_order_reading(call: &FnCall, r: &crate::value::Record) -> Option<Value> {
+pub(crate) fn record_order_reading(
+    call: &FnCall,
+    r: &crate::value::Record,
+    scale: Scale,
+) -> Option<Value> {
     let fields: Vec<(String, Value)> = r.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     // the keys kept as the values they are, and the declarations
     let slice = |s: usize, e: usize| Value::Record(r.pick(s..e));
     Some(match call.name.as_str() {
         "reverse" => Value::Record(r.pick((0..r.len()).rev())),
+        // `sort`: the fields ordered by key, or by value under `-v`
+        // (ruling 2026-11-11), as `sort` orders a list of them; the
+        // answer a record, its keys and declarations kept
+        "sort" => {
+            let by_value = value_flag(call);
+            let items: Vec<(Value, usize)> = (0..r.len())
+                .map(|i| {
+                    (
+                        if by_value {
+                            fields[i].1.clone()
+                        } else {
+                            r.key(i)
+                        },
+                        i,
+                    )
+                })
+                .collect();
+            let order: Vec<usize> = sort_keyed(call, items, scale)
+                .into_iter()
+                .map(|(_, i)| i)
+                .collect();
+            Value::Record(r.pick(order))
+        }
         "first" | "last" => {
             let from_end = call.name == "last";
             match call.args.first() {
@@ -9564,6 +9654,15 @@ fn melt(call: &FnCall, input: Vec<Value>) -> Result<Vec<Value>, String> {
         let Some(Value::Table(t)) = input.into_iter().next() else {
             unreachable!()
         };
+        // an id that names no column of the table is refused, as any
+        // read of a column the table lacks (ruling 2026-11-11): it
+        // made a column of nulls and melted the rest
+        if let Some(missing) = ids
+            .iter()
+            .find(|id| (0..t.width()).all(|j| t.column_name(j) != **id))
+        {
+            return Err(format!("melt: {}", t.no_column(missing)));
+        }
         // on an indexed table the index is the id, and the long table
         // is indexed by it with `variable` as the inner level (spec:
         // The Table, "Levels of the header"). An id named beside the

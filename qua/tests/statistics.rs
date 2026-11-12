@@ -74,7 +74,11 @@ fn zscore_standardizes_the_context() {
     assert_eq!(values("/c/* | :: @| zscore"), ["", ""]);
     // It rides `@|` only.
     let e = quarb::run("/n/* | :: | zscore", &doc()).unwrap_err();
-    assert!(e.to_string().contains("uses '@|'"), "{e}");
+    assert!(
+        e.to_string()
+            .contains("'zscore' takes the whole context: write '@| zscore'"),
+        "{e}"
+    );
     let e = quarb::run("/n/* | :: @| zscore(2)", &doc()).unwrap_err();
     assert!(e.to_string().contains("sample"), "{e}");
 }

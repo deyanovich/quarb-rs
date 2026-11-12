@@ -406,6 +406,154 @@ pub fn closes_with_drawing(text: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// One previous-line form found in a line: where its designator
+/// stands (the `_` or the `-N` after the sigil, the part a label
+/// replaces), how many labelled lines back it names, and the form
+/// as written, for a refusal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviousLine {
+    /// Character offset of the designator.
+    pub start: usize,
+    /// Character offset past the designator.
+    pub end: usize,
+    /// 1 for `&_` and `&-1`, N for `&-N`.
+    pub back: usize,
+    /// The form as written: `&_`, `&-2`, `(=_)`, `(=-2)`.
+    pub written: String,
+}
+
+/// The previous-line forms of a line, in order (ruling 2026-11-11):
+/// `&_`, the line before this one, and `&-N`, the line N back, with
+/// their rounded twins `(=_)` and `(=-N)`. They are the interactive
+/// hosts' forms, as `&N` is: a host resolves them to a label before
+/// the engine parses anything ([`resolve_previous_line`]), and a
+/// `.quai` file does not carry them. Only `&_` and `&-N` followed
+/// by something that cannot continue a name are the forms (`&_x`,
+/// `&-2x` stay what they were), and only where the sigil is the
+/// query's own token, never inside a text or a comment. A line
+/// that does not lex holds none: the engine says why.
+pub fn previous_line_forms(line: &str) -> Vec<PreviousLine> {
+    let Ok((tokens, spans)) = lexer::lex_spanned(line) else {
+        return Vec::new();
+    };
+    let chars: Vec<char> = line.chars().collect();
+    let at = |j: usize| chars.get(j).copied();
+    // the designator at `from`: its end and how far back it names
+    let designator = |from: usize| -> Option<(usize, usize)> {
+        match at(from)? {
+            '_' => Some((from + 1, 1)),
+            '-' => {
+                let mut end = from + 1;
+                while at(end).is_some_and(|c| c.is_ascii_digit()) {
+                    end += 1;
+                }
+                let digits: String = chars[from + 1..end].iter().collect();
+                digits.parse::<usize>().ok().map(|back| (end, back))
+            }
+            _ => None,
+        }
+    };
+    let mut out = Vec::new();
+    for (token, &(start, _)) in tokens.iter().zip(&spans) {
+        if !matches!(token, lexer::Token::Amp) {
+            continue;
+        }
+        // the sigil, or the rounded spelling `(=…)` it lexes from
+        let (from, rounded) = match (at(start), at(start + 1)) {
+            (Some('&'), _) => (start + 1, false),
+            (Some('('), Some('=')) => (start + 2, true),
+            _ => continue,
+        };
+        let Some((end, back)) = designator(from) else {
+            continue;
+        };
+        let (closes, last) = if rounded {
+            // `(=_)`, and `(=_!)` with the live marker
+            let close = if at(end) == Some('!') { end + 1 } else { end };
+            (at(close) == Some(')'), close + 1)
+        } else {
+            (
+                !at(end).is_some_and(|c| lexer::is_name_char(c) || c == '('),
+                end,
+            )
+        };
+        if closes {
+            out.push(PreviousLine {
+                start: from,
+                end,
+                back,
+                written: chars[start..last.min(chars.len())].iter().collect(),
+            });
+        }
+    }
+    out
+}
+
+/// `line` with its previous-line forms rewritten to the labels they
+/// name. `label` answers the label of the line `back` lines back
+/// among the session's labelled lines (1 the latest), `None` where
+/// there is none; `count` is how many labelled lines there are. A
+/// suffix (`&_#`, `&_!`) and a pipe tail stay as written, so the
+/// resolved line is read as the `&N` line it now is. `Ok(None)`
+/// when the line holds no such form; `Err` when one reaches before
+/// the first line.
+pub fn resolve_previous_line_with(
+    line: &str,
+    count: usize,
+    label: impl Fn(usize) -> Option<usize>,
+) -> std::result::Result<Option<String>, String> {
+    let forms = previous_line_forms(line);
+    if forms.is_empty() {
+        return Ok(None);
+    }
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = String::new();
+    let mut at = 0;
+    for form in &forms {
+        let written = &form.written;
+        if form.back == 0 {
+            return Err(format!(
+                "'{written}' names this line itself: the line before this one is '&_' (or '&-1')"
+            ));
+        }
+        if count == 0 {
+            return Err(format!("'{written}': no line before this one"));
+        }
+        let Some(label) = label(form.back) else {
+            return Err(format!(
+                "'{written}': no line {} back ({count} ran before this one)",
+                form.back
+            ));
+        };
+        out.extend(&chars[at..form.start]);
+        out.push_str(&label.to_string());
+        at = form.end;
+    }
+    out.extend(&chars[at..]);
+    Ok(Some(out))
+}
+
+/// [`resolve_previous_line_with`] for a session whose labels are
+/// the numbers 1 to `last` (quai, the wasm session): `&_` is
+/// `&{last}`, `&-2` the one before it.
+pub fn resolve_previous_line(
+    line: &str,
+    last: usize,
+) -> std::result::Result<Option<String>, String> {
+    resolve_previous_line_with(line, last, |back| (back <= last).then(|| last + 1 - back))
+}
+
+/// What a notebook file or cell answers a previous-line form with:
+/// "the previous cell" breaks in silence when cells are reordered,
+/// so a file names its cell.
+pub fn previous_line_in_a_file(line: &str) -> Option<String> {
+    let form = previous_line_forms(line).into_iter().next()?;
+    Some(format!(
+        "'{}' is the interactive form of a session: a notebook names its cell ('&N')",
+        form.written
+    ))
+}
+
 impl Query {
     /// Lex and parse `text` with the dataset at hand (data-aware
     /// macros read it at expansion time), under the ambient options.

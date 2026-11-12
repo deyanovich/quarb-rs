@@ -268,6 +268,20 @@ fn eval_operand_in<H: Host>(
                 }
             }]
         }
+        // The row itself as the topic (a table's row predicate, a
+        // keyed command's key, `--of=` read on a table's rows: the row
+        // stands as the cursor record): a name no column carries is
+        // refused naming them, as under a row in reach (ruling
+        // 2026-11-11). Any other record's missing field is null.
+        Operand::Field { base, name, .. }
+            if matches!(**base, Operand::Topic)
+                && let Some(Value::Record(r)) = scope.topic
+                && r.get(name).is_none()
+                && let Some(why) = crate::pipeline::run::missing_row_column(r, name) =>
+        {
+            record_refusal(why);
+            vec![Value::Null]
+        }
         // `:name` with a node reference as the topic reads the node the
         // reference names (`map(:name)` over a route); an unknown
         // field is refused there as on a path (finding 2026-11-05:

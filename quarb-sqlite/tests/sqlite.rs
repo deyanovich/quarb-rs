@@ -285,6 +285,7 @@ fn pushdown_matches_scan() {
             plan.join_left
                 .as_ref()
                 .map(|(t, c)| (t.as_str(), c.as_slice())),
+            plan.order_then.as_deref(),
         )
         .unwrap();
         let pushed: Vec<String> = rows
@@ -338,6 +339,69 @@ fn filtered_open_matches_scan() {
     assert_eq!(run(&filtered), run(&plain));
 }
 
+/// An every-witness plan (`<=>*`) runs without the uniqueness gate
+/// and answers the rows of one driver in the joined table's own
+/// order, after the driver's: what the engine's own evaluation
+/// answers.
+#[test]
+fn raw_query_orders_an_every_witness_join_by_both_keys() {
+    let path = std::env::temp_dir().join(format!(
+        "quarb-sqlite-every-witness-{}.db",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let conn = Connection::open(&path).unwrap();
+    // the readings are stored out of their sensors' order
+    conn.execute_batch(
+        r#"
+        CREATE TABLE owners (id INTEGER PRIMARY KEY, sensor TEXT UNIQUE, team TEXT);
+        CREATE TABLE readings (id INTEGER PRIMARY KEY, sensor TEXT, val REAL);
+        INSERT INTO owners VALUES (1, 'a', 'core'), (2, 'b', 'edge'), (3, 'c', 'lab');
+        INSERT INTO readings VALUES (1, 'b', 7.5), (2, 'a', 5.0), (3, 'b', 3.0), (4, 'a', 1.5);
+        "#,
+    )
+    .unwrap();
+    drop(conn);
+    let q = "/owners/* <=>* /readings/*[::sensor = $$0::sensor] | %(team = ::team; val = $$1::val)";
+    let plan = quarb_sql::pushdown(q, Some(quarb_sql::Dialect::Sqlite)).expect("pushes");
+    let (_, rows) = quarb_sqlite::raw_query(
+        &path,
+        &plan.sql,
+        plan.order_table.as_deref(),
+        plan.join_left
+            .as_ref()
+            .map(|(t, c)| (t.as_str(), c.as_slice())),
+        plan.order_then.as_deref(),
+    )
+    .expect("an every-witness join runs without a unique key");
+    let pushed: Vec<String> = rows
+        .iter()
+        .map(|r| {
+            r.iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect();
+    assert_eq!(pushed, ["core 5.0", "core 1.5", "edge 7.5", "edge 3.0"]);
+    // the engine's own evaluation, the same rows in the same order
+    let adapter = SqliteAdapter::open(&path).unwrap();
+    let scanned: Vec<String> = match quarb::run(q, &adapter).unwrap() {
+        quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_quarb()).collect(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        scanned,
+        [
+            r#"%(team = "core"; val = 5.0)"#,
+            r#"%(team = "core"; val = 1.5)"#,
+            r#"%(team = "edge"; val = 7.5)"#,
+            r#"%(team = "edge"; val = 3.0)"#
+        ]
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
 #[test]
 fn raw_query_join_uniqueness_gate() {
     // The witness-JOIN soundness gate: a plan whose ON binds the
@@ -362,7 +426,13 @@ fn raw_query_join_uniqueness_gate() {
     drop(conn);
 
     let sql = "SELECT a.name, b.id FROM a JOIN b ON b.a_id = a.id";
-    let ok = quarb_sqlite::raw_query(&path, sql, Some("b"), Some(("a", &["id".to_string()][..])));
+    let ok = quarb_sqlite::raw_query(
+        &path,
+        sql,
+        Some("b"),
+        Some(("a", &["id".to_string()][..])),
+        None,
+    );
     assert_eq!(ok.expect("PK-bound join executes").1.len(), 3);
 
     let refused = quarb_sqlite::raw_query(
@@ -370,6 +440,7 @@ fn raw_query_join_uniqueness_gate() {
         "SELECT b.id FROM b JOIN a ON a.a_id = b.a_id",
         Some("a"),
         Some(("b", &["a_id".to_string()][..])),
+        None,
     );
     assert!(
         refused.is_err(),

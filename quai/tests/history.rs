@@ -163,3 +163,81 @@ fn the_runner_survives_a_headed_reference_to_an_empty_line() {
     // and the run reports the failed cell by its exit
     assert!(!ok);
 }
+
+/// `&_` is the line before this one and `&-N` the line N back
+/// (ruling 2026-11-11), the interactive forms of `&N`: resolved to
+/// the label before anything reads the line, so the suffixes and a
+/// pipe tail work on them, the history keeps the label, and a line
+/// that failed (it took no label) is not "the previous line".
+#[test]
+fn the_previous_line_forms_resolve_to_a_label() {
+    let dir = scratch();
+    let (out, err, ok) = quai(
+        &dir,
+        &[],
+        "/books/*/title::\n\
+         &_ @| count\n\
+         /books/*/titel:: |\n\
+         &_\n\
+         &-3 | upper\n\
+         &_#\n\
+         = \"&_ is text here\"\n\
+         :history\n\
+         :quit\n",
+    );
+    assert!(ok, "{err}");
+    // &1 the titles, &2 the count, the typo no label, &3 = &2 again
+    assert!(out.contains("Iliad\n2\n2\n"), "{out}");
+    // &4 = `&-3 | upper`, three back from the fifth line: &1
+    assert!(out.contains("EMMA\nILIAD\n"), "{out}");
+    // &5 = `&_#`, the frozen &4
+    assert_eq!(out.matches("EMMA").count(), 2, "{out}");
+    // a text is not touched
+    assert!(out.contains("&_ is text here"), "{out}");
+    // the history carries the labels the forms resolved to
+    assert!(out.contains("def &2: &1 @| count ;"), "{out}");
+    assert!(out.contains("def &3: &2 ;"), "{out}");
+    assert!(out.contains("def &4: &1 | upper ;"), "{out}");
+    assert!(!out.contains("def &2: &_"), "{out}");
+    // only the typo reached the engine as an error
+    assert_eq!(err.lines().count(), 1, "{err}");
+    assert!(err.contains("expected a command name after '|'"), "{err}");
+}
+
+#[test]
+fn a_previous_line_form_before_the_first_line_is_refused() {
+    let dir = scratch();
+    let (out, err, ok) = quai(&dir, &[], "&_\n/books/*/title::\n&-5\n&-0\n&_x\n:quit\n");
+    assert!(ok, "{err}");
+    assert!(err.contains("'&_': no line before this one"), "{err}");
+    assert!(
+        err.contains("'&-5': no line 5 back (1 ran before this one)"),
+        "{err}"
+    );
+    assert!(err.contains("'&-0' names this line itself"), "{err}");
+    // `&_x` stays what it was: no fragment name after the sigil
+    assert!(err.contains("expected a fragment name after '&'"), "{err}");
+    assert_eq!(out.matches("Emma").count(), 1, "{out}");
+}
+
+/// A `.quai` file names its cell: "the previous cell" would break
+/// in silence when cells are reordered. The cell takes its number,
+/// so the labels after it still match the file's.
+#[test]
+fn the_runner_refuses_the_previous_line_forms() {
+    let dir = scratch();
+    std::fs::write(
+        dir.join("cells.quai"),
+        "    /books/*/title::\n\n    &_ @| count\n\n    &1 @| count\n",
+    )
+    .unwrap();
+    let (out, _, ok) = quai(&dir, &["--run", "cells.quai"], "");
+    assert!(!ok);
+    assert!(
+        out.contains(
+            "error: '&_' is the interactive form of a session: a notebook names its cell ('&N')"
+        ),
+        "{out}"
+    );
+    assert!(out.contains("&3  &1 @| count\n    2"), "{out}");
+}

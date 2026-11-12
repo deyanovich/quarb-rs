@@ -195,6 +195,9 @@ impl QueryArbor {
         if q.outer {
             props.push(("outer".to_string(), Value::Bool(true)));
         }
+        if q.every {
+            props.push(("every".to_string(), Value::Bool(true)));
+        }
         let id = self.intern(Some("query"), props, Some(parent));
         self.set_form(id, Form::Query(q.clone()));
         for corr in &q.correlations {

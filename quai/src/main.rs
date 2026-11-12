@@ -582,6 +582,17 @@ fn run_file(
         for l in &cell[1..] {
             println!("    {l}");
         }
+        // A file names its cell: `&_` and `&-N` are the interactive
+        // forms (ruling 2026-11-11), and "the previous cell" would
+        // break in silence when cells are reordered. The cell takes
+        // its number, so the labels still match the file's.
+        if let Some(why) = quarb::previous_line_in_a_file(&q) {
+            failed = true;
+            println!("    error: {why}");
+            session.borrow_mut().commit(&q, Vec::new());
+            println!();
+            continue;
+        }
         // A model cell: mounts and declarations, no output.
         let first = q.split_whitespace().next().unwrap_or_default();
         if first == "def" || first == "macro" {
@@ -857,6 +868,20 @@ fn repl(
             }
             continue;
         }
+        // `&_` — the line before this one, `&-N` the line N back
+        // (ruling 2026-11-11): resolved here to the label it names,
+        // so the line is read, recalled and saved as the `&N` line it
+        // is. A failed line takes no label, so the latest label is
+        // the last line that ran.
+        let last = session.borrow().line_no().saturating_sub(1);
+        let resolved = match quarb::resolve_previous_line(line, last) {
+            Ok(resolved) => resolved,
+            Err(e) => {
+                eprintln!("{}: {e}", error_prefix());
+                continue;
+            }
+        };
+        let line = resolved.as_deref().unwrap_or(line);
         // A definition extends the macro table but is not itself run.
         if line.starts_with("def ")
             || line == "def"
@@ -1345,6 +1370,8 @@ fn command(session: &mut Session, remount: &mut Option<Remount>, line: &str) -> 
                  &N            re-run line N (a labelled fragment); continue with a pipe: &N | /key::\n  \
                  &N#           replay line N's frozen output (as it was when it ran)\n  \
                  &N!           re-run line N live — re-reads the source; diverges from &N# under drift\n  \
+                 &_            the line before this one (the last that ran), as &N: &_ | count, &_#, &_!\n  \
+                 &-N           the line N back: &-1 is &_, &-2 the one before it\n  \
                  def &x: …;    add a named fragment to the session\n  \
                  :mount SPEC   add a source (PATH or NAME=TARGET) to the session\n  \
                  :follow [on|off|N]  acquisition rounds per line for ::href--> refs (interactive default: on)\n  \

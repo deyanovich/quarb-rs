@@ -80,6 +80,13 @@ def highlight(query: str) -> str:
     """The query with ANSI syntax-highlighting escapes."""
     ...
 
+def resolve_previous_line(line: str, labels: list[int]) -> str | None:
+    """Resolve the previous-line forms (``&_``, ``&-N``, ``(=_)``,
+    ``(=-N)``) of ``line`` against the session's labels, oldest
+    first; None when the line holds none, ValueError when a form
+    reaches before the first labelled line."""
+    ...
+
 def parse_defs(text: str) -> None:
     """Validate ``text`` as a definitions file (``def``/``macro``
     statements, ``#`` line comments); raises ValueError on the

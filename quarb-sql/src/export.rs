@@ -46,6 +46,7 @@ pub fn export(quarb: &str) -> Result<Translation, SqlError> {
         from_table: String::new(),
         join_on_cols: Vec::new(),
         join_table: None,
+        join_every: false,
         column_types: ColumnTypes::default(),
         from_sql: String::new(),
         join_sql: None,
@@ -95,6 +96,14 @@ pub struct Pushdown {
     /// catalog before executing, and fall back to the scan if it
     /// cannot.
     pub join_left: Option<(String, Vec<String>)>,
+    /// Present when the plan is an every-witness JOIN (`<=>*`,
+    /// ruling 2026-11-11): the joined table. Such a JOIN is what the
+    /// query asks, so it carries no uniqueness obligation
+    /// (`join_left` is absent); its obligation is the ORDER: the
+    /// rows of one driver stand in the joined table's own order,
+    /// after the driver's (`order_table`'s key, then this table's).
+    /// A driver that cannot order by both must decline the plan.
+    pub order_then: Option<String>,
     /// What the plan takes for granted about column types. Quarb
     /// compares by value (a numeric-looking text and a number meet
     /// as numbers, a number and other text never meet); SQL
@@ -209,6 +218,7 @@ pub fn pushdown_explained(quarb: &str, dialect: Option<Dialect>) -> Result<Pushd
         from_table: String::new(),
         join_on_cols: Vec::new(),
         join_table: None,
+        join_every: false,
         column_types: ColumnTypes::default(),
         from_sql: String::new(),
         join_sql: None,
@@ -224,13 +234,25 @@ pub fn pushdown_explained(quarb: &str, dialect: Option<Dialect>) -> Result<Pushd
         // table's (driver-first correlation).
         Some(ex.from_table.clone())
     };
-    let join_left = ex.join_table.clone().map(|t| (t, ex.join_on_cols.clone()));
+    // an every-witness JOIN multiplies rows by design: no uniqueness
+    // to verify, the joined table's order to keep instead
+    let join_left = if ex.join_every {
+        None
+    } else {
+        ex.join_table.clone().map(|t| (t, ex.join_on_cols.clone()))
+    };
+    let order_then = if ex.join_every && !ex.aggregate {
+        ex.join_table.clone()
+    } else {
+        None
+    };
     let mut tables = vec![ex.from_table.clone()];
     tables.extend(ex.join_table.clone());
     Ok(Pushdown {
         sql,
         order_table,
         join_left,
+        order_then,
         column_types: ex.column_types.clone(),
         tables,
     })
@@ -516,6 +538,7 @@ fn partial_pushdown_with(
         from_table: String::new(),
         join_on_cols: Vec::new(),
         join_table: None,
+        join_every: false,
         column_types: ColumnTypes::default(),
         from_sql: String::new(),
         join_sql: None,
@@ -557,6 +580,8 @@ struct Exporter {
     from_table: String,
     join_on_cols: Vec<String>,
     join_table: Option<String>,
+    /// The correlation is `<=>*`: every witness, the SQL JOIN itself.
+    join_every: bool,
     /// What the comparisons assume of column types (see
     /// [`Pushdown::column_types`]).
     column_types: ColumnTypes,
@@ -1011,12 +1036,17 @@ impl Exporter {
                 let cond = self.predicate_cond(p, Some(&lsql.clone()))?;
                 wheres.push(cond);
             }
-            self.notes.push(
-                "JOIN: Quarb's binding is existential (one row per FROM row, \
-                 bound to its first witness); SQL multiplies rows when \
-                 several joined rows match"
-                    .to_string(),
-            );
+            // `<=>*` — every witness: the JOIN as SQL means it, one
+            // row per matching pair; the plain `<=>` binds one.
+            self.join_every = matches!(self.prop(*corr, "every"), Some(Value::Bool(true)));
+            if !self.join_every {
+                self.notes.push(
+                    "JOIN: Quarb's binding is existential (one row per FROM row, \
+                     bound to its first witness); SQL multiplies rows when \
+                     several joined rows match"
+                        .to_string(),
+                );
+            }
             sel.from = lsql.clone();
             self.from_table = ltable;
             self.join_table = Some(rtable);
@@ -2007,8 +2037,37 @@ impl Exporter {
                                 ));
                             }
                             let kids = self.arbor.children(s);
+                            // The options are the command's own:
+                            // `--desc` is the direction, a named
+                            // collation (`--locale=tag`, ruling
+                            // 2026-11-11) is the engine's order and no
+                            // backend's; a second key has no place in
+                            // the one ORDER BY this shape holds.
+                            let mut desc = false;
+                            for &k in &kids[1..] {
+                                if self.kind(k) != "option" {
+                                    return Err(SqlError::Unsupported(
+                                        "a sort by several keys".into(),
+                                    ));
+                                }
+                                match self.prop_s(k, "name").as_str() {
+                                    "--desc" | "-d" => desc = true,
+                                    "--locale" => {
+                                        return Err(SqlError::Semantics(
+                                            "sort_by(--locale=…) names the engine's collation; \
+                                             a backend's differs"
+                                                .into(),
+                                        ));
+                                    }
+                                    other => {
+                                        return Err(SqlError::Unsupported(format!(
+                                            "the '{other}' option of sort_by"
+                                        )));
+                                    }
+                                }
+                            }
                             let e = self.operand(kids[0], join.map(|(l, _)| l))?;
-                            sel.order_by = Some((e, false));
+                            sel.order_by = Some((e, desc));
                         }
                         "reverse" => match &mut sel.order_by {
                             Some((_, desc)) => *desc = true,

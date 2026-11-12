@@ -42,5 +42,5 @@ fn man_is_the_door_to_the_inventory() {
         ok && tsv.starts_with("name\tkind\tpipes\tlayer\tonnull\tdoc\n"),
         "{tsv}"
     );
-    assert!(tsv.contains("\ntree\tcontext\t@|\tnode\t"), "{tsv}");
+    assert!(tsv.contains("\ntree\tcontext\t| @|\tnode\t"), "{tsv}");
 }

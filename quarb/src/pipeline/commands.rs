@@ -487,6 +487,11 @@ pub(crate) fn apply_command_in<H: Host>(
         // coalesce idiom (chainable). Literal
         // fallbacks keep working through stdlib for host-free
         // callers.
+        // `| tree[(…)]` — each thread's node drawn as its own tree,
+        // the drawing its topic (ruling 2026-11-11; spec: The tree).
+        Command::Func(call) if call.name == "tree" => {
+            tree_thread_command(call, caps, host, trace, outer, peers)
+        }
         Command::Func(call) if call.name == "exchange" => {
             exchange_command(call, caps, host, trace, outer, peers)
         }
@@ -1857,8 +1862,32 @@ pub(crate) fn agg_as_func_command<H: Host>(
                     let j = bare_column(expr, &t).expect("matched a column");
                     t.column_cells(j)
                 }
+                // `sort(--of=…)` answers a list's sorted values; on a
+                // record it would lose the keys (ruling 2026-11-11)
+                Some(_)
+                    if call.name == "sort"
+                        && c.members.is_empty()
+                        && matches!(c.topic, Some(Value::Record(_))) =>
+                {
+                    record_refusal(
+                        "sort: --of orders the values of a list; a record's fields sort by \
+                         key, or by value under -v (--value)"
+                            .into(),
+                    );
+                    return c;
+                }
                 Some(expr) => {
                     let members = std::mem::take(&mut c.members);
+                    // a table's rows stand as records: the expression's
+                    // read of a column the table lacks is refused
+                    // (ruling 2026-11-11)
+                    let rows_of: Option<(Vec<String>, bool)> = match &c.topic {
+                        Some(Value::Table(t)) if members.is_empty() => Some((
+                            (0..t.width()).map(|j| t.column_name(j)).collect(),
+                            t.header.is_some(),
+                        )),
+                        _ => None,
+                    };
                     let threads: Vec<Thread<H::Ext>> = if !members.is_empty() {
                         c.topic.take();
                         members
@@ -1901,10 +1930,16 @@ pub(crate) fn agg_as_func_command<H: Host>(
                             None => vec![as_thread(None, c.prov.clone())],
                         }
                     };
-                    of_values(expr, threads, host, trace, outer, peers)
-                        .into_iter()
-                        .map(|t| t.topic.unwrap_or(Value::Null))
-                        .collect()
+                    let read = || of_values(expr, threads, host, trace, outer, peers);
+                    match rows_of {
+                        Some((columns, headed)) => {
+                            crate::pipeline::run::with_table_rows(columns, headed, read)
+                        }
+                        None => read(),
+                    }
+                    .into_iter()
+                    .map(|t| t.topic.unwrap_or(Value::Null))
+                    .collect()
                 }
                 None => match c.topic.take() {
                     // `join` over a null topic is null, as the other
@@ -1926,9 +1961,15 @@ pub(crate) fn agg_as_func_command<H: Host>(
                     // fields does (ruling 2026-11-05): `| first` its
                     // first value, `| first(n)` the record of n; a list
                     // of one record stays the list, its item the answer
+                    // and `| sort` its fields by key, by value under
+                    // `-v` (ruling 2026-11-11)
                     Some(Value::Record(r))
-                        if matches!(call.name.as_str(), "first" | "last")
-                            && let Some(v) = stdlib::record_order_reading(call, &r) =>
+                        if matches!(call.name.as_str(), "first" | "last" | "sort")
+                            && let Some(v) = stdlib::record_order_reading(
+                                call,
+                                &r,
+                                &|e| host.scale_of(e),
+                            ) =>
                     {
                         c.topic = Some(v);
                         c.prov = c.prov.flat();
@@ -3417,23 +3458,22 @@ pub(crate) fn order_command<H: Host>(
         // under that locale's collation (colligo; codepoint
         // fallback when the feature is compiled out); with
         // `atergo`, in the a tergo order.
-        "sort" => match stdlib::text_order(call) {
-            Some(cmp) => {
-                caps.sort_by(|a, b| cmp(&topic_of(a).to_string(), &topic_of(b).to_string()))
+        // (ruling 2026-11-11: numbers, instants and quantities keep
+        // their own order under any locale; the text order is the
+        // call's, else the output locale's)
+        "sort" => {
+            if stdlib::value_flag(call) {
+                record_refusal(stdlib::VALUE_FLAG_OFF_A_RECORD.into());
             }
-            None => {
-                let collate = stdlib::default_text_order();
-                let scale = |e: &str| host.scale_of(e);
-                caps.sort_by(|a, b| {
-                    stdlib::default_cmp(&topic_of(a), &topic_of(b), &scale, collate.as_deref())
-                })
-            }
-        },
+            let scale = |e: &str| host.scale_of(e);
+            let keyed: Vec<(Value, Thread<H::Ext>)> =
+                caps.into_iter().map(|c| (topic_of(&c), c)).collect();
+            caps = stdlib::sort_keyed(call, keyed, &scale)
+                .into_iter()
+                .map(|(_, c)| c)
+                .collect();
+        }
         _ => {}
-    }
-    // `sort --desc` (`-d`): the whole order flipped.
-    if call.name == "sort" && stdlib::desc_flag(call) {
-        caps.reverse();
     }
     match call.name.as_str() {
         "reverse" => caps.reverse(),
@@ -3704,6 +3744,34 @@ pub(crate) fn filter_command<H: Host>(
     crate::value::ambient::with_keying(|| filter_threads(cond, caps, host, trace, outer, peers))
 }
 
+/// The properties of the cursor's own node that a row predicate
+/// reads at its own level (`::name`, no step before it): a pipe
+/// tail and a nested path read other topics and are not looked
+/// into.
+fn properties_read_of_the_cursor(cond: &PredExpr) -> Vec<String> {
+    struct Reads(Vec<String>);
+    impl visit::Visitor for Reads {
+        fn operand(&mut self, o: &Operand) {
+            if let Operand::Rel {
+                steps,
+                projection: Some(Projection::Property(Some(name))),
+                anchor: crate::syntax::ast::Anchor::Current,
+            } = o
+                && steps.is_empty()
+            {
+                self.0.push(name.clone());
+            } else {
+                visit::walk_operand(self, o);
+            }
+        }
+        fn command(&mut self, _: &Command) {}
+        fn elem(&mut self, _: &PathElem) {}
+    }
+    let mut v = Reads(Vec::new());
+    v.pred(cond);
+    v.0
+}
+
 fn filter_threads<H: Host>(
     cond: &PredExpr,
     caps: Vec<Thread<H::Ext>>,
@@ -3722,25 +3790,54 @@ fn filter_threads<H: Host>(
             // the whole table passed through.
             if let Some(Value::Table(t)) = &c.topic {
                 let t = t.clone();
-                let mut kept: Vec<Vec<Value>> = Vec::new();
-                for row in t.rows() {
-                    let mut probe = c.clone();
-                    // the row as the cursor record: keyed by the
-                    // header, or by position on the array face (as
-                    // `| %` keys an array's columns)
-                    probe.topic = Some(Value::Record(match &t.header {
-                        Some(h) => h.iter().cloned().zip(row.iter()).collect(),
-                        None => row
-                            .iter()
-                            .enumerate()
-                            .map(|(j, v)| ((j + 1).to_string(), v))
-                            .collect(),
-                    }));
-                    let scope = probe.scope(Some(i + 1), peers, outer);
-                    if eval_pred_expr(host, &probe.ext, cond, trace, scope) {
-                        kept.push(row.cells());
-                    }
+                // A property read (`::floor`) asks the thread's node, not
+                // the row: where the table has a column of that name
+                // and the node no such property, the row's cell was
+                // meant, the one-colon read (ruling 2026-11-11; the
+                // test was null on every row and kept none).
+                if let Some(name) = properties_read_of_the_cursor(cond)
+                    .into_iter()
+                    .find(|name| {
+                        t.column(name).is_some()
+                            && matches!(
+                                host.project(&c.ext, &Projection::Property(Some(name.clone()))),
+                                Value::Null
+                            )
+                    })
+                {
+                    record_refusal(format!(
+                        "'::{name}' reads a property of the thread's node, which has none of \
+                         that name: the row's column is ':{name}'"
+                    ));
+                    return None;
                 }
+                let columns: Vec<String> = match &t.header {
+                    Some(h) => h.clone(),
+                    None => (1..=t.width()).map(|j| j.to_string()).collect(),
+                };
+                let mut kept: Vec<Vec<Value>> = Vec::new();
+                // each row stands as the cursor record, and a read of
+                // a column the table lacks is refused there
+                crate::pipeline::run::with_table_rows(columns, t.header.is_some(), || {
+                    for row in t.rows() {
+                        let mut probe = c.clone();
+                        // the row as the cursor record: keyed by the
+                        // header, or by position on the array face (as
+                        // `| %` keys an array's columns)
+                        probe.topic = Some(Value::Record(match &t.header {
+                            Some(h) => h.iter().cloned().zip(row.iter()).collect(),
+                            None => row
+                                .iter()
+                                .enumerate()
+                                .map(|(j, v)| ((j + 1).to_string(), v))
+                                .collect(),
+                        }));
+                        let scope = probe.scope(Some(i + 1), peers, outer);
+                        if eval_pred_expr(host, &probe.ext, cond, trace, scope) {
+                            kept.push(row.cells());
+                        }
+                    }
+                });
                 c.topic = Some(Value::table(t.keep_rows(kept)));
                 return Some(c);
             }
@@ -3850,12 +3947,16 @@ fn keyed_by_columns<H: Host>(call: &FnCall, t: &crate::Table, host: &H) -> Optio
         .map(|i| (columns.iter().map(|c| c[i].clone()).collect(), i))
         .collect();
     drop(columns);
+    // `--locale=tag`: text keys under that locale's collation;
+    // without it under the output locale's, as the bare `sort`
+    // (rulings 2026-11-11); every other key as it compares anywhere
+    let collate = stdlib::locale_text_order(call).or_else(stdlib::default_text_order);
     let compare_keys = |a: &[Value], b: &[Value]| -> Ordering {
         a.iter()
             .zip(b.iter())
             .zip(dirs.iter())
             .map(|((x, y), down)| {
-                let o = x.compare_with(y, &|e| host.scale_of(e));
+                let o = stdlib::default_cmp(x, y, &|e| host.scale_of(e), collate.as_deref());
                 if *down { o.reverse() } else { o }
             })
             .find(|o| *o != Ordering::Equal)
@@ -3904,7 +4005,12 @@ fn keyed_over_value<H: Host>(
                 .rows()
                 .map(|r| make(Value::record(names.iter().cloned().zip(r.iter()).collect())))
                 .collect();
-            let kept = keyed_agg(&call, rows, host, trace, outer, peers, false);
+            // a key naming a column the table lacks is refused on
+            // the row (ruling 2026-11-11)
+            let kept =
+                crate::pipeline::run::with_table_rows(names.clone(), t.header.is_some(), || {
+                    keyed_agg(&call, rows, host, trace, outer, peers, false)
+                });
             let rows: Vec<Vec<Value>> = kept
                 .iter()
                 .map(|m| match &m.topic {
@@ -4153,6 +4259,17 @@ fn grouped_reduction<H: Host>(
                 Operand::Lit(Value::Projection { key, .. }) => Some(key.clone()),
                 _ => None,
             };
+            // the group's table leaves its keys out, so `--of` reading
+            // a key reads a column that is not there: said in the
+            // option's words (it answered null per group)
+            if let Some(c) = &column
+                && keys.contains(c)
+            {
+                return Err(format!(
+                    "--of reads '{c}', the column the rows are grouped by: a group's table \
+                     leaves its keys out (the key is the answer's index)"
+                ));
+            }
             header.push(match &column {
                 Some(c) => format!("{c}_{reducer}"),
                 None => reducer.clone(),
@@ -4666,12 +4783,16 @@ pub(crate) fn keyed_agg<H: Host>(
             })
             .collect()
     };
+    // `--locale=tag`: text keys under that locale's collation;
+    // without it under the output locale's, as the bare `sort`
+    // (rulings 2026-11-11); every other key as it compares anywhere
+    let collate = stdlib::locale_text_order(call).or_else(stdlib::default_text_order);
     let compare_keys = |a: &[Value], b: &[Value]| -> Ordering {
         a.iter()
             .zip(b.iter())
             .zip(dirs.iter())
             .map(|((x, y), down)| {
-                let o = x.compare_with(y, &|e| host.scale_of(e));
+                let o = stdlib::default_cmp(x, y, &|e| host.scale_of(e), collate.as_deref());
                 if *down { o.reverse() } else { o }
             })
             .find(|o| *o != Ordering::Equal)
@@ -4755,7 +4876,18 @@ pub(crate) fn keyed_agg<H: Host>(
                 probe
             })
             .collect();
-        let rows: Vec<Vec<Value>> = keyed_agg(call, probes, host, trace, outer, peers, false)
+        // the rows stand as records here too: a key naming a column
+        // the table lacks is refused, as after the plain pipe
+        // (ruling 2026-11-11; lang's finding on the candidate: `@|
+        // sort_by(:nosuch)` left the order unchanged and said nothing)
+        let columns: Vec<String> = match &t.header {
+            Some(h) => h.clone(),
+            None => (1..=t.width()).map(|j| j.to_string()).collect(),
+        };
+        let kept = crate::pipeline::run::with_table_rows(columns, t.header.is_some(), || {
+            keyed_agg(call, probes, host, trace, outer, peers, false)
+        });
+        let rows: Vec<Vec<Value>> = kept
             .into_iter()
             .map(|p| match p.topic {
                 Some(Value::Record(fields)) => fields.into_iter().map(|(_, v)| v).collect(),

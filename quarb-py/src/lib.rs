@@ -842,6 +842,20 @@ fn parse_defs(text: &str) -> PyResult<()> {
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
+/// The previous-line forms of the interactive hosts (`&_`, `&-N`
+/// and their rounded twins `(=_)`, `(=-N)`; ruling 2026-11-11)
+/// resolved against the session's labels, oldest first: the line
+/// with each form rewritten to the label it names, None when the
+/// line holds none, ValueError when a form reaches before the
+/// first labelled line.
+#[pyfunction]
+fn resolve_previous_line(line: &str, labels: Vec<usize>) -> PyResult<Option<String>> {
+    quarb::resolve_previous_line_with(line, labels.len(), |back| {
+        labels.len().checked_sub(back).map(|i| labels[i])
+    })
+    .map_err(PyValueError::new_err)
+}
+
 /// Whether `text` is definitions and nothing else: False when a
 /// query follows its `def`/`macro` statements (the query path reads
 /// such text whole), ValueError when a definition is malformed.
@@ -968,6 +982,7 @@ fn _quarb(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(mount, m)?)?;
     m.add_function(wrap_pyfunction!(translate, m)?)?;
     m.add_function(wrap_pyfunction!(parse_defs, m)?)?;
+    m.add_function(wrap_pyfunction!(resolve_previous_line, m)?)?;
     m.add_function(wrap_pyfunction!(defs_only, m)?)?;
     m.add_function(wrap_pyfunction!(man, m)?)?;
     m.add_function(wrap_pyfunction!(highlight, m)?)?;

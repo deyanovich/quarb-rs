@@ -331,10 +331,17 @@ fn tables_concatenate_by_the_header_rule() {
     );
     let e = err(
         &d,
-        &format!("{T} | mean(--of=:Age --by=(:Sex; :Class)) ++ max(--of=:Fare --by=:Fare)"),
+        &format!("{T} | mean(--of=:Age --by=(:Sex; :Class)) ++ max(--of=:Age --by=:Fare)"),
     );
     assert!(
         e.contains("no level of the index (Sex; Class) carries the name 'Fare'"),
+        "{e}"
+    );
+    // a group's table leaves its keys out: `--of` reading the key
+    // answered null per group and is refused in the option's words
+    let e = err(&d, &format!("{T} | max(--of=:Fare --by=:Fare)"));
+    assert!(
+        e.contains("--of reads 'Fare', the column the rows are grouped by"),
         "{e}"
     );
     // composite indexes: the same levels in the same order

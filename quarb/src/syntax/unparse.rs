@@ -102,7 +102,12 @@ pub fn unparse(query: &Query) -> String {
         out.push_str(&command(command_ast));
     }
     for (i, corr) in query.correlations.iter().enumerate() {
-        out.push_str(if corr.outer { " <=>? " } else { " <=> " });
+        out.push_str(match (corr.every, corr.outer) {
+            (false, false) => " <=> ",
+            (false, true) => " <=>? ",
+            (true, false) => " <=>* ",
+            (true, true) => " <=>*? ",
+        });
         let followed_by_main_pipe = (i + 1 == n) && main_pipes;
         let own_pipes = corr
             .pipeline

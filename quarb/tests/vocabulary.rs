@@ -113,6 +113,8 @@ const CORPUS: &[&str] = &[
     // the outer spread and the outer correlation (2026-07-11;
     // driver-first since 2026-07-25)
     "//order::amt <=>? //user[::id = $$0::uid] | ...?",
+    // the every-witness correlation and its outer form (ruling 2026-11-11)
+    "//user <=>* //order[::uid = $$0::id] <=>*? //note[::oid = $$1::id]",
     // the anchored operand (2026-07-11)
     "//commit[:::short = ^/tags/*:::short]",
     // marks and the (name) anchor (2026-07-11)
@@ -334,7 +336,7 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     // v2 additive growth: quarq (2026-10-23, draft 166: the `q(…)`
     // literal; its body's commands are its children).
     ("quarq", &["form", "source"]),
-    ("query", &["form", "outer", "role"]),
+    ("query", &["every", "form", "outer", "role"]),
     ("range", &["form"]),
     ("recall", &["form", "ref"]),
     ("record-push", &["enriched", "form", "name"]),
