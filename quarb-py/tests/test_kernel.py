@@ -80,6 +80,24 @@ def test_kernel_directives_and_errors(kernel):
     assert status == "ok"
 
 
+def test_kernel_man_is_a_cell(kernel):
+    # `man sort` as a cell: the manual, as `%docs sort` is; a glyph
+    # and the list of glyphs the same
+    status, out = run_cell(kernel, "man upper")
+    assert status == "ok"
+    text = "".join(o["content"]["text"] for o in out if o["msg_type"] == "stream")
+    assert text.startswith("upper — the text in upper case")
+    status, out = run_cell(kernel, "man <=>")
+    assert status == "ok"
+    text = "".join(o["content"]["text"] for o in out if o["msg_type"] == "stream")
+    assert text.startswith("<=> — correlation")
+    status, out = run_cell(kernel, "%docs upper")
+    assert status == "ok"
+    # a word the manual lacks is the cell's error
+    status, _ = run_cell(kernel, "man qqqq")
+    assert status == "error"
+
+
 def test_kernel_cross_cell_defs(kernel, tmp_path_factory):
     tmp = tmp_path_factory.mktemp("kdefs")
     (tmp / "crew.json").write_text(

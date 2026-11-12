@@ -432,6 +432,38 @@ fn match_span_unit(rest: &str) -> Option<(i128, usize, Option<&'static str>)> {
         ("weeks", 604_800 * NS),
     ];
     const UNIT_NS: [i128; 7] = [86_400 * NS, 3_600 * NS, 60 * NS, NS, 1_000_000, 1_000, 1];
+    // The characters a spelling opens with, folded: a text that opens
+    // with none of them names no unit, and is not tried against the
+    // eighty spellings. Every text a sort or a fold keys by
+    // passes here on its way to being plain text (a path, a name, an
+    // ISO date after its year); the trial was a quarter of the fold
+    // of a million rows by a route.
+    static OPENERS: std::sync::OnceLock<Vec<char>> = std::sync::OnceLock::new();
+    let openers = OPENERS.get_or_init(|| {
+        let mut firsts: Vec<char> = LATIN
+            .iter()
+            .map(|(text, _)| *text)
+            .chain(
+                crate::durnames::designations()
+                    .iter()
+                    .map(|(t, ..)| t.as_str()),
+            )
+            .filter_map(|text| text.chars().next())
+            .filter_map(|c| c.to_lowercase().next())
+            .collect();
+        firsts.sort_unstable();
+        firsts.dedup();
+        firsts
+    });
+    let first = rest.chars().next()?;
+    let folded = if first.is_ascii() {
+        first.to_ascii_lowercase()
+    } else {
+        first.to_lowercase().next()?
+    };
+    if openers.binary_search(&folded).is_err() {
+        return None;
+    }
     let mut best: Option<(i128, usize, Option<&'static str>)> = None;
     let mut best_chars = 0;
     for (text, ns) in LATIN {
@@ -473,8 +505,17 @@ fn prefix_fold(rest: &str, text: &str) -> Option<usize> {
     let mut rc = rest.chars();
     for t in text.chars() {
         let r = rc.next()?;
-        if r != t && !r.to_lowercase().eq(t.to_lowercase()) {
-            return None;
+        if r != t {
+            // two ASCII characters fold by a bit, any other pair by
+            // the tables
+            let same = if r.is_ascii() && t.is_ascii() {
+                r.eq_ignore_ascii_case(&t)
+            } else {
+                r.to_lowercase().eq(t.to_lowercase())
+            };
+            if !same {
+                return None;
+            }
         }
         bytes += r.len_utf8();
     }
@@ -1533,6 +1574,64 @@ mod tests {
         assert_eq!(parse_span("-5d"), None);
         assert_eq!(parse_span(""), None);
         assert_eq!(parse_span("hello"), None);
+    }
+
+    /// A text that opens with no unit's first character is turned
+    /// away before the spellings are tried; every spelling any locale
+    /// writes still reads, in its own case and folded.
+    #[test]
+    fn every_designation_still_reads() {
+        let designations = crate::durnames::designations();
+        assert!(designations.len() > 40, "{}", designations.len());
+        for (text, _, implied) in designations {
+            let written = match implied {
+                Some(_) => text.clone(),
+                None => format!("3 {text}"),
+            };
+            assert!(parse_span(&written).is_some(), "{written}");
+            // folded the other way, where the fold is one to one
+            let upper = text.to_uppercase();
+            if upper.chars().count() == text.chars().count()
+                && upper.to_lowercase() == text.to_lowercase()
+            {
+                let written = match implied {
+                    Some(_) => upper.clone(),
+                    None => format!("3 {upper}"),
+                };
+                assert_eq!(
+                    parse_span(&written).is_some(),
+                    true,
+                    "{written} (the upper case of {text})"
+                );
+            }
+        }
+        for latin in [
+            "3 NS",
+            "3 Sec",
+            "3 MINUTES",
+            "3 Hr",
+            "3 D",
+            "3 Weeks",
+            "3 MS",
+        ] {
+            assert!(parse_span(latin).is_some(), "{latin}");
+        }
+        // what opens no unit: a path, a name, the rest of an ISO date
+        for text in [
+            "/search",
+            "#tag",
+            "2026-07-03T08:53:18Z",
+            "3 /h",
+            "3 _d",
+            "3",
+            "3 ",
+        ] {
+            assert_eq!(parse_span(text), None, "{text}");
+        }
+        // a first character that opens a unit and a text that is none
+        for text in ["search", "3 search", "3 hello", "3 dx", "день"] {
+            assert_eq!(parse_span(text), None, "{text}");
+        }
     }
 
     #[test]

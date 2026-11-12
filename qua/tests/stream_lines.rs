@@ -66,6 +66,9 @@ fn the_streamed_lines_answer_as_the_whole_reading() {
         "/line[..5][::blank] @| count",
         "/line[::n = 39999] | ::",
         "/line[::n > 39990] | ::n",
+        // lines read out of the file's order
+        "/line @| reverse @| [..3] | ::",
+        "/line<!blank> @| sort_by(::) @| [..3] | ::n",
     ] {
         let (a, ea, ga) = qua(&d, &[q, "lines:big.txt"]);
         let (b, eb, gb) = qua(&d, &["--no-stream", q, "lines:big.txt"]);

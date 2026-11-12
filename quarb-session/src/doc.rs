@@ -54,6 +54,7 @@ impl Options {
             allow_shell: self.allow_shell,
             // a session mounts the file whole (ruling 2026-11-05)
             stream_rows: false,
+            stream_documents: None,
         }
     }
 }

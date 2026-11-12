@@ -56,7 +56,13 @@ use std::rc::Rc;
 
 /// Query a filesystem tree, a JSON, XML, HTML, or CSV document.
 #[derive(Parser, Default)]
-#[command(version, about)]
+#[command(
+    version,
+    about,
+    after_help = "The manual: `man` as the first argument lists the commands, `man NAME` prints a \
+                  command's page, `man '<=>'` a glyph's (a pipe, a sigil, an operator), `man syntax \
+                  [KIND]` lists the glyphs; `--ru` for Russian."
+)]
 struct Cli {
     /// Quarb query, e.g. '//*.rs', '/users/*/name::', or '//a::href'.
     query: String,
@@ -196,12 +202,21 @@ struct Cli {
     /// through the adapter's scan path).
     #[arg(long = "no-pushdown")]
     no_pushdown: bool,
-    /// Mount a CSV or TSV file whole instead of streaming its rows
-    /// (ruling 2026-11-05: a one-off query streams the file, a row
-    /// parsed when a cell of it is read; a query that walks the rows
-    /// many times may prefer the file held).
-    #[arg(long = "no-stream")]
+    /// Mount a file whole instead of streaming it. A one-off query
+    /// streams a CSV or TSV file (a row parsed when a cell of it is
+    /// read), and a JSON, JSON lines or XML file of 128 MiB and more
+    /// (an element parsed when a step reaches it); a query that
+    /// walks the rows or the elements many times may prefer the file
+    /// held.
+    #[arg(long = "no-stream", conflicts_with = "stream")]
     no_stream: bool,
+    /// Stream a JSON, JSON lines or XML file whatever its size (they
+    /// stream from 128 MiB by themselves): the file is not held, an
+    /// element is parsed when a step reaches it. It costs little
+    /// memory, answers a count or a slice at once, and is slower
+    /// than the whole read for a query that reads into the elements.
+    #[arg(long = "stream")]
+    stream: bool,
 
     /// The diagnostics shown on stderr beside a query's answer:
     /// error (the refusals and syntax errors alone), warning (the
@@ -521,6 +536,21 @@ impl From<&Cli> for OpenOpts {
                 && cli.save.is_none()
                 && !cli.resident
                 && !cli.resident_serve,
+            // a document of elements streams from a size, or where
+            // `--stream` asks (the user's ruling, 2026-11-12); never
+            // in a run that keeps the arbor
+            stream_documents: if cli.no_stream
+                || cli.kaiv
+                || cli.save.is_some()
+                || cli.resident
+                || cli.resident_serve
+            {
+                None
+            } else if cli.stream {
+                Some(0)
+            } else {
+                Some(quarb_open::STREAM_DOCUMENTS_FROM)
+            },
         }
     }
 }
@@ -776,7 +806,7 @@ fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
         }
     }
 
-    // `qua man [--ru] [NAME | '|' | @|]` and `qc man`: the command
+    // `qua man [--ru] [NAME | GLYPH | syntax]` and `qc man`: the command
     // inventory, before the query grammar sees the words (`man` is
     // reserved as a first argument); `--commands` lists the
     // registry as TSV for the documentation gate.

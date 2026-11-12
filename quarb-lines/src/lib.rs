@@ -166,13 +166,13 @@ pub struct LinesStream {
     lens: Vec<u32>,
     blank: Vec<bool>,
     n_blank: usize,
-    reader: std::cell::RefCell<(std::io::BufReader<std::fs::File>, u64)>,
+    reader: std::cell::RefCell<(quarb::source::Window, u64)>,
     last: std::cell::RefCell<Option<(u64, String)>>,
 }
 
 impl LinesStream {
     pub fn open(path: &std::path::Path) -> std::io::Result<Self> {
-        use std::io::{BufRead, Seek};
+        use std::io::BufRead;
         let mut reader = std::io::BufReader::with_capacity(1 << 16, std::fs::File::open(path)?);
         let mut starts = Vec::new();
         let mut lens = Vec::new();
@@ -205,8 +205,7 @@ impl LinesStream {
             lens.push(body.len() as u32);
             blank.push(is_blank);
         }
-        let mut file = std::io::BufReader::with_capacity(1 << 16, std::fs::File::open(path)?);
-        file.seek(std::io::SeekFrom::Start(0))?;
+        let file = quarb::source::Window::new(std::fs::File::open(path)?, 0);
         Ok(LinesStream {
             starts,
             lens,

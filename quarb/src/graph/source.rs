@@ -455,3 +455,246 @@ mod boundary_tests {
         assert!(err.contains("not UTF-8 at byte 3"), "{err}");
     }
 }
+
+/// The file behind a streamed mount's reader, read through a window: the
+/// bytes around the place last read are held, and a seek to a place
+/// among them costs nothing. A reader that seeks the file itself
+/// drops what it buffered and reads again, row after row: a fold that
+/// reads its members group by group (`@|{.route} sum(--of=::bytes)`)
+/// skips forward a few rows at a time, and was a seek and a read per
+/// row, 875 thousand of each over a million rows, where reading the
+/// file whole took fourteen reads. Positions are the data's: 0 is
+/// where the data starts in the file (`base`: past a BOM or a `sep=`
+/// line for the CSV reader, which counts from there; 0 for a mount
+/// that keeps the file's offsets).
+///
+/// The window grows while the reads sweep forward — in order, or
+/// skipping near rows — up to [`Window::MOST`], and falls back to
+/// [`Window::LEAST`] after a jump, so a read of scattered rows (an
+/// order by one column, then a cell of another) costs what it cost:
+/// one short read a row.
+pub struct Window {
+    file: std::fs::File,
+    /// Where the data starts in the file.
+    base: u64,
+    /// The bytes held: the data's from `start` on.
+    held: Vec<u8>,
+    start: u64,
+    /// The reader's position.
+    pos: u64,
+    /// Where the file's own cursor stands, when known: a refill that
+    /// continues the last one does not seek.
+    cursor: Option<u64>,
+    /// How much the next refill reads.
+    chunk: usize,
+}
+
+impl Window {
+    const LEAST: usize = 8 << 10;
+    const MOST: usize = 1 << 20;
+
+    /// A window over `file` whose position 0 is the file's `base`.
+    pub fn new(file: std::fs::File, base: u64) -> Window {
+        Window {
+            file,
+            base,
+            held: Vec::new(),
+            start: 0,
+            pos: 0,
+            cursor: None,
+            chunk: Window::LEAST,
+        }
+    }
+
+    /// Hold the bytes from the position on: a longer run where the
+    /// position is just past the bytes held (the reads sweep
+    /// forward), the least after a jump.
+    fn refill(&mut self) -> std::io::Result<()> {
+        use std::io::{Read, Seek};
+        let end = self.start + self.held.len() as u64;
+        let sweeping =
+            !self.held.is_empty() && self.pos >= end && self.pos - end <= self.chunk as u64;
+        self.chunk = if sweeping {
+            (self.chunk * 2).min(Window::MOST)
+        } else {
+            Window::LEAST
+        };
+        if self.cursor != Some(self.pos) {
+            self.cursor = None;
+            self.file
+                .seek(std::io::SeekFrom::Start(self.base + self.pos))?;
+        }
+        self.held.resize(self.chunk, 0);
+        let mut n = 0;
+        while n < self.held.len() {
+            match self.file.read(&mut self.held[n..]) {
+                Ok(0) => break,
+                Ok(k) => n += k,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => {
+                    self.held.clear();
+                    self.cursor = None;
+                    return Err(e);
+                }
+            }
+        }
+        self.held.truncate(n);
+        self.start = self.pos;
+        self.cursor = Some(self.pos + n as u64);
+        Ok(())
+    }
+}
+
+impl std::io::Read for Window {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if self.pos < self.start || self.pos >= self.start + self.held.len() as u64 {
+            self.refill()?;
+        }
+        let at = (self.pos - self.start) as usize;
+        let n = out.len().min(self.held.len() - at);
+        out[..n].copy_from_slice(&self.held[at..at + n]);
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+
+impl std::io::Seek for Window {
+    fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+        let out_of_range = || {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "a seek before the start of the data",
+            )
+        };
+        self.pos = match to {
+            std::io::SeekFrom::Start(p) => p,
+            std::io::SeekFrom::Current(d) => {
+                self.pos.checked_add_signed(d).ok_or_else(out_of_range)?
+            }
+            std::io::SeekFrom::End(d) => self
+                .file
+                .metadata()?
+                .len()
+                .saturating_sub(self.base)
+                .checked_add_signed(d)
+                .ok_or_else(out_of_range)?,
+        };
+        Ok(self.pos)
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::Window;
+    use std::io::{Read, Seek, SeekFrom};
+
+    /// A file of `n` bytes whose byte at `i` is `i % 251`, under a
+    /// name of the test's own.
+    fn file(n: usize) -> (std::path::PathBuf, Vec<u8>) {
+        let test = std::thread::current()
+            .name()
+            .unwrap_or("t")
+            .replace(':', "-");
+        let path = std::env::temp_dir().join(format!("quarb-window-{}-{test}", std::process::id()));
+        let bytes: Vec<u8> = (0..n).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&path, &bytes).unwrap();
+        (path, bytes)
+    }
+
+    fn read_at(w: &mut Window, at: u64, len: usize) -> Vec<u8> {
+        w.seek(SeekFrom::Start(at)).unwrap();
+        let mut out = vec![0u8; len];
+        let mut n = 0;
+        while n < len {
+            match w.read(&mut out[n..]).unwrap() {
+                0 => break,
+                k => n += k,
+            }
+        }
+        out.truncate(n);
+        out
+    }
+
+    /// Whatever the order of the reads, the bytes are the file's.
+    #[test]
+    fn the_bytes_are_the_file_s_in_any_order() {
+        let (path, bytes) = file(3 * Window::MOST + 12_345);
+        let mut w = Window::new(std::fs::File::open(&path).unwrap(), 0);
+        let len = bytes.len() as u64;
+        // in order, skipping forward, back to the start, scattered,
+        // across the end of what is held, at and past the end
+        let mut places: Vec<(u64, usize)> = (0..200).map(|i| (i * 700, 600)).collect();
+        places.extend((0..200).map(|i| (i * 40_000, 3_000)));
+        places.push((0, 10));
+        places.extend((0..300u64).map(|i| ((i * 7_919_003) % len, 257)));
+        places.push((Window::LEAST as u64 - 5, 4 * Window::LEAST));
+        places.push((len - 3, 10));
+        places.push((len, 10));
+        places.push((len + 1_000, 10));
+        places.push((5, 5));
+        for (at, n) in places {
+            let want: &[u8] = if at >= len {
+                &[]
+            } else {
+                &bytes[at as usize..(at as usize + n).min(bytes.len())]
+            };
+            assert_eq!(read_at(&mut w, at, n), want, "{n} bytes at {at}");
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Position 0 is the base: what stands before it in the file is
+    /// never read, and the three seeks agree on where the data lies.
+    #[test]
+    fn positions_count_from_the_base() {
+        let (path, bytes) = file(50_000);
+        let base = 1_003usize;
+        let mut w = Window::new(std::fs::File::open(&path).unwrap(), base as u64);
+        assert_eq!(read_at(&mut w, 0, 8), &bytes[base..base + 8]);
+        assert_eq!(
+            read_at(&mut w, 40_000, 8),
+            &bytes[base + 40_000..base + 40_008]
+        );
+        // relative to where the last read ended, and to the end
+        assert_eq!(w.seek(SeekFrom::Current(-8)).unwrap(), 40_000);
+        assert_eq!(w.stream_position().unwrap(), 40_000);
+        assert_eq!(
+            w.seek(SeekFrom::End(-4)).unwrap(),
+            (bytes.len() - base - 4) as u64
+        );
+        let mut tail = Vec::new();
+        w.read_to_end(&mut tail).unwrap();
+        assert_eq!(tail, &bytes[bytes.len() - 4..]);
+        assert!(w.seek(SeekFrom::Current(-1_000_000)).is_err());
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// The window grows while the reads sweep forward and falls back
+    /// after a jump, so scattered reads stay short ones.
+    #[test]
+    fn the_window_grows_on_a_sweep_and_falls_back_on_a_jump() {
+        let (path, _) = file(4 * Window::MOST);
+        let mut w = Window::new(std::fs::File::open(&path).unwrap(), 0);
+        read_at(&mut w, 0, 16);
+        assert_eq!(w.held.len(), Window::LEAST);
+        // forward, each read a little past what is held
+        let mut at = 0u64;
+        for _ in 0..8 {
+            at = w.start + w.held.len() as u64 + 100;
+            read_at(&mut w, at, 16);
+        }
+        assert_eq!(w.held.len(), Window::MOST, "after a sweep to {at}");
+        // inside what is held: nothing is read again
+        let (start, held) = (w.start, w.held.len());
+        read_at(&mut w, start + 1_000, 16);
+        read_at(&mut w, start + 10, 16);
+        assert_eq!((w.start, w.held.len()), (start, held));
+        // back to the start: a jump
+        read_at(&mut w, 0, 16);
+        assert_eq!(w.held.len(), Window::LEAST);
+        // far forward: a jump as well
+        read_at(&mut w, 3 * Window::MOST as u64, 16);
+        assert_eq!(w.held.len(), Window::LEAST);
+        let _ = std::fs::remove_file(path);
+    }
+}

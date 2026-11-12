@@ -165,6 +165,12 @@ pub const UNKNOWN_LABEL: &str = "UNKNOWN_LABEL";
 /// surface its source declares lacks (a table's columns, a CSV's
 /// header); the properties there are named.
 pub const UNKNOWN_PROPERTY: &str = "UNKNOWN_PROPERTY";
+/// Warning: the query read a field by name on records, and no record
+/// it read under that name has it (ruling 2026-11-11): the answer is
+/// null as ever, and the fields the records have are named. Quiet
+/// where one record read under the name has the field. One warning
+/// per name, when the run ends.
+pub const UNKNOWN_FIELD: &str = "UNKNOWN_FIELD";
 /// Warning: a plain correlation (`<=>`, `<=>?`) bound the first of
 /// several satisfying candidates for some driver, and the query
 /// reads that witness: the answer depends on which one was bound.

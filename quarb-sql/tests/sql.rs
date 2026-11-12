@@ -264,6 +264,31 @@ fn export_refusals() {
         err("/t/* @| sort_by(::c; --locale=de) | ::c").contains("names the engine's collation")
     );
     assert!(err("/t/* @| sort_by(::a; ::b) | ::a").contains("a sort by several keys"));
+    // a case order is the engine's collation's as well (ruling
+    // 2026-11-12), and `top` says the same of its options: they were
+    // dropped, and the SQL ordered as the backend pleased
+    for flag in [
+        "-u",
+        "--upper-first",
+        "-l",
+        "--lower-first",
+        "-i",
+        "--ignore-case",
+    ] {
+        let e = err(&format!("/t/* @| sort_by(::c; {flag}) | ::c"));
+        assert!(
+            e.contains("case order is the engine's collation's"),
+            "{flag}: {e}"
+        );
+    }
+    assert_eq!(
+        x("/t/* @| top(3; ::c) | ::c"),
+        "SELECT c FROM t ORDER BY c DESC LIMIT 3"
+    );
+    for option in ["--locale=de", "-i", "--upper-first"] {
+        let e = err(&format!("/t/* @| top(3; ::c; {option}) | ::c"));
+        assert!(e.contains("names the engine's collation"), "{option}: {e}");
+    }
     // A '*=' pattern must be a text literal — a column operand
     // holds a value, not a pattern.
     assert!(err("/t/*[::a *= ::b] | ::a").contains("non-literal"));

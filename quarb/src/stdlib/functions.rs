@@ -398,15 +398,107 @@ pub fn value_flag(call: &FnCall) -> bool {
         .any(|a| matches!(a, Arg::Opt { name, value: None } if name == "--value" || name == "-v"))
 }
 
+/// The case order a call names for the collation it orders text
+/// under (ruling 2026-11-12: "leverage colligo's sort options
+/// fully"), in place of the locale's own: `-u` (`--upper-first`)
+/// and `-l` (`--lower-first`) for one case order on any locale,
+/// whatever CLDR says of it, `-i` (`--ignore-case`) for texts that
+/// differ only in case to tie. `sort` and the keyed commands that
+/// order take them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CaseOrder {
+    UpperFirst,
+    LowerFirst,
+    Ignored,
+}
+
+/// The case order the call names, `None` where it names none; two
+/// of the three are refused, being one choice.
+pub(crate) fn case_order(call: &FnCall) -> Result<Option<CaseOrder>, String> {
+    let named: Vec<CaseOrder> = call
+        .args
+        .iter()
+        .filter_map(|a| match a {
+            Arg::Opt { name, value: None } => match name.as_str() {
+                "--upper-first" | "-u" => Some(CaseOrder::UpperFirst),
+                "--lower-first" | "-l" => Some(CaseOrder::LowerFirst),
+                "--ignore-case" | "-i" => Some(CaseOrder::Ignored),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    match named.as_slice() {
+        [] => Ok(None),
+        [one] => Ok(Some(*one)),
+        [first, rest @ ..] if rest.iter().all(|o| o == first) => Ok(Some(*first)),
+        _ => Err(format!(
+            "{}: --upper-first, --lower-first and --ignore-case are one choice: name one",
+            call.name
+        )),
+    }
+}
+
 /// What `sort` answers `-v` with anywhere but on one record.
 pub(crate) const VALUE_FLAG_OFF_A_RECORD: &str = "sort: -v (--value) orders a record's fields by \
      their values; a list has no keys: write '| sort(-v)' on the record";
 
 /// The text order a `sort` call sorts under: the one it names (a
 /// locale's collation, the a tergo order, or both), else the output
-/// locale's collation when the tool set one.
+/// locale's collation when the tool set one. A call that names the
+/// code-point order (`"C"`, `"POSIX"`) has named its order: the
+/// output locale does not apply.
 pub(crate) fn sort_text_order(call: &FnCall) -> Option<Box<dyn Fn(&str, &str) -> Ordering>> {
-    text_order(call).or_else(default_text_order)
+    text_order(call).or_else(|| {
+        if names_code_points(call) {
+            None
+        } else {
+            default_text_order()
+        }
+    })
+}
+
+/// Whether `tag` names the code-point order (ruling 2026-11-12):
+/// `"C"` and `"POSIX"`, the words the tools take for no locale.
+/// Text then orders by code point, ASCII order for ASCII text,
+/// whatever the output locale: `sort("C")`, `sort_by(:k;
+/// --locale=C)`. Without a locale named and under no output locale
+/// that is the order anyway; the name is for asking for it.
+pub fn code_point_order(tag: &str) -> bool {
+    tag == "C" || tag == "POSIX"
+}
+
+/// Whether the call names the code-point order where it names its
+/// locale: `sort`'s operand, a keyed command's `--locale=`.
+pub(crate) fn names_code_points(call: &FnCall) -> bool {
+    named_locale(call).is_some_and(|tag| code_point_order(&tag))
+}
+
+/// The locale a call names: `sort`'s one literal operand, a keyed
+/// command's `--locale=tag`.
+fn named_locale(call: &FnCall) -> Option<String> {
+    if call.name == "sort" {
+        call.args.iter().find_map(|a| match a {
+            Arg::Lit(l) => Some(l.to_string()),
+            _ => None,
+        })
+    } else {
+        locale_option(call)
+    }
+}
+
+/// The text order a keyed command orders its text keys under: the
+/// collation of the locale it names (`--locale=tag`), in the case
+/// order it names; else the output locale's; none where it names
+/// the code-point order.
+pub(crate) fn keyed_text_order(call: &FnCall) -> Option<Box<dyn Fn(&str, &str) -> Ordering>> {
+    locale_text_order(call).or_else(|| {
+        if names_code_points(call) {
+            None
+        } else {
+            default_text_order()
+        }
+    })
 }
 
 /// `sort`'s order over items read by one value each (ruling
@@ -459,8 +551,7 @@ pub fn locale_option(call: &FnCall) -> Option<String> {
 /// keys order under that locale's collation, every other key as it
 /// did. `None` without the option.
 pub(crate) fn locale_text_order(call: &FnCall) -> Option<Box<dyn Fn(&str, &str) -> Ordering>> {
-    let tag = locale_option(call)?;
-    collator_of(&call.name, &tag)
+    call_collator(call, named_locale(call))
         .map(|c| -> Box<dyn Fn(&str, &str) -> Ordering> { Box::new(move |a, b| c.compare(a, b)) })
 }
 
@@ -490,28 +581,12 @@ pub(crate) fn default_text_order() -> Option<Box<dyn Fn(&str, &str) -> Ordering>
         .map(|c| -> Box<dyn Fn(&str, &str) -> Ordering> { Box::new(move |a, b| c.compare(a, b)) })
 }
 
-/// `sort` without a locale argument: the standard value comparison,
-/// with text that has no reading collated under `collate` (the
-/// output locale's order) — numbers, dates, quantities and text
-/// that reads as one keep their magnitude order whatever the
-/// locale.
-pub(crate) fn default_cmp(
-    a: &Value,
-    b: &Value,
-    scale: Scale,
-    collate: Option<&dyn Fn(&str, &str) -> Ordering>,
-) -> Ordering {
-    if let (Some(c), Value::Str(x), Value::Str(y)) = (collate, a, b)
-        && matches!(a.sort_key_with(scale), crate::value::SortKey::Text(_))
-        && matches!(b.sort_key_with(scale), crate::value::SortKey::Text(_))
-    {
-        return c(x, y);
-    }
-    a.compare_with(b, scale)
-}
-
 /// The collator for the run's collation, when the tool set one
-/// (`Run::collation`, its output locale).
+/// (`Run::collation`, its output locale). It runs in the locale's
+/// own case order (colligo's default since 0.2.0; ruling
+/// 2026-11-12): texts that differ only in case are no tie, lower
+/// case first in most locales, upper case first where CLDR gives
+/// the locale that order (Danish, Maltese, Church Slavic).
 #[cfg(feature = "colligo")]
 fn default_collator() -> Option<colligo::Collator> {
     let tag = crate::value::ambient::ambient(|a| a.collation.clone())?;
@@ -521,6 +596,68 @@ fn default_collator() -> Option<colligo::Collator> {
             .build()
             .unwrap_or_else(|_| colligo::Collator::root()),
     )
+}
+
+/// The collator a call orders text under, where the call says
+/// anything of it: the locale it names (`named`: `sort`'s operand,
+/// a keyed command's `--locale=`), in the case order it names
+/// ([`case_order`]) or else the locale's own. A call that names a
+/// case order and no locale takes the output locale's collation,
+/// and under none the root collation: a case order is a collation's
+/// to give, so `| sort(-i)` is the case-blind sort with no locale
+/// to name. `None` where the call names neither (the caller falls
+/// to the output locale, then to the standard comparison), and
+/// where it is refused.
+#[cfg(feature = "colligo")]
+fn call_collator(call: &FnCall, named: Option<String>) -> Option<colligo::Collator> {
+    let case = match case_order(call) {
+        Ok(case) => case,
+        Err(why) => {
+            crate::value::ambient::record_refusal(why);
+            return None;
+        }
+    };
+    let mut collator = match named {
+        // the code-point order is no collation, and has no case
+        // order to give
+        Some(tag) if code_point_order(&tag) => {
+            if case.is_some() {
+                crate::value::ambient::record_refusal(format!(
+                    "{}: a case order is a collation's, and {tag:?} names the code-point order",
+                    call.name
+                ));
+            }
+            return None;
+        }
+        Some(tag) => collator_of(&call.name, &tag)?,
+        None => {
+            case?;
+            default_collator().unwrap_or_else(colligo::Collator::root)
+        }
+    };
+    if let Some(case) = case {
+        collator.set_case_mode(match case {
+            CaseOrder::UpperFirst => colligo::CaseMode::UpperFirst,
+            CaseOrder::LowerFirst => colligo::CaseMode::LowerFirst,
+            CaseOrder::Ignored => colligo::CaseMode::Insensitive,
+        });
+    }
+    Some(collator)
+}
+
+/// Collation compiled out: a case order has no collation to stand
+/// on, and the call that names one is refused.
+#[cfg(not(feature = "colligo"))]
+fn call_collator(call: &FnCall, _named: Option<String>) -> Option<NeverCollator> {
+    match case_order(call) {
+        Ok(None) => {}
+        Ok(Some(_)) => crate::value::ambient::record_refusal(format!(
+            "{}: a case order is a collation's, and this build has none",
+            call.name
+        )),
+        Err(why) => crate::value::ambient::record_refusal(why),
+    }
+    None
 }
 
 #[cfg(not(feature = "colligo"))]
@@ -537,11 +674,7 @@ fn default_collator() -> Option<NeverCollator> {
 #[cfg(feature = "colligo")]
 pub(crate) fn collator_for(call: &FnCall) -> Option<colligo::Collator> {
     // The locale is the one literal operand (the modes are flags).
-    let tag = call.args.iter().find_map(|a| match a {
-        Arg::Lit(l) => Some(l.to_string()),
-        _ => None,
-    })?;
-    collator_of(&call.name, &tag)
+    call_collator(call, named_locale(call))
 }
 
 /// The collator of one locale tag, for the command `name`.
@@ -584,8 +717,8 @@ impl NeverCollator {
 }
 
 #[cfg(not(feature = "colligo"))]
-pub(crate) fn collator_for(_call: &FnCall) -> Option<NeverCollator> {
-    None
+pub(crate) fn collator_for(call: &FnCall) -> Option<NeverCollator> {
+    call_collator(call, None)
 }
 
 /// The scalar registry, for enumerating consumers (completion,
@@ -8869,10 +9002,10 @@ pub(crate) fn index_value(
                     let (from, to) = span(*a, *b, fields.len());
                     Ok(Value::Record(fields.pick(from..to)))
                 }
-                IndexSpec::Name(n) => Ok(fields
-                    .iter()
-                    .find(|(k, _)| k == n)
-                    .map(|(_, v)| v.clone())
+                // a read by name as `:name` is: null where the record
+                // has no such field, the name tallied for the run
+                IndexSpec::Name(n) => Ok(crate::value::ambient::read_field(&fields, n)
+                    .cloned()
                     .unwrap_or(Value::Null)),
             }
         }

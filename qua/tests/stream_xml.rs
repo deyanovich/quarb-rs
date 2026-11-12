@@ -1,9 +1,11 @@
 //! Hash (d) of the columnar round (2026-11-06): an XML document with
 //! one repeated child under its document element — a dictionary of
-//! entries, a dump of pages — is streamed under qua: the element and
-//! the prologue parsed whole, each child parsed into its own arbor as
-//! a step reaches it. The answers are the whole read's (`--no-stream`),
-//! compared here on a generated document above the streaming threshold.
+//! entries, a dump of pages — is streamed under qua where it is large
+//! (128 MiB and up) or where `--stream` asks: the element and the
+//! prologue parsed whole, each child parsed into its own arbor as a
+//! step reaches it. The answers are the whole read's (`--no-stream`,
+//! and the default for a file of this size), compared here on a
+//! generated document under `--stream`.
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -80,14 +82,21 @@ fn the_streamed_document_answers_as_the_whole_read() {
         "//entry[::id = \"e4999\"] | %",
         "/dictionary/entry[6]/see | ::ref",
         "/dictionary/note[2] | ::",
+        // children read out of the file's order
+        "/dictionary/entry @| reverse @| [..3] | ::id",
+        "/dictionary/entry @| sort_by(::id) @| [..3] | ::id",
+        "/dictionary/entry | .n(/sense::n) @|{.n} max_by(::id) | ::id",
     ] {
-        let (a, ea, ga) = qua(&d, &[q, "dict.xml"]);
+        let (a, ea, ga) = qua(&d, &["--stream", q, "dict.xml"]);
         let (b, eb, gb) = qua(&d, &["--no-stream", q, "dict.xml"]);
         assert_eq!(ga, gb, "{q}: {ea} / {eb}");
         assert_eq!(a, b, "{q}");
     }
-    let (out, err, good) = qua(&d, &["/dictionary/entry @| count", "dict.xml"]);
+    let (out, err, good) = qua(&d, &["--stream", "/dictionary/entry @| count", "dict.xml"]);
     assert!(good, "{err}");
     assert_eq!(out, "5000");
-    assert_eq!(qua(&d, &["/dictionary/note @| count", "dict.xml"]).0, "5");
+    assert_eq!(
+        qua(&d, &["--stream", "/dictionary/note @| count", "dict.xml"]).0,
+        "5"
+    );
 }

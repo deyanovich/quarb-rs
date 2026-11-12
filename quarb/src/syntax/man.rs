@@ -1,12 +1,17 @@
-//! `qua man`: the command inventory as the manual reads it. The
-//! text is `langspec/commands.tsv` of the language repository,
-//! vendored here (`scripts/vendor-commands.sh`, once per train) so
-//! the door works offline and never drifts from the spec; the
-//! documentation gate diffs the vendored copy against the
-//! language's. The same text answers `quai :man NAME`, the Jupyter
-//! kernel's `%docs NAME` and `qc man`.
+//! `qua man`: the command inventory and the syntax index as the
+//! manual reads them. The text is `langspec/commands.tsv` and
+//! `langspec/syntax-index.tsv` of the language repository, vendored
+//! here (`scripts/vendor-commands.sh`, once per train) so the door
+//! works offline and never drifts from the spec; the documentation
+//! gate diffs the vendored copies against the language's. The same
+//! text answers `quai :man NAME`, the Jupyter kernel's `%docs NAME`
+//! and `qc man`.
 
 const INVENTORY: &str = include_str!("commands.tsv");
+
+/// The syntax index: one row per glyph of the language, the pipes,
+/// sigils, operators and brackets a command name does not reach.
+const SYNTAX: &str = include_str!("syntax-index.tsv");
 
 /// The parsed signatures of a built-in, one per form of its cell
 /// (spec: Signatures, draft 203); `None` for a library command and
@@ -216,31 +221,440 @@ pub fn list(pipe: Option<&str>, ru: bool) -> String {
         .join("\n")
 }
 
-/// `man [--ru] [NAME | '|' | @| | $|]`: the door's arguments to its
-/// text, or the message of a name the inventory lacks.
+/// One row of the syntax index: a glyph of the language, its name,
+/// where the specification defines it and the page of the Language
+/// Reference that treats it.
+#[derive(Clone, Debug)]
+pub struct Glyph {
+    pub id: String,
+    /// The glyph as written, its variable parts in angle quotes
+    /// (`⟨a⟩..⟨b⟩`) and an open body as `␣` (`[␣]`).
+    pub glyph: String,
+    pub name_en: String,
+    pub name_ru: String,
+    /// The spec label that defines it, or `see:ID` for a second
+    /// spelling of the row `ID`.
+    pub anchor: String,
+    /// The Language Reference page; `model` for a statement of a
+    /// model file (no page each: the spec section is its home), `-`
+    /// for a row kept only for the spec's index (stale syntax).
+    pub entry: String,
+    /// What the glyph does, one sentence (the columns `does_en` and
+    /// `does_ru`, where the index carries them).
+    pub en: String,
+    pub ru: String,
+    /// The kind of the glyph (pipe, sigil, operator, …), where the
+    /// index carries the column.
+    pub kind: String,
+}
+
+impl Glyph {
+    /// The glyph's own marks: the variable parts and the open body
+    /// left out, `..` of `⟨a⟩..⟨b⟩`, `[]` of `[␣]`.
+    pub fn marks(&self) -> String {
+        let mut out = String::new();
+        let mut held = false;
+        for c in self.glyph.chars() {
+            match c {
+                '⟨' => held = true,
+                '⟩' => held = false,
+                '␣' | ' ' => {}
+                c if !held => out.push(c),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Whether `written` is this glyph with its variable parts
+    /// filled in: `1..5` for `⟨a⟩..⟨b⟩`, `$.total` for `$.⟨name⟩`,
+    /// `[::n > 3]` for `[␣]`. A glyph that is all variable (`⟨name⟩`)
+    /// is no pattern: any word would be it.
+    pub fn is_written_as(&self, written: &str) -> bool {
+        if self.marks().is_empty() {
+            return false;
+        }
+        // the glyph as a sequence of literal runs and variable parts
+        enum Part {
+            Run(String),
+            /// A variable part: one character at least; a count
+            /// (`⟨N⟩`, `⟨n⟩`, `⟨k⟩`, `⟨m⟩`) is digits.
+            Var {
+                digits: bool,
+            },
+            /// An open body (`␣`): anything, nothing included.
+            Body,
+        }
+        let mut parts: Vec<Part> = Vec::new();
+        let mut name: Option<String> = None;
+        for c in self.glyph.chars() {
+            match (c, &mut name) {
+                ('⟨', None) => name = Some(String::new()),
+                ('⟩', Some(n)) => {
+                    let digits = matches!(n.as_str(), "N" | "n" | "k" | "m");
+                    parts.push(Part::Var { digits });
+                    name = None;
+                }
+                (c, Some(n)) => n.push(c),
+                ('␣', None) => parts.push(Part::Body),
+                (c, None) => match parts.last_mut() {
+                    Some(Part::Run(run)) => run.push(c),
+                    _ => parts.push(Part::Run(c.to_string())),
+                },
+            }
+        }
+        if parts.iter().all(|p| matches!(p, Part::Run(_))) {
+            return false;
+        }
+        // backtracking over the parts: the glyphs are short
+        fn fits(parts: &[Part], text: &str) -> bool {
+            match parts.split_first() {
+                None => text.is_empty(),
+                Some((Part::Run(run), rest)) => text
+                    .strip_prefix(run.as_str())
+                    .is_some_and(|t| fits(rest, t)),
+                Some((Part::Body, rest)) => text
+                    .char_indices()
+                    .map(|(at, _)| at)
+                    .chain([text.len()])
+                    .any(|at| fits(rest, &text[at..])),
+                Some((Part::Var { digits }, rest)) => {
+                    let mut ends = text
+                        .char_indices()
+                        .map(|(at, _)| at)
+                        .skip(1)
+                        .chain([text.len()]);
+                    !text.is_empty()
+                        && ends.any(|at| {
+                            (!*digits || text[..at].chars().all(|c| c.is_ascii_digit()))
+                                && fits(rest, &text[at..])
+                        })
+                }
+            }
+        }
+        fits(&parts, written)
+    }
+}
+
+/// The rows of the syntax index, in the file's order. The header is
+/// the file's first line, written as a comment.
+pub fn glyphs() -> Vec<Glyph> {
+    let mut lines = SYNTAX.lines();
+    let header: Vec<&str> = lines
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches('#')
+        .trim_start()
+        .split('\t')
+        .collect();
+    let at = |name: &str| header.iter().position(|c| *c == name);
+    let (id, glyph, name_en, name_ru, anchor, entry) = (
+        at("id"),
+        at("glyph"),
+        at("name_en"),
+        at("name_ru"),
+        at("anchor"),
+        at("entry"),
+    );
+    let (en, ru, kind) = (at("does_en"), at("does_ru"), at("kind"));
+    lines
+        .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+        .map(|line| {
+            let cells: Vec<&str> = line.split('\t').collect();
+            let cell = |i: Option<usize>| -> String {
+                i.and_then(|i| cells.get(i))
+                    .map(|c| c.to_string())
+                    .unwrap_or_default()
+            };
+            Glyph {
+                id: cell(id),
+                glyph: cell(glyph),
+                name_en: cell(name_en),
+                name_ru: cell(name_ru),
+                anchor: cell(anchor),
+                entry: cell(entry),
+                en: cell(en),
+                ru: cell(ru),
+                kind: cell(kind),
+            }
+        })
+        // a row without an entry is stale syntax, kept for the
+        // spec's index alone: the door does not show it
+        .filter(|g| g.entry != "-")
+        .collect()
+}
+
+/// The rows a word of syntax names, nearest reading first: the glyph
+/// as the index writes it; its own marks (`..`, `[]`, `$.`); the
+/// glyph with its variable parts filled in (`1..5`, `$.total`); the
+/// name of its reference entry (`aggregation-pipe`, the stable name:
+/// it is the page's address); the row's id. The first reading that
+/// names any row is the answer.
+pub fn glyphs_of(word: &str) -> Vec<Glyph> {
+    let all = glyphs();
+    let bare: String = word.chars().filter(|c| !c.is_whitespace()).collect();
+    // a written form has something written in it: a word of marks
+    // alone is a glyph or none (`=>*` is not the expression head `=`
+    // with `>*` for its body)
+    let filled = word
+        .chars()
+        .any(|c| c.is_alphanumeric() || c.is_whitespace());
+    let readings: [&dyn Fn(&Glyph) -> bool; 5] = [
+        &|g| g.glyph == word,
+        &|g| !bare.is_empty() && g.marks() == bare,
+        &|g| filled && g.is_written_as(word),
+        &|g| g.entry == word && g.entry != "model",
+        &|g| g.id == word,
+    ];
+    for (i, reading) in readings.into_iter().enumerate() {
+        let mut rows: Vec<Glyph> = all.iter().filter(|g| reading(g)).cloned().collect();
+        if rows.is_empty() {
+            continue;
+        }
+        // a written form fits several glyphs (`$.total` is `$.⟨name⟩`,
+        // and `$⟨N⟩` would take it whole were a count not digits):
+        // the ones that say the most of it in their own marks
+        if i == 2 {
+            let most = rows
+                .iter()
+                .map(|g| g.marks().chars().count())
+                .max()
+                .unwrap_or(0);
+            rows.retain(|g| g.marks().chars().count() == most);
+        }
+        return rows;
+    }
+    Vec::new()
+}
+
+/// The Language Reference's address of an entry. The reference is
+/// English: a page under `--ru` names the spec section alone, as a
+/// command's page does.
+fn reference_url(entry: &str) -> String {
+    format!("https://quarb.org/reference/{entry}.html")
+}
+
+/// The manual page of one glyph: its line, what it does where the
+/// index says, the spelling it stands for (a second spelling), the
+/// spec section and the reference page (a statement of a model file
+/// has the section alone).
+pub fn glyph_page(g: &Glyph, ru: bool) -> String {
+    let all = glyphs();
+    // a second spelling takes its section, and its sentence where it
+    // has none of its own, from the row it stands for
+    let canonical = g
+        .anchor
+        .strip_prefix("see:")
+        .and_then(|id| all.iter().find(|c| c.id == id));
+    let name = |g: &Glyph| {
+        if ru {
+            g.name_ru.clone()
+        } else {
+            g.name_en.clone()
+        }
+    };
+    let what = |g: &Glyph| if ru { g.ru.clone() } else { g.en.clone() };
+    let mut s = format!("{} — {}\n", g.glyph, name(g));
+    let row = |s: &mut String, label: &str, text: &str| {
+        if !text.is_empty() {
+            s.push_str(&format!("  {label:<9} {text}\n"));
+        }
+    };
+    let sentence = match what(g) {
+        w if w.is_empty() => canonical.map(&what).unwrap_or_default(),
+        w => w,
+    };
+    row(&mut s, "what", &sentence);
+    if !g.kind.is_empty() {
+        row(&mut s, "kind", &g.kind);
+    }
+    if let Some(c) = canonical {
+        row(&mut s, "see", &format!("{} — {}", c.glyph, name(c)));
+    }
+    let anchor = canonical.map_or(g.anchor.as_str(), |c| c.anchor.as_str());
+    if !anchor.starts_with("see:") {
+        row(&mut s, "spec", anchor);
+    }
+    let entry = match g.entry.as_str() {
+        "-" | "" => canonical.map_or("", |c| c.entry.as_str()),
+        e => e,
+    };
+    if !ru && !matches!(entry, "" | "-" | "model") {
+        row(&mut s, "reference", &reference_url(entry));
+    }
+    s.trim_end().to_string()
+}
+
+/// Glyphs one per line: the glyph, its kind where the index names
+/// the kinds, its name (`man syntax`, `man syntax operator`).
+pub fn glyph_list(rows: &[Glyph], ru: bool) -> String {
+    let width = |of: &dyn Fn(&Glyph) -> usize| rows.iter().map(of).max().unwrap_or(0);
+    let glyph = width(&|g| g.glyph.chars().count());
+    let kind = width(&|g| g.kind.chars().count());
+    rows.iter()
+        .map(|g| {
+            let pad = " ".repeat(glyph - g.glyph.chars().count());
+            let name = if ru { &g.name_ru } else { &g.name_en };
+            if kind == 0 {
+                format!("{}{pad}  {name}", g.glyph)
+            } else {
+                let gap = " ".repeat(kind - g.kind.chars().count());
+                format!("{}{pad}  {}{gap}  {name}", g.glyph, g.kind)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The kinds the index names, in the order it first names them.
+pub fn kinds() -> Vec<String> {
+    let mut kinds: Vec<String> = Vec::new();
+    for g in glyphs() {
+        if !g.kind.is_empty() && !kinds.contains(&g.kind) {
+            kinds.push(g.kind);
+        }
+    }
+    kinds
+}
+
+/// `man [--ru] [NAME | GLYPH | syntax [KIND]]`: the door's arguments
+/// to its text, or the message of a word neither table has.
+///
+/// A command's name is its page. A glyph of the language (a pipe, a
+/// sigil, an operator, a bracket) is the page of every row that
+/// writes it, as the index writes it (`<=>`, `::`), by its own marks
+/// (`..`, `[]`), or with its variable parts filled in (`$.total`).
+/// A pipe is both: its page, then the commands that stand after it.
+/// `syntax` lists the glyphs as the bare `man` lists the commands,
+/// and `syntax KIND` those of one kind (`syntax operator`, `syntax
+/// sigils`).
 pub fn man(args: &[&str]) -> Result<String, String> {
     let ru = args.iter().any(|a| *a == "--ru");
     let words: Vec<&str> = args.iter().copied().filter(|a| *a != "--ru").collect();
+    let pages = |rows: &[Glyph]| -> String {
+        rows.iter()
+            .map(|g| glyph_page(g, ru))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    };
     match words.as_slice() {
         [] => Ok(list(None, ru)),
-        [pipe] if matches!(*pipe, "|" | "@|" | "$|") => Ok(list(Some(pipe), ru)),
-        [name] => entry(name).map(|e| page(&e, ru)).ok_or_else(|| {
-            let near: Vec<String> = entries()
-                .iter()
-                .map(Entry::written)
-                .filter(|n| {
-                    n.to_lowercase().contains(&name.to_lowercase())
-                        || name.to_lowercase().contains(&n.to_lowercase())
-                })
-                .take(5)
-                .collect();
-            if near.is_empty() {
-                format!("no command '{name}' (`man` alone lists them)")
+        [pipe] if matches!(*pipe, "|" | "@|" | "$|") => {
+            let rows = glyphs_of(pipe);
+            let commands = list(Some(pipe), ru);
+            Ok(if rows.is_empty() {
+                commands
             } else {
-                format!("no command '{name}'; the nearest: {}", near.join(", "))
+                format!("{}\n\n{commands}", pages(&rows))
+            })
+        }
+        [word] if *word == "syntax" && entry(word).is_none() => Ok(glyph_list(&glyphs(), ru)),
+        [word, kind] if *word == "syntax" && entry(word).is_none() => {
+            let kinds = kinds();
+            // the kind as the index names it, or its plural
+            let named = kinds.iter().find(|k| {
+                k.as_str() == *kind
+                    || format!("{k}s") == *kind
+                    || k.strip_suffix('y')
+                        .is_some_and(|stem| format!("{stem}ies") == *kind)
+            });
+            match named {
+                Some(k) => {
+                    let rows: Vec<Glyph> = glyphs().into_iter().filter(|g| g.kind == *k).collect();
+                    Ok(glyph_list(&rows, ru))
+                }
+                None if kinds.is_empty() => Err("the syntax index names no kinds".into()),
+                None => Err(format!(
+                    "no kind '{kind}' of syntax; the kinds: {}",
+                    kinds.join(", ")
+                )),
             }
-        }),
-        _ => Err("man takes one name, or one pipe: man upper, man @|, man --ru upper".into()),
+        }
+        [name] => {
+            let rows = glyphs_of(name);
+            match (entry(name), rows.is_empty()) {
+                // a reading that is a command and a glyph (`#`, `%`)
+                (Some(e), false) => Ok(format!("{}\n\n{}", page(&e, ru), pages(&rows))),
+                (Some(e), true) => Ok(page(&e, ru)),
+                (None, false) => Ok(pages(&rows)),
+                (None, true) => Err(unknown(name, ru)),
+            }
+        }
+        _ => Err(
+            "man takes one name, one glyph, or the word syntax: man upper, man '@|', \
+             man '<=>', man syntax, man syntax operator, man --ru upper"
+                .into(),
+        ),
+    }
+}
+
+/// A line of a session that asks for the manual: `man`, `man sort`,
+/// `man @|`, `man --ru sort`, and the same behind the REPL's colon
+/// (`:man sort`). `None` for any other line; a query never opens
+/// with a bare word, so `man` at the head of a line is free. The
+/// hosts that have no shell (the browser extension, the playground)
+/// reach the manual this way and no other. Quotes around a glyph, a
+/// shell's habit, are taken off: `man '<=>'`.
+pub fn line(line: &str) -> Option<Result<String, String>> {
+    let t = line.trim();
+    let rest = t.strip_prefix(":man").or_else(|| t.strip_prefix("man"))?;
+    if !(rest.is_empty() || rest.starts_with(char::is_whitespace)) {
+        return None;
+    }
+    let words: Vec<&str> = rest
+        .split_whitespace()
+        .map(|w| {
+            ['\'', '"']
+                .iter()
+                .find_map(|q| {
+                    w.strip_prefix(*q)
+                        .and_then(|w| w.strip_suffix(*q))
+                        .filter(|w| !w.is_empty())
+                })
+                .unwrap_or(w)
+        })
+        .collect();
+    Some(man(&words))
+}
+
+/// The message of a word neither table has: the nearest command
+/// names, and the glyphs that carry the word's marks.
+fn unknown(name: &str, ru: bool) -> String {
+    // a command the word is part of, or one (of three letters at
+    // least: `s` is in every other word) that is part of it
+    let near: Vec<String> = entries()
+        .iter()
+        .map(Entry::written)
+        .filter(|n| {
+            n.to_lowercase().contains(&name.to_lowercase())
+                || (n.chars().count() >= 3 && name.to_lowercase().contains(&n.to_lowercase()))
+        })
+        .take(5)
+        .collect();
+    // a word of marks: the glyphs it is part of
+    let symbolic = !name.chars().any(char::is_alphanumeric);
+    let part_of: Vec<Glyph> = if symbolic {
+        glyphs()
+            .into_iter()
+            .filter(|g| g.marks().contains(name))
+            .take(12)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if !part_of.is_empty() {
+        return format!(
+            "no glyph '{name}' alone; it is part of:\n{}",
+            glyph_list(&part_of, ru)
+        );
+    }
+    if near.is_empty() {
+        format!(
+            "no command '{name}', and no glyph (`man` alone lists the commands, `man syntax` \
+             the glyphs)"
+        )
+    } else {
+        format!("no command '{name}'; the nearest: {}", near.join(", "))
     }
 }
 

@@ -1504,7 +1504,7 @@ root-anchored sequence of hops, each an axis followed by a name:
     and the whole-arbor walk runs only where the adapter opts in
     (\texttt{walks\_for\_references}), else the query is refused;
     \texttt{::a=>(/scope/*::b)} is the value match \\
-\texttt{\$.r:%provenance:text}, \texttt{:\%provenance},
+\texttt{\$.r:\%provenance:text}, \texttt{:\%provenance},
 \texttt{:@origin}, \texttt{--reproducible}
   & \live value provenance (2026-09-06/07): every value carries
     its \emph{origins} (node, command; \texttt{Origins} bounded at
@@ -1730,7 +1730,7 @@ root-anchored sequence of hops, each an axis followed by a name:
     declared name, and checks at load (\texttt{check\_properties}: the
     unit known; the first node whose expression is not null typed).
     Tests: \texttt{qua/tests/model\_property.rs}. \\
-\texttt{//table[1] | #}, \texttt{#(--null=…)}, \texttt{#(--locale=…)}, \texttt{-i=null}; \texttt{quarb::graph::tabula}
+\texttt{//table[1] | \#}, \texttt{\#(--null=…)}, \texttt{\#(--locale=…)}, \texttt{-i=null}; \texttt{quarb::graph::tabula}
   & \live a document's table read by the constructor (the
     document-tables round, rulings 2026-11-08; spec: The Table, the
     constructor on a node): a tabula node — or its \texttt{thead},
@@ -1757,7 +1757,7 @@ root-anchored sequence of hops, each an axis followed by a name:
     (\texttt{indexed\_by}); \texttt{-i} overrides, \texttt{-i=null}
     keeps it a column. The table options (\texttt{-i}, \texttt{-c},
     \texttt{--header}, \texttt{-a}) apply on the node as after
-    \texttt{| #}; \texttt{--width} is refused there. A column that
+    \texttt{| \#}; \texttt{--width} is refused there. A column that
     falls to text while a cell of it nearly reads as a number — a
     null word, a footnote mark, a percent, a scale suffix, another
     locale's spelling, a quantity — is told as a warning
@@ -2164,7 +2164,7 @@ root-anchored sequence of hops, each an axis followed by a name:
     and \texttt{Operand::Field} through \texttt{ref\_nodes}, so a row
     filter on the edges table reads both ends' attachments
     (\texttt{[:source:.l = :target:.l]}) \\
-\texttt{((!7))}, \texttt{((!\$.v:%origin:id))}
+\texttt{((!7))}, \texttt{((!\$.v:\%origin:id))}
   & \live the node-id anchor (2026-09-07): \texttt{Anchor::Id} takes
     an expression; a number, a \texttt{\%origin} record (by
     \texttt{id}), a list forks. \texttt{AstAdapter::has\_node}
@@ -2928,6 +2928,64 @@ nothing about encodings.
   the gates run with the environment's locale cleared. The session
   and wasm doors have no locale yet (the browser's
   \texttt{navigator.language} would be their system layer).
+\item \textbf{The order of text} (\texttt{stdlib::functions}:
+  \texttt{sort\_text\_order}, \texttt{keyed\_text\_order},
+  \texttt{call\_collator}) is one of three. With no locale in force,
+  or where the call names \texttt{"C"} or \texttt{"POSIX"}
+  (\texttt{code\_point\_order}), text orders by code point. Under a
+  locale the call names (\texttt{sort}'s operand, \texttt{--locale=}
+  on \texttt{sort\_by}, \texttt{min\_by}, \texttt{max\_by},
+  \texttt{top}, \texttt{bottom}) or the output locale, it orders by
+  that locale's collation in the locale's own case order: colligo's
+  default since 0.2.0, lower case first but for the locales whose
+  tailoring carries CLDR's \texttt{caseFirst upper}. The case options
+  (\texttt{case\_order}: \texttt{-u}, \texttt{-l}, \texttt{-i})
+  set the collator's case mode in place of the locale's, and with no
+  collation in force stand on the root collation; beside
+  \texttt{"C"} they are refused. The engine keeps no table of
+  locales: the case order is colligo's to give. A keyed command reads
+  each key once into the form it orders by (\texttt{rank\_keyed}),
+  as the bare \texttt{sort} does (\texttt{sort\_keyed}); a
+  comparison that read both keys afresh cost a sort of a million text
+  keys seventeen seconds.
+\item \textbf{Streamed mounts} (\texttt{quarb-open}). A one-off
+  query does not hold a CSV or TSV file (\texttt{CsvStream}: the
+  rows by offset, one row parsed and kept) nor a
+  \texttt{lines:} file of 256~KiB and more
+  (\texttt{LinesStream}). A document of elements, the one array of a
+  JSON document (\texttt{JsonArray}), a JSON lines file
+  (\texttt{JsonLines}), the children of an XML document element
+  (\texttt{XmlStream}), streams from
+  \texttt{STREAM\_DOCUMENTS\_FROM} (128~MiB) or under
+  \texttt{--stream}, and reads whole below it
+  (\texttt{OpenOpts::stream\_documents}): an element is parsed into
+  its own arbor when a step reaches it and one is kept, so each step
+  into an element parses it again, and an element alone costs two to
+  three times its share of a whole parse; the stream wins where no
+  element is read and loses where one is. Keeping every parsed
+  element was tried and cost more memory than the whole read. All
+  five read their file through \texttt{source::Window}, which holds
+  the bytes around the place last read, growing while the reads
+  sweep forward and falling back after a jump: a reader that seeks
+  the file itself drops its buffer, and a fold over a million
+  streamed rows was a seek and a read a row. A session, a run that
+  keeps the arbor (\texttt{--kaiv}, \texttt{--save}, the resident
+  server) and \texttt{--no-stream} mount whole.
+\item \textbf{The manual} (\texttt{syntax::man}) is two tables of
+  the language repository, vendored by
+  \texttt{scripts/vendor-commands.sh}: the command inventory
+  (\texttt{commands.tsv}), from which the parser also reads the
+  options a command takes, and the syntax index
+  (\texttt{syntax-index.tsv}: a glyph, its name, its kind and what it
+  does, in both languages). \texttt{man::man} answers a command's
+  name, a glyph (as the index writes it, by its own marks, or
+  written out: \texttt{Glyph::is\_written\_as}), a pipe (its page,
+  then its commands) and \texttt{syntax [KIND]}; \texttt{man::line}
+  reads a session's line that opens with \texttt{man}, which every
+  host of a session takes (quai's REPL and \texttt{--run},
+  \texttt{QuaiSession::run} and \texttt{run\_cell}, the kernel's
+  cell), the browser's hosts having no shell and no colon commands.
+  A manual line is no query: it takes no label.
 \item \textbf{Encoding} (\texttt{source::encode}): \texttt{@|
   encoding(LABEL)} is the output boundary and stands last. The
   engine has no byte value, so the tool takes the command off the

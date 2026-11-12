@@ -368,6 +368,7 @@ pub(crate) fn begin_run(options: Option<RunOptions>) -> RunGuard {
             surfaced: Default::default(),
             presence: 0,
             tested: Vec::new(),
+            fields: Vec::new(),
         };
         runs.push(RunState {
             options,

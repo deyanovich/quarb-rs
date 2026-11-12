@@ -1,0 +1,293 @@
+# id	glyph	name_en	name_ru	anchor	entry	kind	does_en	does_ru	(anchor = a label where the glyph is defined, or see:ID for a rounded or second spelling; entry = the Language Reference page the row belongs to; kind = what sort of syntax the row is; does_en, does_ru = one sentence on what it does, on the canonical rows alone, which `qua man GLYPH` prints)
+child	/	child hop	хоп к детям	sec:basic-navigation	child-hop	hop	Steps down to the children of the position that carry the name that follows.	Шагает вниз, к детям позиции, которые носят идущее следом имя.
+desc	//	descendant path	путь по потомкам	sec:descendants-ancestors	descendant-path	path	Reaches every descendant of the position that carries the name, at any depth.	Достигает каждого потомка позиции с этим именем, на любой глубине.
+desc-prox	//?	proximal descendant path	ближайший путь по потомкам	sec:descendants-ancestors	descendant-path	path	Reaches the matching descendants at the shallowest depth below the position, ties included.	Достигает совпавших потомков на наименьшей глубине под позицией, включая равные.
+desc-dist	//!	distal descendant path	дальний путь по потомкам	sec:descendants-ancestors	descendant-path	path	Reaches the matching descendants at the deepest depth below the position.	Достигает совпавших потомков на наибольшей глубине под позицией.
+parent	\	parent hop	хоп к родителю	sec:basic-navigation	parent-hop	hop	Steps up to the parent of the position, or to the parent only if it carries the name that follows.	Шагает вверх, к родителю позиции, или только к родителю с идущим следом именем.
+anc	\\	ancestor path	путь по предкам	sec:descendants-ancestors	ancestor-path	path	Reaches every ancestor of the position, nearest first, or those that carry the name.	Достигает каждого предка позиции, начиная с ближайшего, или тех, что носят имя.
+anc-prox	\\?	proximal ancestor path	ближайший путь по предкам	sec:descendants-ancestors	ancestor-path	path	Reaches the nearest ancestor that matches.	Достигает ближайшего совпавшего предка.
+anc-dist	\\!	distal ancestor path	дальний путь по предкам	sec:descendants-ancestors	ancestor-path	path	Reaches the farthest ancestor that matches.	Достигает самого дальнего совпавшего предка.
+next	>	next sibling	следующий сиблинг	sec:basic-navigation	next-sibling	hop	Steps to the immediate next sibling of the position, if it carries the name.	Шагает к непосредственно следующему сиблингу позиции, если он носит имя.
+prev	<	previous sibling	предыдущий сиблинг	sec:basic-navigation	previous-sibling	hop	Steps to the immediate previous sibling of the position, if it carries the name.	Шагает к непосредственно предыдущему сиблингу позиции, если он носит имя.
+following	>>	following siblings	последующие сиблинги	sec:sibling-reach	following-siblings	path	Reaches every sibling after the position that carries the name, in document order.	Достигает каждого сиблинга после позиции с этим именем, в порядке документа.
+preceding	<<	preceding siblings	предшествующие сиблинги	sec:sibling-reach	preceding-siblings	path	Reaches every sibling before the position that carries the name.	Достигает каждого сиблинга перед позицией с этим именем.
+fol-prox	>>?	proximal following sibling	ближайший последующий сиблинг	sec:sibling-reach	following-siblings	path	Reaches the nearest following sibling that matches.	Достигает ближайшего совпавшего сиблинга после позиции.
+fol-dist	>>!	distal following sibling	дальний последующий сиблинг	sec:sibling-reach	following-siblings	path	Reaches the farthest following sibling that matches.	Достигает самого дальнего совпавшего сиблинга после позиции.
+pre-prox	<<?	proximal preceding sibling	ближайший предшествующий сиблинг	sec:sibling-reach	preceding-siblings	path	Reaches the nearest preceding sibling that matches.	Достигает ближайшего совпавшего сиблинга перед позицией.
+pre-dist	<<!	distal preceding sibling	дальний предшествующий сиблинг	sec:sibling-reach	preceding-siblings	path	Reaches the farthest preceding sibling that matches.	Достигает самого дальнего совпавшего сиблинга перед позицией.
+link	->	link hop	хоп по ссылке	sec:crosslink-nav-syntax	link-hop	hop	Follows the outgoing crosslink edges of the position that carry the label, to their targets.	Идёт по исходящим рёбрам-ссылкам позиции с этой меткой, к их целям.
+rlink	<-	reverse link hop	обратный хоп по ссылке	sec:crosslink-nav-syntax	link-hop	hop	Follows the incoming crosslink edges that carry the label, to the nodes that point at the position.	Идёт по входящим рёбрам-ссылкам с этой меткой, к узлам, указывающим на позицию.
+ulink	--	undirected link hop	ненаправленный хоп по ссылке	sec:crosslink-nav-syntax	link-hop	hop	Follows the crosslink edges that carry the label in either direction.	Идёт по рёбрам-ссылкам с этой меткой в любом направлении.
+navstar	~⟨name⟩	navop wildcard	подстановочный знак нав-опа	sec:navop-star	navop-wildcard	hop	Follows every edge that touches the position and matches the name, tree edge or crosslink, in either direction.	Идёт по каждому ребру, касающемуся позиции и совпадающему с именем, ребру дерева или ссылке, в любом направлении.
+navstar-deep	~~⟨name⟩	navop wildcard at any depth	подстановочный знак нав-опа на любой глубине	sec:navop-star	navop-wildcard	path	Walks over edges of any kind and ends at one that matches the name, at any depth.	Идёт по рёбрам любого рода и заканчивает на ребре, совпавшем с именем, на любой глубине.
+resolve	-->	cross-reference resolution	разрешение перекрёстной ссылки	sec:resolution-syntax	resolution	hop	Resolves the projected value into the node it names and moves there.	Разрешает спроецированное значение в узел, который оно называет, и переходит туда.
+rresolve	<--	reverse cross-reference resolution	обратное разрешение перекрёстной ссылки	sec:reverse-resolution	resolution	hop	Finds the nodes whose property resolves to the position.	Находит узлы, чьё свойство разрешается в позицию.
+tsearch	^//	tree search	поиск по дереву	sec:search-syntax	tree-search	path	Lands on every matching node of the tree, the root's descendants.	Встаёт на каждый совпавший узел дерева, на потомков корня.
+root	^	root anchor	якорь корня	sec:anchors-syntax	root-anchor	anchor	Starts a branch at the root of the arbor.	Начинает ветвь в корне арбора.
+leaf	$	leaf anchor	якорь листа	sec:name-matching	-	retired		
+mark	.⟨name⟩	mark	метка	sec:marks	mark	push	Files the current position in the capsa under the name, to come back to later.	Кладёт текущую позицию в капсу под именем, чтобы потом к ней вернуться.
+nodename	$$.⟨name⟩	named mark	именованная метка	sec:marks	mark	sigil	Reads the node filed under the name, the latest mark of that name.	Читает узел, положенный под именем, последнюю метку с этим именем.
+noden	$$.⟨N⟩	mark by position	метка по позиции	sec:marks	mark	sigil	Reads the mark at a position among the marks of the capsa.	Читает метку на позиции среди меток капсы.
+nodetop	$$.	latest mark	последняя метка	sec:marks	mark	sigil	Reads the latest mark.	Читает последнюю метку.
+mark-anchor	((⟨name⟩))	rounded named mark	округлённая именованная метка	see:nodename	mark	sigil		
+envcmd	sh:⟨name⟩(⟨args⟩)	environment command	команда окружения	sec:environment-commands	shell-command	call	Pipes the topic through an external program, behind a gate set for the run.	Пропускает топик через внешнюю программу, если запуск это разрешил.
+r-noden	((.⟨N⟩))	rounded mark by position	округлённая метка по позиции	see:noden	mark	sigil		
+r-nodetop	((.))	rounded latest mark	округлённая последняя метка	see:nodetop	mark	sigil		
+node-anchor	((!⟨expr⟩))	node-id anchor	якорь по идентификатору узла	sec:anchors-syntax	node-id-anchor	anchor	Starts a branch at the node with the given node id.	Начинает ветвь в узле с данным идентификатором.
+anchored	^␣	anchored operand	заякоренный операнд	sec:anchored-operands	root-anchor	anchor	Evaluates an operand's path from the root instead of from the node under test.	Вычисляет путь операнда от корня, а не от проверяемого узла.
+wild	*	wildcard	джокер	sec:name-matching	wildcard	name	Stands for any name after a navigation operator, and for any run of characters inside a name.	Заменяет любое имя после оператора навигации и любую цепочку символов внутри имени.
+regex	(/␣/)	regex literal	литерал регулярного выражения	sec:pattern-literals	regex-literal	name	Matches names, or a value after a pattern comparison, by a regular expression.	Сопоставляет имена, или значение после сравнения с образцом, с регулярным выражением.
+athop	/@⟨name⟩	at-leading hop name	имя хопа с @	sec:name-characters	hop-names	name	Names a child whose name begins with an at sign, which admits kaiv's array namespaces into a path.	Называет ребёнка, чьё имя начинается со знака @: так в путь входят пространства имён массивов kaiv.
+trait	<␣>	trait filter	фильтр по трейту	sec:trait-filters	trait-filter	filter	Keeps the nodes a hop reaches that wear the trait.	Оставляет те узлы, достигнутые хопом, которые носят трейт.
+tdot	<.>	one trait segment	один сегмент трейта	sec:trait-segments	trait-filter	filter	Stands for exactly one segment of a trait's name.	Заменяет ровно один сегмент имени трейта.
+tstar	<*>	any trait segments	любые сегменты трейта	sec:trait-segments	trait-filter	filter	Stands for any segments of a trait's name.	Заменяет любые сегменты имени трейта.
+prop	::	property projection	проекция свойства	sec:field-projections-syntax	property-projection	projection	Reads a property of the position into a value, or the node's own value when no name follows.	Читает свойство позиции в значение, или собственное значение узла, если имя не следует.
+meta	:	core field projection	проекция базового поля	sec:metadata-syntax	core-field-projection	projection	Reads a core field of the node, what the engine knows of every node: its name, id, index, kind, depth.	Читает базовое поле узла, то, что движок знает о каждом узле: имя, идентификатор, индекс, род, глубину.
+ameta	:::	adapter metadata projection	проекция метаданных адаптера	sec:metadata-syntax	adapter-metadata	projection	Reads what the adapter knows of the node beyond its data, such as a file's size.	Читает то, что адаптер знает об узле сверх его данных, например размер файла.
+field	:⟨name⟩	field access	доступ к полю	sec:record-fields	field-access	projection	Reads a field of the topic: a record's field, a table's column, or the field of each item of a list.	Читает поле топика: поле записи, столбец таблицы или поле каждого элемента списка.
+captures	%+	named captures	именованные захваты	sec:match-captures	match-captures	sigil	Holds the named groups of the last successful pattern match as one record.	Держит именованные группы последнего успешного сопоставления одной записью.
+capture	$⟨N⟩	match capture	захват сопоставления	sec:match-captures	match-captures	sigil	Reads a numbered group of the last successful pattern match.	Читает нумерованную группу последнего успешного сопоставления.
+pipe	|	pipe	пайп	sec:pipelines-syntax	pipe	pipe	Hands each thread to the command or expression on its right: its topic to a value command, its position to a node command.	Отдаёт каждую нить команде или выражению справа: топик команде над значением, позицию команде над узлом.
+agg	@|	aggregation pipe	агрегирующий пайп	sec:aggregating-pipe	aggregation-pipe	pipe	Hands the command on its right the topics of every thread at once, as one list in context order.	Отдаёт команде справа топики всех нитей сразу, одним списком в порядке контекста.
+fold	@|{.⟨name⟩}	fold by a regula	свёртка по регуле	sec:aggregating-pipe	fold	pipe	Runs the command once for each value of a pushed regula, each answer a thread that keeps the value.	Запускает команду по разу на каждое значение положенной пушем регулы; каждый ответ становится нитью, хранящей это значение.
+fold-last	@|{.}	fold by the last push	свёртка по последнему пушу	sec:aggregating-pipe	fold	pipe	Folds by the last value pushed, as the fold by a name does by that name.	Сворачивает по последнему положенному значению, как свёртка по имени сворачивает по имени.
+fold-pos	@|{.N}	fold by a position	свёртка по позиции	sec:aggregating-pipe	fold	pipe	Folds by the value regula at a position in the capsa.	Сворачивает по регуле значения на позиции в капсе.
+fold-tuple	@|{.⟨a⟩; .⟨b⟩}	fold by a tuple	свёртка по кортежу	sec:aggregating-pipe	fold	pipe	Folds by the tuple of several regulae, all of them kept on the folded thread.	Сворачивает по кортежу нескольких регул; все они остаются на свёрнутой нити.
+map	$|	iteration pipe	пайп итерации	sec:pipelines-syntax	map-pipe	pipe	Hands the command on its right one element of the topic at a time, within the thread.	Отдаёт команде справа по одному элементу топика, внутри нити.
+concat	++	concatenation operator	оператор конкатенации	sec:concatenation	concatenation	operator	Extends a list, a table, a record or a text by what follows, the left side deciding how.	Продолжает список, таблицу, запись или текст тем, что следует; как именно, решает левая сторона.
+concat-bang	++!	overwriting concatenation	перезаписывающая конкатенация	sec:concatenation	concatenation	operator	Extends a record or a table, the right side replacing a field or a labelled row the left already has.	Продолжает запись или таблицу, причём правая сторона заменяет поле или строку с меткой, которые слева уже есть.
+elem-append	+@+	element append	добавление элементом	sec:concatenation	concatenation	operator	Appends the right side to a list as one item, whatever it is.	Добавляет правую сторону в список одним элементом, чем бы она ни была.
+spread	| ...	spread	раскрытие	sec:pipelines-syntax	spread	pipe	Forks a list topic into one thread for each element.	Разветвляет топик-список на нити, по одной на элемент.
+ospread	| ...?	outer spread	внешнее раскрытие	sec:pipelines-syntax	spread	pipe	Forks a list topic into one thread for each element, and keeps one thread with a null topic where the list is empty or null.	Разветвляет топик-список на нити, по одной на элемент, а там, где список пуст или равен null, оставляет одну нить с топиком null.
+push	.	push	пуш	sec:capsa-in-action	push	push	Files the topic in the thread's capsa, anonymously or under the name that follows.	Кладёт топик в капсу нити, анонимно или под идущим следом именем.
+spush	.⟨name⟩(␣)	subcontext push	пуш подконтекста	sec:subcontexts	push	push	Runs the body from the thread's position, reduces it to one value and files that value under the name, leaving the topic as it was.	Запускает тело от позиции нити, сводит его к одному значению и кладёт это значение под именем, оставляя топик прежним.
+rpush	.%(␣)	record push	пуш записи	sec:record-construction	push	push	Builds a record and files it in the capsa.	Строит запись и кладёт её в капсу.
+fpush	.%	fields push	пуш полей	sec:record-construction	push	push	Files each field of the topic record as a named regula.	Кладёт каждое поле топика-записи как именованную регулу.
+qpush	.⟨name⟩(␣){⟨N⟩}	quantified push	квантифицированный пуш	sec:quantified-push	quantified-push	push	Repeats a push for a fixed number of rounds, or until the capsae stop changing.	Повторяет пуш заданное число раундов или до тех пор, пока капсы не перестанут меняться.
+topic	$_	topic	топик	sec:topic	topic	sigil	Reads the thread's topic, the value one command hands the next.	Читает топик нити, значение, которое одна команда передаёт следующей.
+register	@.	pushed values	значения пушей	sec:context-accessors	capsa-list	sigil	Lists every value pushed, in filing order.	Перечисляет все положенные значения в порядке пушей.
+nodelist	@@.	pushed nodes	узлы пушей	sec:register-record-view	capsa-list	sigil	Lists every mark, as node references.	Перечисляет все метки ссылками на узлы.
+topreg	$.	top reg	верхний рег	sec:capsa-in-action	value-recall	sigil	Reads the latest value pushed.	Читает последнее положенное значение.
+regn	$.⟨N⟩	reg by position	рег по позиции	sec:context-accessors	value-recall	sigil	Reads the value pushed at a position, counted from one in filing order.	Читает значение, положенное на позиции, считая с единицы в порядке пушей.
+regname	$.⟨name⟩	named reg	именованный рег	sec:context-accessors	value-recall	sigil	Reads the latest value pushed under the name.	Читает последнее значение, положенное под именем.
+regrec	%.	capsa record	запись капсы	sec:register-record-view	capsa-record	sigil	Gives the named pushes as a record, the latest value for each name.	Даёт именованные пуши записью, последнее значение на каждое имя.
+noderec	%%.	node record	запись узлов	sec:register-record-view	capsa-record	sigil	Gives the named marks as a record, the latest node for each name.	Даёт именованные метки записью, последний узел на каждое имя.
+regrec-full	%.*	full capsa record	полная запись капсы	sec:register-record-view	capsa-record	sigil	Gives every push as a record, the anonymous ones keyed by their position.	Даёт все пуши записью, анонимные под ключом своей позиции.
+noderec-full	%%.*	full node record	полная запись узлов	sec:register-record-view	capsa-record	sigil	Gives every mark as a record, the anonymous ones keyed by their position.	Даёт все метки записью, анонимные под ключом своей позиции.
+ordinal	$ord	thread ordinal	порядковый номер нити	sec:context-accessors	context-accessors	sigil	Reads the thread's ordinal in the context, counted from one.	Читает порядковый номер нити в контексте, считая с единицы.
+topics	@_	all topics	все топики	sec:context-accessors	context-accessors	sigil	Lists the topics of every thread of the context.	Перечисляет топики всех нитей контекста.
+positions	@@_	all positions	все позиции	sec:context-accessors	context-accessors	sigil	Lists the positions of every thread of the context, as node references.	Перечисляет позиции всех нитей контекста ссылками на узлы.
+ctxtable	#_	the context table	таблица контекста	sec:context-accessors	context-accessors	sigil	Gives the context as a table, one row for each thread, with the columns topic and position.	Даёт контекст таблицей, по строке на нить, со столбцами topic и position.
+capsamatrix	#.	the capsa table, named regulae	таблица капсы, именованные регулы	sec:context-accessors	capsa-table	sigil	Gives the pushes of the whole context as a table, one row for each thread and one column for each named regula.	Даёт пуши всего контекста таблицей, по строке на нить и по столбцу на именованную регулу.
+fullmatrix	#.*	the capsa table, every regula	таблица капсы, все регулы	sec:context-accessors	capsa-table	sigil	Gives the pushes of the whole context as a table with a column for every regula, the anonymous ones included.	Даёт пуши всего контекста таблицей со столбцом на каждую регулу, включая анонимные.
+nodematrix	##.	the capsa table of nodes, named regulae	таблица капсы по узлам, именованные регулы	sec:context-accessors	capsa-table	sigil	Gives the marks of the whole context as a table, one column for each named mark.	Даёт метки всего контекста таблицей, по столбцу на именованную метку.
+nodefullmatrix	##.*	the capsa table of nodes, every regula	таблица капсы по узлам, все регулы	sec:context-accessors	capsa-table	sigil	Gives the marks of the whole context as a table with a column for every mark, the anonymous ones included.	Даёт метки всего контекста таблицей со столбцом на каждую метку, включая анонимные.
+regneg	$.-⟨n⟩	reg from the end	рег с конца	sec:context-accessors	value-recall	sigil	Reads a pushed value counted from the end of the capsa.	Читает положенное значение, считая с конца капсы.
+regprev	$..	penultimate reg	предпоследний рег	sec:context-accessors	value-recall	sigil	Reads the penultimate value pushed.	Читает предпоследнее положенное значение.
+nodeneg	$$.-⟨n⟩	mark from the end	метка с конца	sec:context-accessors	mark	sigil	Reads a mark counted from the end of the capsa.	Читает метку, считая с конца капсы.
+nodeprev	$$..	penultimate mark	предпоследняя метка	sec:context-accessors	mark	sigil	Reads the penultimate mark.	Читает предпоследнюю метку.
+r-regneg	(.-⟨n⟩)	rounded reg from the end	округлённый рег с конца	see:regneg	value-recall	sigil		
+r-regprev	(..)	rounded penultimate reg	округлённый предпоследний рег	see:regprev	value-recall	sigil		
+r-nodeneg	((.-⟨n⟩))	rounded mark from the end	округлённая метка с конца	see:nodeneg	mark	sigil		
+r-nodeprev	((..))	rounded penultimate mark	округлённая предпоследняя метка	see:nodeprev	mark	sigil		
+invoking	$$	invoking capsa	вызывающая капса	sec:correlated-subcontexts	-	retired		
+joined	$$⟨k⟩	joined node	присоединённый узел	sec:correlation-operator	joined-node	sigil	Reads the node a correlation bound, the witness of its k-th joined expression.	Читает узел, привязанный корреляцией, свидетеля её k-го присоединяемого выражения.
+edge	$-	arrived-by edge	ребро прихода	sec:edge-accessor	edge-accessor	sigil	Reads the label of the edge the thread most recently walked.	Читает метку ребра, по которому нить прошла последним.
+edges	@-	final-hop edges	рёбра последнего хопа	sec:edge-accessor	edge-accessor	sigil	Lists the labels of all the edges that reached the current node on the walk's final hop.	Перечисляет метки всех рёбер, достигших текущего узла на последнем хопе обхода.
+edgefact	$-:⟨round⟩	edge fact	факт ребра	sec:edge-accessor	edge-accessor	sigil	Reads a fact of the walk that brought the thread here: its hops, its total, its costs or its weights.	Читает факт обхода, приведшего нить сюда: его хопы, сумму, стоимости или веса.
+xread	⟨X⟩:.⟨r⟩	node read	чтение узла	sec:cross-capsa-reads	cross-capsa-read	sigil	Reads the regula attached to the node that the expression before the colon reaches.	Читает регулу, прикреплённую к узлу, которого достигает выражение перед двоеточием.
+attach	.:⟨name⟩	attaching push	прикрепляющий пуш	sec:cross-capsa-reads	cross-capsa-read	push	Files a value in the capsa under the name and attaches it to the current node, where any thread that reaches the node can read it.	Кладёт значение в капсу под именем и прикрепляет его к текущему узлу, где его прочтёт любая нить, достигшая узла.
+group	(␣)	group	группа	sec:path-patterns-syntax	path-group	group	Groups hops into one unit, for an alternation or a quantifier to apply to.	Объединяет хопы в одну единицу, к которой применяется альтернация или квантификатор.
+alt	(/⟨a⟩|/⟨b⟩)	path alternation	альтернация путей	sec:path-patterns-syntax	path-alternation	group	Takes either of several hops, each with its own navigation operator.	Берёт любой из нескольких хопов, каждый со своим оператором навигации.
+union	||	union	объединение	sec:traits	edge-label-algebra	group	Unites two classes of traits, labels or names in their algebra.	Объединяет два класса трейтов, меток или имён в их алгебре.
+quant	{⟨m⟩;⟨n⟩}	quantifier	квантификатор	sec:path-patterns-syntax	path-quantifier	quantifier	Repeats a group of hops between a least and a greatest number of times.	Повторяет группу хопов от наименьшего до наибольшего числа раз.
+qbudget	{;⟨100_km⟩}	budget quantifier	бюджетный квантификатор	sec:path-patterns-syntax	weighted-quantifier	quantifier	Bounds a walk by the total of a weight, a quantity in the braces.	Ограничивает обход суммой веса, величиной в фигурных скобках.
+qrule	{⟨abs⟩:⟨a⟩;⟨b⟩}	cost function	функция стоимости	par:cost-rule	weighted-quantifier	quantifier	Names how a walk's weights fold into its cost, otherwise than by their sum.	Называет, как веса обхода складываются в его стоимость, если не суммой.
+qstack	{⟨m⟩}{;⟨Q⟩}	stacked braces	стопка скобок	par:stacked-braces	weighted-quantifier	quantifier	Bounds one walk by several braces at once, each on its own measure.	Ограничивает один обход несколькими скобками сразу, каждая по своей мере.
+qunit	{*_⟨km⟩}	star unit	звёздочная единица	par:budget-quantifier	weighted-quantifier	quantifier	Names the weight a walk totals by its unit alone, with no bound.	Называет вес, который суммирует обход, одной единицей, без границы.
+qplus	+	one or more	один и более	sec:path-patterns-syntax	path-quantifier	quantifier	Repeats a group of hops one or more times.	Повторяет группу хопов один или более раз.
+qstar	*	zero or more	ноль и более	sec:path-patterns-syntax	path-quantifier	quantifier	Repeats a group of hops zero or more times.	Повторяет группу хопов ноль или более раз.
+qprox	?	proximal reach	ближайший охват	sec:path-patterns-syntax	proximal-distal	quantifier	Keeps only the nearest matches of a walk, the shortest paths.	Оставляет только ближайшие совпадения обхода, кратчайшие пути.
+qdist	!	distal reach	дальний охват	sec:path-patterns-syntax	proximal-distal	quantifier	Keeps only the farthest matches of a walk, the longest paths.	Оставляет только самые дальние совпадения обхода, длиннейшие пути.
+pred	[␣]	predicate	предикат	sec:predicates-syntax	predicate	predicate	Keeps the nodes or the threads for which the condition holds.	Оставляет те узлы или нити, для которых выполняется условие.
+index	[⟨n⟩]	index predicate	индексный предикат	sec:index-predicates	index-predicate	predicate	Keeps a hop's matches by position: one, several or a range, counted from either end.	Оставляет совпадения хопа по позиции: одно, несколько или диапазон, считая с любого конца.
+eq	=	equal to	равно	sec:relations	comparison	operator	Holds when the two values are equal.	Истинно, когда два значения равны.
+ne	!=	not equal to	не равно	sec:relations	comparison	operator	Holds when the two values are not equal.	Истинно, когда два значения не равны.
+lt	<	less than	меньше	sec:relations	comparison	operator	Holds when the left value is less than the right.	Истинно, когда левое значение меньше правого.
+le	<=	less than or equal to	меньше или равно	sec:relations	comparison	operator	Holds when the left value is less than or equal to the right.	Истинно, когда левое значение меньше правого или равно ему.
+gt	>	greater than	больше	sec:relations	comparison	operator	Holds when the left value is greater than the right.	Истинно, когда левое значение больше правого.
+ge	>=	greater than or equal to	больше или равно	sec:relations	comparison	operator	Holds when the left value is greater than or equal to the right.	Истинно, когда левое значение больше правого или равно ему.
+within	<<=	element of	содержится в	sec:containment	element-of	operator	Holds when the left value lies within the period, range or list on the right.	Истинно, когда левое значение лежит в периоде, диапазоне или списке справа.
+contains	>>=	contains	содержит	sec:containment	contains	operator	Holds when the period, range or list on the left holds the value on the right.	Истинно, когда период, диапазон или список слева содержит значение справа.
+tcontains	*=	text contains	содержит текст	sec:relations	substring-match	operator	Holds when the text on the right occurs within the text on the left.	Истинно, когда текст справа встречается в тексте слева.
+pmatch	==	pattern match	сопоставление с шаблоном	sec:pattern-literals	pattern-match	operator	Holds when the value matches the pattern: a pattern literal, a regex literal or a pattern read from the data.	Истинно, когда значение совпадает с образцом: литералом образца, регулярным литералом или образцом, прочитанным из данных.
+pnmatch	!==	pattern non-match	несопоставление с шаблоном	sec:pattern-literals	pattern-match	operator	Holds when the value does not match the pattern.	Истинно, когда значение не совпадает с образцом.
+and	&&	and	и	sec:predicate-logic	boolean-operators	operator	Holds when both conditions hold.	Истинно, когда выполняются оба условия.
+or	||	or	или	sec:predicate-logic	boolean-operators	operator	Holds when either condition holds.	Истинно, когда выполняется хотя бы одно из условий.
+not	!	not	не	sec:predicate-logic	boolean-operators	operator	Holds when the condition does not.	Истинно, когда условие не выполняется.
+coalesce	⟨a⟩ ?? ⟨b⟩	null default	умолчание при null	sec:null-default	null-default	operator	Gives the left value unless it is null, and the right value then.	Даёт левое значение, если оно не null, а иначе правое.
+cond	(⟨c⟩ ? ⟨t⟩ : ⟨e⟩)	conditional	условное выражение	sec:conditional	conditional	operator	Selects one of two values by a condition, evaluating only the branch taken.	Выбирает одно из двух значений по условию, вычисляя только выбранную ветвь.
+vmatch	=>	value match	сопоставление значений	sec:value-match	value-match	hop	Hops from a node to the nodes of a scope whose property equals one of its own.	Переходит от узла к тем узлам области, чьё свойство равно его собственному.
+scrut	(⟨x⟩ ?= ⟨k⟩ ? ⟨r⟩ : ⟨e⟩)	switch	переключатель	sec:scrutinee-conditional	switch	operator	Compares one value against several keys in turn and gives the result of the first arm that matches, or the else.	Сравнивает одно значение с несколькими ключами по очереди и даёт результат первой совпавшей ветви, а иначе else.
+corr	<=>	correlation	корреляция	sec:correlation-operator	correlation	operator	Joins each driving node to the first node of the joined expression that satisfies the condition, and drops a driver with none.	Соединяет каждый ведущий узел с первым узлом присоединяемого выражения, удовлетворяющим условию, и отбрасывает ведущий узел без такого.
+ocorr	<=>?	outer correlation	внешняя корреляция	sec:correlation-operator	correlation	operator	Joins each driving node to its first witness and keeps a driver with none, its partner null.	Соединяет каждый ведущий узел с его первым свидетелем и сохраняет ведущий узел без свидетеля, с партнёром null.
+ecorr	<=>*	every-witness correlation	корреляция всех свидетелей	sec:correlation-operator	correlation	operator	Joins each driving node to every node that satisfies the condition, one thread for each, as SQL's JOIN does.	Соединяет каждый ведущий узел с каждым узлом, удовлетворяющим условию, по нити на каждый, как JOIN в SQL.
+eocorr	<=>*?	outer every-witness correlation	внешняя корреляция всех свидетелей	sec:correlation-operator	correlation	operator	Joins each driving node to every witness and keeps a driver with none once, as SQL's LEFT JOIN does.	Соединяет каждый ведущий узел с каждым свидетелем и один раз сохраняет ведущий узел без свидетеля, как LEFT JOIN в SQL.
+record	%(␣)	record constructor	конструктор записи	sec:record-construction	record-constructor	constructor	Builds a record for each thread, its fields named by their keys or by the projections that fill them.	Строит запись на каждую нить; её поля названы ключами или проекциями, которые их заполняют.
+list	@(␣)	list constructor	конструктор списка	sec:list-construction	list-constructor	constructor	Builds a list from items written out or gathered from a path.	Строит список из выписанных элементов или собранных с пути.
+table	#(␣)	table constructor	конструктор таблицы	sec:table-construction	table-constructor	constructor	Builds a table from a header and rows, or turns a stream of records into one.	Строит таблицу из заголовка и строк или превращает в неё поток записей.
+rarray	@%(␣)	record array	массив записей	sec:table-construction	record-array	constructor	Builds a list of same-shaped records from a header and rows.	Строит список записей одной формы из заголовка и строк.
+vindex	⟨v⟩[⟨i⟩]	value indexing	индексирование значения	sec:value-indexing	value-indexing	operator	Reads from a value by brackets: an item, a slice, a row, a cell, or the rows a condition keeps.	Читает из значения скобками: элемент, срез, строку, ячейку или строки, которые оставляет условие.
+range	⟨a⟩..⟨b⟩	range	диапазон	sec:value-expressions	range	operator	Gives every integer from one bound to the other, both included, with an optional step.	Даёт каждое целое от одной границы до другой включительно, с необязательным шагом.
+matrix	x	matrix product	матричное произведение	sec:value-expressions	matrix-product	operator	Multiplies matrices and vectors.	Перемножает матрицы и векторы.
+qlit	⟨5⟩_⟨km⟩	quantity literal	литерал величины	sec:quantital-fragment	quantity-literal	literal	Writes a quantity, a magnitude glued by an underscore to its unit.	Записывает величину: число, приклеенное подчёркиванием к своей единице.
+nanlit	nan / inf / -inf	not-a-number and infinity literals	литералы не-числа и бесконечностей	sec:numeric-fragment	numeric-literals	literal	Writes not-a-number and the two infinities.	Записывает не-число и две бесконечности.
+digits	⟨1⟩_⟨000⟩	digit grouping	группировка цифр	sec:numeric-fragment	numeric-literals	literal	Groups the digits of a number for the eye, without changing it.	Группирует цифры числа для глаза, не меняя его.
+dq	"␣"	interpolated string	строка с интерполяцией	sec:interpolation	interpolated-string	literal	Writes a text with expansions spliced in.	Записывает текст с подстановками внутри.
+expansion	${⟨expr⟩}	expansion	подстановка	sec:interpolation	interpolated-string	literal	Splices the value of an expression into a double-quoted text.	Подставляет значение выражения в текст в двойных кавычках.
+r-expansion	(_⟨expr⟩)	rounded expansion	округлённая подстановка	see:expansion	interpolated-string	literal		
+sq	'␣'	verbatim string	строка без интерполяции	sec:interpolation	verbatim-string	literal	Writes a text taken as written, with no expansions and no escapes.	Записывает текст как он есть, без подстановок и без экранирования.
+subst	s/⟨p⟩/⟨r⟩/⟨m⟩	substitution	подстановка	sec:pipelines-syntax	substitution	call	Replaces the matches of a regular expression in the topic's text.	Заменяет в тексте топика совпадения с регулярным выражением.
+param	$⟨p⟩	fragment parameter	параметр фрагмента	sec:fragments	fragment-parameter	sigil	Names a parameter in a fragment's body, which the invocation's argument replaces.	Называет параметр в теле фрагмента, который заменяется аргументом вызова.
+fragment	(=⟨name⟩)	rounded fragment invocation	округлённый вызов фрагмента	see:fcall	fragment-invocation	call		
+r-mcall	(=⟨name⟩!)	rounded macro invocation	округлённый вызов макроса	see:mcall	fragment-invocation	call		
+r-param	_⟨p⟩	rounded fragment parameter	округлённый параметр фрагмента	see:param	fragment-parameter	sigil		
+sespush	,⟨name⟩	session push	сессионная запись	sec:session-memory	session-memory	push	Files the topic under the name for the rest of the session.	Кладёт топик под именем до конца сессии.
+sread	$,⟨name⟩	session read	сессионное чтение	sec:session-memory	session-memory	sigil	Reads a value filed in the session's memory.	Читает значение, положенное в память сессии.
+srec	%,	session record	запись сессии	sec:session-memory	session-memory	sigil	Gives the whole session memory as a record.	Даёт всю память сессии записью.
+r-sread	(,⟨name⟩)	rounded session read	округлённое сессионное чтение	see:sread	session-memory	sigil		
+fcall	&⟨name⟩	fragment invocation	вызов фрагмента	sec:fragments	fragment-invocation	call	Expands a defined fragment here, with arguments for its parameters where it has any.	Раскрывает здесь определённый фрагмент, с аргументами для его параметров, если они есть.
+mcall	&⟨name⟩!	macro invocation	вызов макроса	sec:macros	fragment-invocation	call	Expands a macro, a definition that generates query text.	Раскрывает макрос, определение, порождающее текст запроса.
+quarq	q(␣)	quarq	кварк	sec:quarq-literal	quarq	constructor	Holds a piece of query as a value, to be applied later.	Держит кусок запроса как значение, чтобы применить его позже.
+qunq	:unq	quarq text	текст кварка	sec:quarq-literal	quarq	call	Gives the source text of a quarq.	Даёт исходный текст кварка.
+qapply	&$.⟨name⟩	held quarq applied	применение удержанного кварка	sec:quarq-splice	quarq	call	Applies a quarq held in the capsa as the next command, binding late.	Применяет кварк, лежащий в капсе, как следующую команду, с поздним связыванием.
+qglued	⟨v⟩&$.⟨name⟩	glued sigil	приклеенный сигил	sec:quarq-splice	quarq	call	Applies a held quarq to the value it is glued to.	Применяет лежащий в капсе кварк к значению, к которому он приклеен.
+qlive	&$.⟨name⟩!	live closure	живое замыкание	sec:quarq-literal	quarq	call	Applies a held quarq as a closure that reads the capsa only up to its push, with the cursor of the applying thread.	Применяет лежащий в капсе кварк как замыкание, читающее капсу только до своего пуша, с курсором применяющей нити.
+qfrozen	&$.⟨name⟩#	frozen closure	замороженное замыкание	sec:quarq-literal	quarq	call	Applies a held quarq as a closure that reads the capsa only up to its push, with the cursor recorded at the push.	Применяет лежащий в капсе кварк как замыкание, читающее капсу только до своего пуша, с курсором, записанным при пуше.
+argsep	;	argument separator	разделитель аргументов	sec:function-arguments	command-call	call	Separates the operands of a command and the items of a constructor.	Разделяет операнды команды и элементы конструктора.
+call	⟨f⟩(⟨a⟩; ⟨b⟩)	command with operands	команда с операндами	sec:function-arguments	command-call	call	Calls a command with its operands, and its options last, in the parenthesis after its name.	Вызывает команду с операндами, а опции стоят последними, в скобках после её имени.
+m-node	node	node constructor	конструктор узлов	sec:model-node	model	model	Evaluates a query over the base arbor and exposes its results as the children of a new container.	Вычисляет запрос над базовым арбором и выставляет его результаты детьми нового контейнера.
+m-ref	ref	reference declaration	объявление ссылки	sec:model-ref	model	model	Makes a property of the scoped nodes resolve into a container by its value.	Заставляет свойство узлов области разрешаться в контейнер по значению.
+m-rel	rel	relation declaration	объявление отношения	sec:model-rel	model	model	Relates two sets of nodes by a condition evaluated for each pair.	Связывает два множества узлов условием, вычисляемым для каждой пары.
+m-edge	edge	edge declaration	объявление ребра	sec:model-edge	model	model	Reads the scoped nodes as the edges of a graph, each node's two references the edge's ends.	Читает узлы области как рёбра графа: две ссылки каждого узла служат концами ребра.
+m-weight-potential	weight-potential	weight potential declaration	объявление весового потенциала	sec:model-weight-potential	model	model	Reads a property of the scoped nodes as a potential, giving each edge the difference between its ends as a weight.	Читает свойство узлов области как потенциал и даёт каждому ребру вес, равный разности между его концами.
+m-property	property	property declaration	объявление свойства	sec:model-property	model	model	Gives the scoped nodes a property whose value is an expression evaluated at the node.	Даёт узлам области свойство, значение которого вычисляется выражением на узле.
+m-weights	weights(⟨::p⟩)	weights clause	клауза весов	par:edge-weights	model	model	Names properties of the scoped nodes as the weights of an edge, one for each dimension.	Называет свойства узлов области весами ребра, по одному на размерность.
+m-typed	⟨::p⟩<_⟨km⟩>	typed weight	типизированный вес	par:edge-weights	model	model	Reads a weight's column of bare numbers in the named unit.	Читает столбец веса из голых чисел в названной единице.
+m-alias	alias	alias declaration	объявление псевдонима	sec:model-alias	model	model	Gives a node's name, or its traits, another spelling a query may write.	Даёт имени узла или его трейтам другое написание, которым может пользоваться запрос.
+m-trait	trait	trait declaration	объявление трейта	sec:model-trait	model	model	Adds a trait to the nodes that meet a condition.	Добавляет трейт узлам, отвечающим условию.
+m-index	index	index declaration	объявление индекса	sec:model-index	model	model	Asks for an index of a property over the scoped nodes, so a search by value need not read them all.	Просит индекс свойства по узлам области, чтобы поиск по значению не читал их все.
+m-graph	graph	graph declaration	объявление графа	sec:model-graph	model	model	Says that the source maintains the named measures of the graph library over a graph.	Сообщает, что источник поддерживает названные меры библиотеки графов над графом.
+m-unit	unit	unit declaration	объявление единицы	sec:model-unit	model	model	Adds a unit to the unit table, for every source the model mounts.	Добавляет единицу в таблицу единиц, для каждого источника, который монтирует модель.
+m-units	units	unit library import	импорт библиотеки единиц	sec:model-unit	model	model	Imports a file of unit declarations.	Импортирует файл объявлений единиц.
+m-tree	tree	tree declaration	объявление дерева	sec:model-tree	model	model	Names a tree of the model by the identity under which other trees refer to it.	Называет дерево модели идентификатором, под которым на него ссылаются другие деревья.
+m-mount	mount	mount statement	оператор монтирования	sec:model-mount	model	model	Names a source the model opens itself.	Называет источник, который модель открывает сама.
+r-parent	/..	rounded parent hop	округлённый хоп к родителю	see:parent	parent-hop	hop		
+r-anc	/...	rounded ancestor path	округлённый путь по предкам	see:anc	ancestor-path	path		
+r-anc-prox	/...?	rounded proximal ancestor reach	округлённый ближайший охват предков	see:anc-prox	ancestor-path	path		
+r-anc-dist	/...!	rounded distal ancestor reach	округлённый дальний охват предков	see:anc-dist	ancestor-path	path		
+r-next	;-	rounded next sibling	округлённый следующий сиблинг	see:next	next-sibling	hop		
+r-prev	-;	rounded previous sibling	округлённый предыдущий сиблинг	see:prev	previous-sibling	hop		
+r-following	;;-	rounded following siblings	округлённые последующие сиблинги	see:following	following-siblings	path		
+r-fol-prox	;;-?	rounded proximal following sibling	округлённый ближайший последующий сиблинг	see:fol-prox	following-siblings	path		
+r-fol-dist	;;-!	rounded distal following sibling	округлённый дальний последующий сиблинг	see:fol-dist	following-siblings	path		
+r-preceding	-;;	rounded preceding siblings	округлённые предшествующие сиблинги	see:preceding	preceding-siblings	path		
+r-pre-prox	-;;?	rounded proximal preceding sibling	округлённый ближайший предшествующий сиблинг	see:pre-prox	preceding-siblings	path		
+r-pre-dist	-;;!	rounded distal preceding sibling	округлённый дальний предшествующий сиблинг	see:pre-dist	preceding-siblings	path		
+r-link	:-	rounded link hop	округлённый хоп по ссылке	see:link	link-hop	hop		
+r-rlink	-:	rounded reverse link	округлённый обратный хоп	see:rlink	link-hop	hop		
+r-resolve	:--	rounded cross-reference resolution	округлённое разрешение перекрёстной ссылки	see:resolve	resolution	hop		
+r-rresolve	--:	rounded reverse cross-reference resolution	округлённое обратное разрешение перекрёстной ссылки	see:rresolve	resolution	hop		
+r-quant	(+⟨m⟩;⟨n⟩)	rounded quantifier	округлённый квантификатор	see:quant	path-quantifier	quantifier		
+r-trait	(:␣)	rounded trait filter	округлённый фильтр по трейту	see:trait	trait-filter	filter		
+r-pred	(?␣)	rounded predicate	округлённый предикат	see:pred	predicate	predicate		
+r-root	(())	rounded root anchor	округлённый якорь корня	see:root	root-anchor	anchor		
+r-pipe	__	rounded pipe	округлённый пайп	see:pipe	pipe	pipe		
+r-agg	*__	rounded aggregation pipe	округлённый агрегирующий пайп	see:agg	aggregation-pipe	pipe		
+r-fold	*__(.⟨name⟩)	rounded fold by a regula	округлённая свёртка по регуле	see:fold	fold	pipe		
+r-fold-tuple	*__(.⟨a⟩; .⟨b⟩)	rounded fold by a tuple	округлённая свёртка по кортежу	see:fold-tuple	fold	pipe		
+aggpush	.⟨name⟩@(⟨body⟩)	aggregate push	агрегирующий пуш	sec:register-ops	push	push	Reduces the whole context in the body and files the answer on every thread, keeping the threads.	Редуцирует весь контекст в теле и кладёт ответ на каждую нить, сохраняя нити.
+aggpush-fold	.⟨name⟩@{.⟨x⟩}(⟨body⟩)	aggregate push per partition	агрегирующий пуш по частям	sec:register-ops	push	push	Reduces each partition of the context in the body and files its answer on every thread of that partition.	Редуцирует каждую часть контекста в теле и кладёт её ответ на каждую нить этой части.
+r-aggpush	.⟨name⟩*(⟨body⟩)	rounded aggregate push	округлённый агрегирующий пуш	see:aggpush	push	push		
+r-aggpush-fold	.⟨name⟩*(.⟨x⟩)(⟨body⟩)	rounded aggregate push per partition	округлённый агрегирующий пуш по частям	see:aggpush-fold	push	push		
+r-map	,__	rounded iteration pipe	округлённый пайп итерации	see:map	map-pipe	pipe		
+r-corr	:=:	rounded correlation	округлённая корреляция	see:corr	correlation	operator		
+r-ocorr	:=:?	rounded outer correlation	округлённая внешняя корреляция	see:ocorr	correlation	operator		
+r-ecorr	:=:*	rounded every-witness correlation	округлённая корреляция всех свидетелей	see:ecorr	correlation	operator		
+r-eocorr	:=:*?	rounded outer every-witness correlation	округлённая внешняя корреляция всех свидетелей	see:eocorr	correlation	operator		
+r-topic	(_)	rounded topic	округлённый топик	see:topic	topic	sigil		
+r-topreg	(.)	rounded top reg	округлённый верхний рег	see:topreg	value-recall	sigil		
+r-topics	(*_)	rounded all topics	округлённые все топики	see:topics	context-accessors	sigil		
+r-edge	(-)	rounded edge	округлённое ребро	see:edge	edge-accessor	sigil		
+r-edges	(*-)	rounded edges	округлённые рёбра	see:edges	edge-accessor	sigil		
+r-capture	(⟨N⟩)	rounded match capture	округлённый захват	see:capture	match-captures	sigil		
+invpos	$$__	invoking position	вызывающая позиция	sec:invoking-position	invoking-position	sigil	Reads the position of the thread that invoked the innermost query body, from inside that body.	Читает позицию нити, вызвавшей самое внутреннее тело запроса, изнутри этого тела.
+cursor	_	the cursor record	запись курсора	sec:operations	cursor	sigil	Gives the thread's cursor as one record, its topic and its position.	Даёт курсор нити одной записью: её топик и её позицию.
+curpos	$$_	current position	текущая позиция	sec:invoking-position	cursor	sigil	Reads the thread's current position, a node.	Читает текущую позицию нити, узел.
+driver	$$0	the driver	ведущий узел	sec:invoking-position	driver	sigil	Reads the driving node of a correlation, from inside the join condition.	Читает ведущий узел корреляции, изнутри условия соединения.
+w-and	.and.	and, as a word	и, словом	see:and	boolean-operators	operator		
+w-or	.or.	or, as a word	или, словом	see:or	boolean-operators	operator		
+w-not	.not.	not, as a word	не, словом	see:not	boolean-operators	operator		
+w-lt	.lt.	less than, as a word	меньше, словом	see:lt	comparison	operator		
+w-le	.le.	less than or equal to, as a word	меньше или равно, словом	see:le	comparison	operator		
+w-gt	.gt.	greater than, as a word	больше, словом	see:gt	comparison	operator		
+w-ge	.ge.	greater than or equal to, as a word	больше или равно, словом	see:ge	comparison	operator		
+see-coalesce	(⟨c⟩ ?? ⟨n⟩)	null default	умолчание при null	see:coalesce	null-default	operator		
+r-curpos	((_))	rounded current position	округлённая текущая позиция	see:curpos	cursor	sigil		
+r-invpos	((__))	rounded invoking position	округлённая вызывающая позиция	see:invpos	invoking-position	sigil		
+r-driver	((0))	rounded driver	округлённый ведущий узел	see:driver	driver	sigil		
+r-joined	((⟨k⟩))	rounded joined node	округлённый присоединённый узел	see:joined	joined-node	sigil		
+r-positions	((*_))	rounded all positions	округлённые все позиции	see:positions	context-accessors	sigil		
+r-regname	(.⟨name⟩)	rounded named reg	округлённый именованный рег	see:regname	value-recall	sigil		
+r-regn	(.⟨N⟩)	rounded reg by position	округлённый рег по позиции	see:regn	value-recall	sigil		
+r-register	(*.)	rounded pushed values	округлённые значения пушей	see:register	capsa-list	sigil		
+r-list	*(␣)	rounded list constructor	округлённый конструктор списка	see:list	list-constructor	constructor		
+w-and-fr	.et.	and, as a French word	и, французским словом	see:and	boolean-operators	operator		
+w-and-el	.και.	and, as a Greek word	и, греческим словом	see:and	boolean-operators	operator		
+w-and-la	.et.	and, as a Latin word	и, латинским словом	see:and	boolean-operators	operator		
+w-and-ru	.и.	and, as a Russian word	и, русским словом	see:and	boolean-operators	operator		
+w-and-es	.y.	and, as a Spanish word	и, испанским словом	see:and	boolean-operators	operator		
+w-or-fr	.ou.	or, as a French word	или, французским словом	see:or	boolean-operators	operator		
+w-or-el	.ή.	or, as a Greek word	или, греческим словом	see:or	boolean-operators	operator		
+w-or-la	.vel.	or, as a Latin word	или, латинским словом	see:or	boolean-operators	operator		
+w-or-ru	.или.	or, as a Russian word	или, русским словом	see:or	boolean-operators	operator		
+w-or-es	.o.	or, as a Spanish word	или, испанским словом	see:or	boolean-operators	operator		
+w-not-fr	.non.	not, as a French word	не, французским словом	see:not	boolean-operators	operator		
+w-not-el	.όχι.	not, as a Greek word	не, греческим словом	see:not	boolean-operators	operator		
+w-not-la	.non.	not, as a Latin word	не, латинским словом	see:not	boolean-operators	operator		
+w-not-ru	.не.	not, as a Russian word	не, русским словом	see:not	boolean-operators	operator		
+w-not-es	.no.	not, as a Spanish word	не, испанским словом	see:not	boolean-operators	operator		
+w-lt-fr	.inf.	less than, as a French word	меньше, французским словом	see:lt	comparison	operator		
+w-lt-el	.μικρότερο.	less than, as a Greek word	меньше, греческим словом	see:lt	comparison	operator		
+w-lt-la	.minor.	less than, as a Latin word	меньше, латинским словом	see:lt	comparison	operator		
+w-lt-ru	.менее.	less than, as a Russian word	меньше, русским словом	see:lt	comparison	operator		
+w-lt-es	.menor.	less than, as a Spanish word	меньше, испанским словом	see:lt	comparison	operator		
+w-le-fr	.nonsup.	less than or equal to, as a French word	не больше, французским словом	see:le	comparison	operator		
+w-le-el	.τοπολύ.	less than or equal to, as a Greek word	не больше, греческим словом	see:le	comparison	operator		
+w-le-la	.nonmaior.	less than or equal to, as a Latin word	не больше, латинским словом	see:le	comparison	operator		
+w-le-ru	.неболее.	less than or equal to, as a Russian word	не больше, русским словом	see:le	comparison	operator		
+w-le-es	.nomayor.	less than or equal to, as a Spanish word	не больше, испанским словом	see:le	comparison	operator		
+w-gt-fr	.sup.	greater than, as a French word	больше, французским словом	see:gt	comparison	operator		
+w-gt-el	.μεγαλύτερο.	greater than, as a Greek word	больше, греческим словом	see:gt	comparison	operator		
+w-gt-la	.maior.	greater than, as a Latin word	больше, латинским словом	see:gt	comparison	operator		
+w-gt-ru	.более.	greater than, as a Russian word	больше, русским словом	see:gt	comparison	operator		
+w-gt-es	.mayor.	greater than, as a Spanish word	больше, испанским словом	see:gt	comparison	operator		
+w-ge-fr	.noninf.	greater than or equal to, as a French word	не меньше, французским словом	see:ge	comparison	operator		
+w-ge-el	.τουλάχιστον.	greater than or equal to, as a Greek word	не меньше, греческим словом	see:ge	comparison	operator		
+w-ge-la	.nonminor.	greater than or equal to, as a Latin word	не меньше, латинским словом	see:ge	comparison	operator		
+w-ge-ru	.неменее.	greater than or equal to, as a Russian word	не меньше, русским словом	see:ge	comparison	operator		
+w-ge-es	.nomenor.	greater than or equal to, as a Spanish word	не меньше, испанским словом	see:ge	comparison	operator		
+
+head	=␣	expression head	выражение-голова	sec:expression-head	expression-head	operator	Opens a query with a value expression instead of navigation.	Открывает запрос выражением над значением вместо навигации.
+def	def	definition	определение	sec:fragments	definitions	call	Names a piece of query as a fragment, inline before the query or in a definitions file.	Называет кусок запроса фрагментом, прямо перед запросом или в файле определений.
+comment	#	comment	комментарий	sec:fragments	comment	comment	Starts a comment that runs to the end of the line, in a definitions file.	Начинает комментарий до конца строки, в файле определений.
+bcomment	(!!␣)	block comment	блочный комментарий	sec:fragments	comment	comment	Encloses a comment the parser skips, anywhere whitespace may stand.	Заключает комментарий, который разбор пропускает, везде, где может стоять пробел.
+option	--⟨name⟩=⟨v⟩	option	опция	sec:call-operands	options	call	Sets an option of a command, in the shell's spelling, after the operands.	Задаёт опцию команды в написании оболочки, после операндов.
+subctx	(␣)	subcontext body	тело подконтекста	sec:subcontext-bodies	subcontext	group	Holds a pipeline run from the thread's position and reduced to one value.	Содержит конвейер, который запускается от позиции нити и сводится к одному значению.
+dotwild	.	dot wildcard	точечный шаблон	sec:path-patterns-syntax	dot-wildcard	name	Matches one hop name of any spelling, inside a path group.	Совпадает с одним именем хопа любого написания, внутри группы пути.
+traitalg	<⟨a⟩ && !⟨b⟩>	trait algebra	алгебра трейтов	sec:traits	trait-algebra	filter	Combines traits with and, or and not inside the angle brackets.	Сочетает трейты через и, или и не внутри угловых скобок.
+labelalg	->(⟨a⟩ || !⟨b⟩)	label algebra	алгебра лейблов	sec:traits	edge-label-algebra	filter	Selects the crosslinks to follow by and, or and not over their labels.	Выбирает ссылки для хопа через и, или и не над их метками.
+namealg	(⟨a⟩ || !⟨b⟩)	name algebra	алгебра имён	sec:name-algebra	name-algebra	filter	Selects the names a hop matches by and, or and not over names, globs and regex literals.	Выбирает имена для хопа через и, или и не над именами, глобами и регулярными литералами.
+hopname	⟨name⟩	hop name	имя хопа	sec:name-characters	hop-names	name	Names what a hop matches: a bare name, a position, a quoted name or a designator.	Называет то, с чем совпадает хоп: голое имя, позицию, имя в кавычках или обозначение.
+plit	*"␣"*	pattern literal	литерал шаблона	sec:pattern-literals	pattern-literal	name	Matches a text by a glob of quoted strings and stars, after a pattern comparison.	Сопоставляет текст с глобом из строк в кавычках и звёздочек, после сравнения с образцом.
+usearch	*//	universal search	поиск по арбору	sec:search-syntax	tree-search	path	Lands on every matching node of the arbor, the root and the nodes outside the tree included.	Встаёт на каждый совпавший узел арбора, включая корень и узлы вне дерева.

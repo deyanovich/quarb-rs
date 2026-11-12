@@ -22,7 +22,13 @@ use std::path::{Path, PathBuf};
 /// Interactive Quarb: each line becomes a labelled fragment
 /// (&1, &2, …), reusable over a standing session.
 #[derive(Parser)]
-#[command(version, about)]
+#[command(
+    version,
+    about,
+    after_help = "The manual: `quai man` lists the commands, `quai man NAME` prints a command's page, \
+                  `quai man '<=>'` a glyph's (a pipe, a sigil, an operator), `quai man syntax [KIND]` \
+                  lists the glyphs; `--ru` for Russian. Inside a session: `man NAME`."
+)]
 struct Cli {
     /// Source paths: a directory (filesystem), a document
     /// (.json/.yaml/.toml/.csv/.tsv/.xml/.html/.md), a SQLite,
@@ -348,6 +354,21 @@ fn main() -> Result<()> {
             std::env::set_var("RUST_LIB_BACKTRACE", "0");
         }
     }
+    // `quai man [--ru] [NAME | GLYPH | syntax]`: the manual from the
+    // shell, as `qua man` is — the text `:man` answers inside a
+    // session. Read before the arguments are parsed, where `man`
+    // was taken for a source to mount ("reading man: No such file").
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).map(String::as_str) == Some("man") {
+        let args: Vec<&str> = argv[2..].iter().map(String::as_str).collect();
+        return match quarb::man::man(&args) {
+            Ok(text) => {
+                println!("{text}");
+                Ok(())
+            }
+            Err(e) => Err(anyhow::anyhow!("{e}")),
+        };
+    }
     let mut cli = Cli::parse();
     set_color(cli.color);
     // A --model file may declare its own sources; parse it and inject
@@ -577,6 +598,21 @@ fn run_file(
     let mut failed = false;
     for cell in cells {
         let mut q = cell.join("\n");
+        // A manual cell (`man sort`): the page, as a session's line
+        // answers it. It is no query: it takes no ordinal, so the
+        // labels of the cells after it are the ones every host gives.
+        if let Some(page) = quarb::man::line(&q) {
+            println!("    {}", cell[0]);
+            match page {
+                Ok(text) => text.lines().for_each(|l| println!("    {l}")),
+                Err(e) => {
+                    failed = true;
+                    println!("    error: {e}");
+                }
+            }
+            println!();
+            continue;
+        }
         let n = session.borrow().line_no();
         println!("&{n}  {}", cell[0]);
         for l in &cell[1..] {
@@ -861,6 +897,15 @@ fn repl(
             continue;
         }
         let _ = rl.add_history_entry(line); // Up/Down recalls prior lines
+        // The manual: `man sort`, the line every host of a session
+        // takes (a query never opens with a bare word).
+        if let Some(page) = quarb::man::line(line) {
+            match page {
+                Ok(text) => println!("{text}"),
+                Err(e) => println!("{e}"),
+            }
+            continue;
+        }
         // A `:` command (a query cannot start with a lone `:`).
         if line.starts_with(':') && !line.starts_with("::") {
             if command(&mut session.borrow_mut(), remount, line) {
@@ -1353,10 +1398,11 @@ fn command(session: &mut Session, remount: &mut Option<Remount>, line: &str) -> 
         }
         return false;
     }
-    if line == ":man" || line.starts_with(":man ") {
-        let rest = line.strip_prefix(":man").unwrap_or_default();
-        let args: Vec<&str> = rest.split_whitespace().collect();
-        match quarb::man::man(&args) {
+    // the manual, with the colon or without: `man sort` is the line
+    // every host of a session takes (the browser's have no colon
+    // commands)
+    if let Some(page) = quarb::man::line(line) {
+        match page {
             Ok(text) => println!("{text}"),
             Err(e) => println!("{e}"),
         }
@@ -1376,7 +1422,7 @@ fn command(session: &mut Session, remount: &mut Option<Remount>, line: &str) -> 
                  :mount SPEC   add a source (PATH or NAME=TARGET) to the session\n  \
                  :follow [on|off|N]  acquisition rounds per line for ::href--> refs (interactive default: on)\n  \
                  :plan QUERY   price a query before it runs: its static plan as kaiv (--budget sets the bound)\n  \
-                 :man [NAME]   the command inventory: every command, or one command's page (:man @| for a pipe, --ru for Russian)\n  \
+                 man [NAME]    the manual: every command, one command's page, a glyph's (man <=>, man @|), man syntax [KIND] for the glyphs; --ru for Russian (also :man)\n  \
                  :history      show the fragment table (&1, &2, …)\n  \
                  :reset        clear the history and restart numbering\n  \
                  :quit         leave (also Ctrl-D)"

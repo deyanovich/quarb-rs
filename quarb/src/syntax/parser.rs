@@ -13165,6 +13165,11 @@ fn agg_command(call: FnCall) -> Result<Command> {
     if call.name == "ungroup" && !call.args.is_empty() {
         return Err(QuarbError::parse("'ungroup' takes no operand"));
     }
+    if spec.agg == Some(crate::syntax::registry::Agg::Reducing)
+        && let Some(why) = by_after_the_aggregation_pipe(&call)
+    {
+        return Err(QuarbError::parse(why));
+    }
     check_operand_bound(&call, false, true)?;
     // The shape checks see the operands; `--of=expr` is read apart.
     let shaped = if crate::syntax::registry::takes_of(&call.name) {
@@ -13178,6 +13183,55 @@ fn agg_command(call: FnCall) -> Result<Command> {
         _ => {}
     }
     Ok(Command::Agg(call))
+}
+
+/// A reducer's grouping option after the aggregation pipe (ruling
+/// 2026-11-12): `--by` groups a table's rows, the reduction over a
+/// table that the plain pipe runs; after `@|` the reduction runs over
+/// the threads, and those the fold groups. Nothing read the option
+/// there: `@| count(--by=::author)` counted the threads, `@| # @|
+/// count(--by=:author)` answered 1. The refusal names both spellings,
+/// with the key where the option names one column or property.
+fn by_after_the_aggregation_pipe(call: &FnCall) -> Option<String> {
+    let is_by = |a: &Arg| matches!(a, Arg::Opt { name, .. } if name == "--by" || name == "-b");
+    let by: Vec<&Arg> = call.args.iter().filter(|a| is_by(a)).collect();
+    if by.is_empty() {
+        return None;
+    }
+    // the reduction as the fold takes it: the call without the option
+    let mut alone = call.clone();
+    alone.args.retain(|a| !is_by(a));
+    let rest = if alone.args.is_empty() { "" } else { "… " };
+    let alone = crate::syntax::unparse::fn_call_text(&alone);
+    let named = match by.as_slice() {
+        [Arg::Opt { value: Some(v), .. }] => match v {
+            Operand::Field { base, name, .. } if matches!(**base, Operand::Topic) => {
+                Some(name.clone())
+            }
+            Operand::Rel {
+                steps,
+                projection: Some(Projection::Property(Some(name))),
+                anchor: Anchor::Current,
+            } if steps.is_empty() => Some(name.clone()),
+            _ => None,
+        }
+        .filter(|n| {
+            n.chars().next().is_some_and(char::is_alphabetic)
+                && n.chars().all(|c| c.is_alphanumeric() || c == '_')
+        })
+        .map(|n| (n, crate::syntax::unparse::operand_text(v))),
+        _ => None,
+    };
+    let name = &call.name;
+    let (column, push, selector) = match &named {
+        Some((k, written)) => (format!(":{k}"), format!(".{k}({written})"), format!(".{k}")),
+        None => (":col".to_string(), ".k(KEY)".to_string(), ".k".to_string()),
+    };
+    Some(format!(
+        "--by groups a table's rows, and after '@|' the reduction runs over the threads: write \
+         '| {name}({rest}--by={column})' on the table, or group the threads with the fold, \
+         '| {push} @|{{{selector}}} {alone}'"
+    ))
 }
 
 /// A `|` command: a scalar, or an aggregate that also works per capsa
@@ -13682,10 +13736,11 @@ fn validate_keyed(call: &FnCall) -> Result<()> {
     if call.name == "sort" {
         let locale = |v: &Value| -> Result<()> {
             let tag = v.to_string();
-            if !valid_locale_tag(&tag) {
+            // `"C"` and `"POSIX"` name the code-point order
+            if !valid_locale_tag(&tag) && !crate::stdlib::code_point_order(&tag) {
                 return Err(QuarbError::parse(format!(
                     "sort: '{tag}' is not a Unicode locale identifier \
-                     (try ru-RU, de-DE, zh-Hant, ...)"
+                     (try ru-RU, de-DE, zh-Hant, ...; \"C\" for the code-point order)"
                 )));
             }
             Ok(())
@@ -13743,10 +13798,11 @@ fn validate_keyed(call: &FnCall) -> Result<()> {
         } if name == "--locale" => Some(v.to_string()),
         _ => None,
     }) && !valid_locale_tag(&tag)
+        && !crate::stdlib::code_point_order(&tag)
     {
         return Err(QuarbError::parse(format!(
             "{}: '{tag}' is not a Unicode locale identifier \
-             (try ru-RU, de-DE, zh-Hant, ...)",
+             (try ru-RU, de-DE, zh-Hant, ...; \"C\" for the code-point order)",
             call.name
         )));
     }

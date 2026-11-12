@@ -558,7 +558,23 @@ impl JsonAdapter {
         let mut b = Builder::new();
         let root = b.push(None, Kind::Array, Value::Null, None);
         let mut i = 0u32;
-        for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        // A line is parsed alone, so the parser's "line 1" is the
+        // file's line `n`: the message names that one, as the
+        // streamed reading does ("line 2: …"). It said "line 1" of
+        // every bad line of the file.
+        let at = |n: usize, e: serde_json::Error| -> serde_json::Error {
+            use serde::de::Error;
+            let column = e.column();
+            let what = e.to_string();
+            let what = what.split(" at line ").next().unwrap_or(&what);
+            serde_json::Error::custom(format!("line {n}: {what} at column {column}"))
+        };
+        for (n, line) in text
+            .lines()
+            .enumerate()
+            .map(|(n, line)| (n + 1, line))
+            .filter(|(_, l)| !l.trim().is_empty())
+        {
             let mut d = serde_json::Deserializer::from_str(line);
             match reading {
                 Reading::Node => {
@@ -567,7 +583,8 @@ impl JsonAdapter {
                         name: Some(Name::Index(i)),
                         parent: Some(root),
                     }
-                    .deserialize(&mut d)?;
+                    .deserialize(&mut d)
+                    .map_err(|e| at(n, e))?;
                 }
                 Reading::Property => {
                     let built = PropSeed {
@@ -576,7 +593,8 @@ impl JsonAdapter {
                         parent: Some(root),
                         in_object: false,
                     }
-                    .deserialize(&mut d)?;
+                    .deserialize(&mut d)
+                    .map_err(|e| at(n, e))?;
                     match built {
                         Built::Scalar(v) => b.nodes[root.0 as usize].items.push((i as usize, v)),
                         Built::List(vs) => {
@@ -1118,6 +1136,9 @@ impl AstAdapter for JsonAdapter {
 pub struct JsonLines {
     path: std::path::PathBuf,
     offsets: Vec<(u64, u32)>,
+    /// The file's line of each kept line (the blank ones are not
+    /// kept, and a message names the line as an editor shows it).
+    numbers: Vec<u32>,
     size: u64,
     reading: Reading,
     /// The line last parsed: its index and its arbor (the root an
@@ -1125,7 +1146,7 @@ pub struct JsonLines {
     last: std::cell::RefCell<Option<(u32, JsonAdapter)>>,
     /// The file, open once, and the line it stands before: a
     /// sequential read (a predicate over every line) seeks never.
-    reader: std::cell::RefCell<(std::io::BufReader<std::fs::File>, u32)>,
+    reader: std::cell::RefCell<(quarb::source::Window, u32)>,
 }
 
 const LINE_SHIFT: u32 = 32;
@@ -1136,14 +1157,17 @@ impl JsonLines {
         let size = std::fs::metadata(path)?.len();
         let mut reader = std::io::BufReader::with_capacity(1 << 16, std::fs::File::open(path)?);
         let mut offsets = Vec::new();
+        let mut numbers = Vec::new();
         let mut line = Vec::new();
         let mut at = 0u64;
+        let mut number = 0u32;
         loop {
             line.clear();
             let n = reader.read_until(b'\n', &mut line)?;
             if n == 0 {
                 break;
             }
+            number += 1;
             let start = at;
             at += n as u64;
             let body = &line[..];
@@ -1159,13 +1183,14 @@ impl JsonLines {
                 continue;
             }
             offsets.push((start + bom as u64, body.len() as u32));
+            numbers.push(number);
         }
         let _ = reader.stream_position();
-        let mut file = std::io::BufReader::with_capacity(1 << 16, std::fs::File::open(path)?);
-        file.seek(std::io::SeekFrom::Start(0))?;
+        let file = quarb::source::Window::new(std::fs::File::open(path)?, 0);
         Ok(JsonLines {
             path: path.to_path_buf(),
             offsets,
+            numbers,
             size,
             reading,
             last: std::cell::RefCell::new(None),
@@ -1226,7 +1251,7 @@ impl JsonLines {
                     quarb::record_refusal(format!(
                         "line {} is not valid UTF-8; say the file's encoding with \
                          ?encoding=LABEL",
-                        i + 1
+                        self.numbers.get(i as usize).copied().unwrap_or(i + 1)
                     ));
                     return None;
                 }
@@ -1238,7 +1263,14 @@ impl JsonLines {
         let a = match JsonAdapter::parse_lines_as(&text, self.reading) {
             Ok(a) => a,
             Err(e) => {
-                quarb::record_refusal(format!("line {}: {e}", i + 1));
+                // the file's line: the text parsed was this one line,
+                // which the reading names "line 1"
+                let what = e.to_string();
+                let what = what.strip_prefix("line 1: ").unwrap_or(&what);
+                quarb::record_refusal(format!(
+                    "line {}: {what}",
+                    self.numbers.get(i as usize).copied().unwrap_or(i + 1)
+                ));
                 return None;
             }
         };
@@ -1479,7 +1511,7 @@ pub struct JsonArray {
     key: Option<String>,
     offsets: Vec<(u64, u32)>,
     last: std::cell::RefCell<Option<(u32, JsonAdapter)>>,
-    reader: std::cell::RefCell<(std::io::BufReader<std::fs::File>, u32)>,
+    reader: std::cell::RefCell<(quarb::source::Window, u32)>,
 }
 
 /// What the scan found: the arrays at the root or under a root key,
@@ -1497,7 +1529,7 @@ impl JsonArray {
     /// or one smaller than half the file), where the whole read is
     /// the right one.
     pub fn open(path: &std::path::Path, reading: Reading) -> std::io::Result<Option<Self>> {
-        use std::io::{Read, Seek};
+        use std::io::Read;
         let size = std::fs::metadata(path)?.len();
         let mut reader = std::io::BufReader::with_capacity(1 << 16, std::fs::File::open(path)?);
         let mut bytes = Vec::new();
@@ -1533,8 +1565,7 @@ impl JsonArray {
                     std::io::Error::new(std::io::ErrorKind::InvalidData, "the array's key")
                 })?,
         };
-        let mut file = std::io::BufReader::with_capacity(1 << 16, std::fs::File::open(path)?);
-        file.seek(std::io::SeekFrom::Start(0))?;
+        let file = quarb::source::Window::new(std::fs::File::open(path)?, 0);
         Ok(Some(JsonArray {
             path: path.to_path_buf(),
             size,

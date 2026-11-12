@@ -81,8 +81,9 @@ fn the_streamed_mount_answers_as_the_whole_one() {
     );
 }
 
-/// A JSONL file streams the same way: each line its own arbor when
-/// reached, the answers the whole reading's.
+/// A JSONL file streams the same way where it is large or `--stream`
+/// asks: each line its own arbor when reached, the answers the whole
+/// reading's.
 #[test]
 fn the_streamed_jsonl_answers_as_the_whole_one() {
     let d = fixture();
@@ -100,16 +101,99 @@ fn the_streamed_jsonl_answers_as_the_whole_one() {
         "/* | % | :name",
         "/* @| # | count",
         "/2/home | %",
+        // lines read out of the file's order
+        "/* @| sort_by(::age) @| [..2] | ::name",
+        "/* @| reverse | ::name",
+        "/* | .a(::age > 25) @|{.a} max_by(::age) | ::name",
     ] {
-        let (a, ea, ga) = qua(&d, &[q, "t.jsonl"]);
+        let (a, ea, ga) = qua(&d, &["--stream", q, "t.jsonl"]);
         let (b, eb, gb) = qua(&d, &["--no-stream", q, "t.jsonl"]);
         assert_eq!(ga, gb, "{q}: {ea} / {eb}");
         assert_eq!(a, b, "{q}");
     }
-    let (out, err, good) = qua(&d, &["/* @| [..2] | ::name", "t.jsonl"]);
+    let (out, err, good) = qua(&d, &["--stream", "/* @| [..2] | ::name", "t.jsonl"]);
     assert!(good, "{err}");
     assert_eq!(out, "Braund\nCumings");
     // the line count is the stream's own metadata
-    let (out, _, _) = qua(&d, &[":::n-lines", "t.jsonl"]);
+    let (out, _, _) = qua(&d, &["--stream", ":::n-lines", "t.jsonl"]);
     assert_eq!(out, "3");
+}
+
+/// A file of `n` rows over seven routes, the rows of a route
+/// scattered among the others: larger than the stream's window at
+/// its least, so a read out of order leaves the bytes held.
+fn requests(dir: &Path, n: usize) {
+    let routes = [
+        "/", "/search", "/item", "/cart", "/login", "/help", "/about",
+    ];
+    let mut text = String::from("ts,route,ms,bytes\n");
+    for i in 0..n {
+        // a spread with no period the routes share
+        let route = routes[(i * 5 + i / 3) % routes.len()];
+        let ms = (i * 7919) % 1009;
+        let bytes = 100 + (i * 104_729) % 9973;
+        text.push_str(&format!(
+            "2026-07-03T08:{:02}:{:02}Z,{route},{ms},{bytes}\n",
+            (i / 60) % 60,
+            i % 60
+        ));
+    }
+    std::fs::write(dir.join("requests.csv"), text).unwrap();
+}
+
+/// The rows read out of the file's order answer as the whole reading
+/// does: a fold that reads its members group by group (a seek and a
+/// read per row before the stream read through a window: 875
+/// thousand of each over a million rows), an order by one column and
+/// a cell of another, the ends of the file one after the other.
+#[test]
+fn rows_read_out_of_order_answer_as_the_whole_reading() {
+    let d = fixture();
+    requests(&d, 20_000);
+    for q in [
+        "/row | .r(::route) @|{.r} sum(--of=::bytes) | %($.r; b = $_)",
+        "/row | .r(::route) @|{.r} max_by(::ms) | %($.r; ::ts; ::ms)",
+        "/row @| sort_by(::ms) @| [..5] | %(::ts; ::route)",
+        "/row @| sort_by(-::bytes) | ::ts @| last",
+        "/row @| top(3; ::ms) | %(::route; ::ms)",
+        "/row @| reverse @| [..3] | ::ts",
+        "@(/row[-1]::ts; /row[1]::ts; /row[10000]::ts; /row[2]::ts; /row[-2]::ts)",
+        "/row[::route = \"/cart\"] @| last | %(::ts; ::bytes)",
+    ] {
+        let (a, ea, ga) = qua(&d, &[q, "requests.csv"]);
+        let (b, eb, gb) = qua(&d, &["--no-stream", q, "requests.csv"]);
+        assert!(ga && gb, "{q}: {ea} / {eb}");
+        assert_eq!(a, b, "{q}");
+        assert!(!a.is_empty(), "{q}");
+    }
+}
+
+/// A row is found by its offset in the data, whatever stands before
+/// the data in the file. Counted from the file's start, the offset of
+/// a last row as long as what was skipped (a BOM's three bytes, a
+/// `sep=` line) met the reader's position after the open's scan: no
+/// seek was made, and the row read as null when it was the first row
+/// read (0.53.0 to 0.61.0).
+#[test]
+fn the_last_row_reads_after_a_bom_or_a_sep_line() {
+    let d = fixture();
+    std::fs::write(d.join("bom.csv"), b"\xEF\xBB\xBFa\n1\n2\n12\n").unwrap();
+    std::fs::write(d.join("sep.csv"), "sep=;\na;b\n1;2\n3;4\n5;678\n").unwrap();
+    for (q, file, answer) in [
+        ("/row[3]::a", "bom.csv", "12"),
+        ("/row[-1]::a", "bom.csv", "12"),
+        ("/row @| last | ::a", "bom.csv", "12"),
+        ("/row[-1]::b", "sep.csv", "678"),
+        (
+            "/row[3] | %(::a; ::b)",
+            "sep.csv",
+            r#"%(a = "5"; b = "678")"#,
+        ),
+    ] {
+        let (out, err, good) = qua(&d, &[q, file]);
+        assert!(good, "{q}: {err}");
+        assert_eq!(out, answer, "{q} over {file}");
+        let (whole, _, _) = qua(&d, &["--no-stream", q, file]);
+        assert_eq!(out, whole, "{q} over {file}");
+    }
 }

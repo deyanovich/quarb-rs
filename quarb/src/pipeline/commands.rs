@@ -95,10 +95,10 @@ pub(crate) fn record_field(v: Value, name: &str) -> Value {
                 Value::Null
             }
         },
-        Value::Record(fields) => fields
-            .into_iter()
-            .find(|(k, _)| k == name)
-            .map(|(_, v)| v)
+        // null where the record has no such field; a name no record
+        // of the run has is told of when it ends (UNKNOWN_FIELD)
+        Value::Record(fields) => crate::value::ambient::read_field(&fields, name)
+            .cloned()
             .unwrap_or(Value::Null),
         Value::List(items) => Value::list(
             items
@@ -1962,9 +1962,11 @@ pub(crate) fn agg_as_func_command<H: Host>(
                     // first value, `| first(n)` the record of n; a list
                     // of one record stays the list, its item the answer
                     // and `| sort` its fields by key, by value under
-                    // `-v` (ruling 2026-11-11)
+                    // `-v` (ruling 2026-11-11); `| reverse` its fields
+                    // in reverse order, as `sort` orders them (ruling
+                    // 2026-11-12: it answered the record unchanged)
                     Some(Value::Record(r))
-                        if matches!(call.name.as_str(), "first" | "last" | "sort")
+                        if matches!(call.name.as_str(), "first" | "last" | "sort" | "reverse")
                             && let Some(v) = stdlib::record_order_reading(
                                 call,
                                 &r,
@@ -3949,20 +3951,10 @@ fn keyed_by_columns<H: Host>(call: &FnCall, t: &crate::Table, host: &H) -> Optio
     drop(columns);
     // `--locale=tag`: text keys under that locale's collation;
     // without it under the output locale's, as the bare `sort`
-    // (rulings 2026-11-11); every other key as it compares anywhere
-    let collate = stdlib::locale_text_order(call).or_else(stdlib::default_text_order);
-    let compare_keys = |a: &[Value], b: &[Value]| -> Ordering {
-        a.iter()
-            .zip(b.iter())
-            .zip(dirs.iter())
-            .map(|((x, y), down)| {
-                let o = stdlib::default_cmp(x, y, &|e| host.scale_of(e), collate.as_deref());
-                if *down { o.reverse() } else { o }
-            })
-            .find(|o| *o != Ordering::Equal)
-            .unwrap_or(Ordering::Equal)
-    };
-    let idx: Vec<usize> = rank_keyed(call, count, keyed, &compare_keys, &|v| {
+    // (rulings 2026-11-11); `--locale=C` by code point; every other
+    // key as it compares anywhere
+    let collate = stdlib::keyed_text_order(call);
+    let idx: Vec<usize> = rank_keyed(call, count, keyed, &dirs, collate.as_deref(), &|v| {
         v.sort_key_with(&|e| host.scale_of(e))
     })
     .into_iter()
@@ -4785,19 +4777,9 @@ pub(crate) fn keyed_agg<H: Host>(
     };
     // `--locale=tag`: text keys under that locale's collation;
     // without it under the output locale's, as the bare `sort`
-    // (rulings 2026-11-11); every other key as it compares anywhere
-    let collate = stdlib::locale_text_order(call).or_else(stdlib::default_text_order);
-    let compare_keys = |a: &[Value], b: &[Value]| -> Ordering {
-        a.iter()
-            .zip(b.iter())
-            .zip(dirs.iter())
-            .map(|((x, y), down)| {
-                let o = stdlib::default_cmp(x, y, &|e| host.scale_of(e), collate.as_deref());
-                if *down { o.reverse() } else { o }
-            })
-            .find(|o| *o != Ordering::Equal)
-            .unwrap_or(Ordering::Equal)
-    };
+    // (rulings 2026-11-11); `--locale=C` by code point; every other
+    // key as it compares anywhere
+    let collate = stdlib::keyed_text_order(call);
 
     // A missing key does not compete — the ordering counterpart of
     // the numeric aggregates skipping non-numeric values. Extremes
@@ -4903,7 +4885,7 @@ pub(crate) fn keyed_agg<H: Host>(
         .enumerate()
         .map(|(i, c)| (key_of(&c, i), c))
         .collect();
-    rank_keyed(call, count, keyed, &compare_keys, &|v| {
+    rank_keyed(call, count, keyed, &dirs, collate.as_deref(), &|v| {
         v.sort_key_with(&|e| host.scale_of(e))
     })
     .into_iter()
@@ -4917,68 +4899,118 @@ pub(crate) fn keyed_agg<H: Host>(
 /// `unique_by` (the first of each key), `min_by`/`max_by` (every
 /// item of the extreme key) — one logic for a context's threads and
 /// for a table's rows ranked by their columns (the columnar round).
+///
+/// Two keys compare key by key in the directions `dirs` gives, as
+/// the bare `sort` compares its values: the standard value
+/// comparison, and two texts that have no reading under `collate`
+/// where the call or the output locale names an order — numbers,
+/// dates, quantities and text that reads as one keep their magnitude
+/// order whatever the locale. Each key is read ONCE into the
+/// form it orders by. Read at every comparison, a text was tried as
+/// a number, a quantity, a span and an instant twice per comparison,
+/// n log n times over: `sort_by(::route)` over a million rows took
+/// 17 s, `top(3; ::ms)` 4.5 s, most of it there.
 fn rank_keyed<T>(
     call: &FnCall,
     count: Option<&Arg>,
     mut keyed: Vec<(Vec<Value>, T)>,
-    compare_keys: &dyn Fn(&[Value], &[Value]) -> Ordering,
+    dirs: &[bool],
+    collate: Option<&dyn Fn(&str, &str) -> Ordering>,
     sort_key: &dyn Fn(&Value) -> SortKey,
 ) -> Vec<(Vec<Value>, T)> {
     let has_null = |k: &[Value]| k.iter().any(|v| matches!(v, Value::Null));
     let has_nan = |k: &[Value]| k.iter().any(stdlib::is_nan);
+    // First capsa per distinct key, in original order.
+    if call.name == "unique_by" {
+        let mut seen: HashSet<Vec<SortKey>> = HashSet::new();
+        keyed.retain(|(k, _)| {
+            let hashed: Vec<SortKey> = k.iter().map(|v| sort_key(v)).collect();
+            seen.insert(hashed)
+        });
+        return keyed;
+    }
+    if !matches!(
+        call.name.as_str(),
+        "sort_by" | "top" | "bottom" | "min_by" | "max_by"
+    ) {
+        return keyed;
+    }
+    /// A keyed item with the forms its keys order by.
+    type Ranked<T> = (Vec<Value>, Vec<SortKey>, T);
+    let compare = |a: (&[Value], &[SortKey]), b: (&[Value], &[SortKey])| -> Ordering {
+        (a.0.iter().zip(a.1))
+            .zip(b.0.iter().zip(b.1))
+            .zip(dirs.iter())
+            .map(|(((x, kx), (y, ky)), down)| {
+                let o = match (collate, x, y, kx, ky) {
+                    (Some(c), Value::Str(x), Value::Str(y), SortKey::Text(_), SortKey::Text(_)) => {
+                        c(x, y)
+                    }
+                    _ => kx.cmp_key(ky),
+                };
+                if *down { o.reverse() } else { o }
+            })
+            .find(|o| *o != Ordering::Equal)
+            .unwrap_or(Ordering::Equal)
+    };
+    fn of<T>(r: &Ranked<T>) -> (&[Value], &[SortKey]) {
+        (&r.0, &r.1)
+    }
+    let mut ranked: Vec<Ranked<T>> = keyed
+        .into_iter()
+        .map(|(k, x)| {
+            let forms = k.iter().map(|v| sort_key(v)).collect();
+            (k, forms, x)
+        })
+        .collect();
     match call.name.as_str() {
         // A null key sorts last, and a NaN key after every number
         // whichever way the key runs (`-$_` of NaN is NaN); `--desc`
         // (`-d`) flips the whole key list, a unary minus one key.
         "sort_by" => {
-            keyed.sort_by(|(a, _), (b, _)| {
-                has_null(a)
-                    .cmp(&has_null(b))
-                    .then_with(|| has_nan(a).cmp(&has_nan(b)))
-                    .then_with(|| compare_keys(a, b))
+            ranked.sort_by(|a, b| {
+                has_null(&a.0)
+                    .cmp(&has_null(&b.0))
+                    .then_with(|| has_nan(&a.0).cmp(&has_nan(&b.0)))
+                    .then_with(|| compare(of(a), of(b)))
             });
         }
         // Descending / ascending, stable, truncated to the count. A
         // null or NaN key is never ranked.
         "top" | "bottom" => {
-            keyed.retain(|(k, _)| !has_null(k) && !has_nan(k));
+            ranked.retain(|r| !has_null(&r.0) && !has_nan(&r.0));
             if call.name == "top" {
-                keyed.sort_by(|(a, _), (b, _)| compare_keys(b, a));
+                ranked.sort_by(|a, b| compare(of(b), of(a)));
             } else {
-                keyed.sort_by(|(a, _), (b, _)| compare_keys(a, b));
+                ranked.sort_by(|a, b| compare(of(a), of(b)));
             }
-            let (s, e) = stdlib::rank_span(count, keyed.len(), false).unwrap_or((0, 0));
-            keyed.truncate(e);
-            keyed.drain(..s);
-        }
-        // First capsa per distinct key, in original order.
-        "unique_by" => {
-            let mut seen: HashSet<Vec<SortKey>> = HashSet::new();
-            keyed.retain(|(k, _)| {
-                let hashed: Vec<SortKey> = k.iter().map(|v| sort_key(v)).collect();
-                seen.insert(hashed)
-            });
+            let (s, e) = stdlib::rank_span(count, ranked.len(), false).unwrap_or((0, 0));
+            ranked.truncate(e);
+            ranked.drain(..s);
         }
         // Every capsa achieving the extreme key (ties included); a
         // null or NaN key is never an extreme.
-        "min_by" | "max_by" => {
-            keyed.retain(|(k, _)| !has_null(k) && !has_nan(k));
+        _ => {
+            ranked.retain(|r| !has_null(&r.0) && !has_nan(&r.0));
             let want = if call.name == "min_by" {
                 Ordering::Less
             } else {
                 Ordering::Greater
             };
-            let extreme = keyed
-                .iter()
-                .map(|(k, _)| k.clone())
-                .reduce(|a, b| if compare_keys(&b, &a) == want { b } else { a });
-            if let Some(extreme) = extreme {
-                keyed.retain(|(k, _)| compare_keys(k, &extreme) == Ordering::Equal);
+            // the first of the extreme keys: a later one takes its
+            // place only when it is strictly beyond it
+            let mut extreme = 0;
+            for i in 1..ranked.len() {
+                if compare(of(&ranked[i]), of(&ranked[extreme])) == want {
+                    extreme = i;
+                }
+            }
+            if let Some((values, forms)) = ranked.get(extreme).map(|r| (r.0.clone(), r.1.clone())) {
+                ranked.retain(|r| compare(of(r), (&values, &forms)) == Ordering::Equal);
             }
         }
-        _ => {}
     }
-    keyed
+    ranked.into_iter().map(|(k, _, x)| (k, x)).collect()
 }
 
 /// `exchange(RATES[; TARGET])` — the currency conversion (spec: The

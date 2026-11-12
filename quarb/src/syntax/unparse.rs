@@ -1829,8 +1829,8 @@ pub(crate) fn arg_text(a: &Arg) -> String {
     }
 }
 
-/// [`fn_call`] for the parser's tests.
-#[cfg(test)]
+/// [`fn_call`] for the parser: its tests, and a refusal that spells
+/// the call it refuses.
 pub(crate) fn fn_call_text(call: &crate::syntax::ast::FnCall) -> String {
     fn_call(call)
 }

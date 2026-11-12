@@ -18,8 +18,10 @@
 //!   `:::delimiter` and `:::decimal` on the root say what was
 //!   decided.
 //!
-//! The first record must be the header. Parsing is strict about
-//! ragged rows (a record with the wrong field count is an error).
+//! The first record must be the header. A ragged row is read, as
+//! the spec says: a short one fills its tail with null, a long one
+//! is cut at the header's width, and `:::n-fields` on the row says
+//! how many fields it wrote.
 //!
 //! The delimiter is decided, never sniffed: `?delimiter=` on the
 //! mount, else an Excel `sep=X` first line (a declaration, not a
@@ -514,22 +516,24 @@ fn sep_line(text: &str) -> Option<(u8, &str)> {
 /// the open and one scan records where every record starts — the
 /// offset index, eight bytes a row — so the row count and the rows'
 /// ids cost no cells; a row is parsed from its offset when a cell of
-/// it is read, the last row parsed kept for the next read. Every
-/// answer is the in-memory [`CsvAdapter`]'s: the same ids, locators,
-/// metadata, cells (text, the decimal comma canonicalized) and
-/// traits, so a query reads alike whichever mounts the file.
+/// it is read, the last row parsed kept for the next read, the file
+/// read through a [`quarb::source::Window`]. Every answer is the in-memory
+/// [`CsvAdapter`]'s: the same ids, locators, metadata, cells (text,
+/// the decimal comma canonicalized) and traits, so a query reads
+/// alike whichever mounts the file.
 pub struct CsvStream {
     path: std::path::PathBuf,
     columns: Vec<String>,
     /// The byte offset of each record, in order: row `k` (1-based)
-    /// starts at `offsets[k - 1]`.
+    /// starts at `offsets[k - 1]`, counted from the data's start as
+    /// the reader counts.
     offsets: Vec<u64>,
     size: u64,
     delimiter: u8,
     decimal: Decimal,
     /// The cell texts read as null (`?null=`), beside the empty cell.
     nulls: Vec<String>,
-    reader: std::cell::RefCell<csv::Reader<std::io::BufReader<std::fs::File>>>,
+    reader: std::cell::RefCell<csv::Reader<quarb::source::Window>>,
     /// The row last parsed, by id, as the record the reader filled —
     /// one buffer, reused: a cell is read off it, nothing allocated
     /// per row beyond the parse.
@@ -551,7 +555,7 @@ impl CsvStream {
         by_extension: u8,
         options: CsvOptions,
     ) -> Result<Self, CsvError> {
-        use std::io::{Read, Seek};
+        use std::io::Read;
         let size = std::fs::metadata(path)?.len();
         // the head of the file: the `sep=` line and the delimiter check
         let head = {
@@ -602,12 +606,16 @@ impl CsvStream {
         if let Some(offset) = first_invalid_utf8(path)? {
             return Err(quarb::source::SourceError::NotUtf8 { offset }.into());
         }
-        let mut file = std::fs::File::open(path)?;
-        file.seek(std::io::SeekFrom::Start(data_start))?;
+        // the reader's own buffer is small: it is dropped at every
+        // seek and filled again from the window, which holds the file
         let mut reader = csv::ReaderBuilder::new()
             .delimiter(delimiter)
             .flexible(true)
-            .from_reader(std::io::BufReader::with_capacity(1 << 16, file));
+            .buffer_capacity(1 << 10)
+            .from_reader(quarb::source::Window::new(
+                std::fs::File::open(path)?,
+                data_start,
+            ));
         let columns: Vec<String> = reader
             .headers()?
             .iter()
@@ -617,7 +625,7 @@ impl CsvStream {
         let mut record = csv::ByteRecord::new();
         while reader.read_byte_record(&mut record)? {
             if let Some(pos) = record.position() {
-                offsets.push(data_start + pos.byte());
+                offsets.push(pos.byte());
             }
         }
         // the reader stands at the end; every read seeks first
@@ -666,9 +674,13 @@ impl CsvStream {
         let mut last = self.last.borrow_mut();
         let mut reader = self.reader.borrow_mut();
         // the row after the one last parsed is the stream's next
-        // record; any other, the reader seeks the file to its offset
-        // (the file's, whatever the open skipped — a BOM, a `sep=`
-        // line) and reads the one record there
+        // record; any other, the reader seeks to its offset and reads
+        // the one record there. The offset is the data's, as the
+        // reader's own position is: counted from the file's start it
+        // met the reader's position after the open's scan where a
+        // BOM or a `sep=` line stood before the data, the seek was
+        // taken for done, and a last row as long as what was skipped
+        // read as null when it was the first row read
         // a read that fails leaves no row held and no next row known
         let lost = |last: &mut (u64, csv::StringRecord)| {
             self.next.set(0);

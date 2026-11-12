@@ -283,6 +283,16 @@ fn envelope(
     envelope_refs(label, lines, note, error, Vec::new())
 }
 
+/// The envelope of a line that asks for the manual
+/// ([`quarb::man::line`]): the page's lines under no label, or the
+/// door's message as the error; `None` for any other line.
+fn manual(line: &str) -> Option<String> {
+    Some(match quarb::man::line(line)? {
+        Ok(text) => envelope("", text.lines().map(String::from).collect(), None, None),
+        Err(e) => envelope("", vec![], None, Some(e)),
+    })
+}
+
 /// [`envelope`], carrying the run's unresolved external
 /// references — the identifiers (URLs) the query referenced
 /// (`::href-->`) but could not reach. The host may acquire them,
@@ -489,6 +499,10 @@ impl QuaiSession {
         if t.is_empty() {
             return envelope("", vec![], None, None);
         }
+        // `man sort`: the manual, as on a line
+        if let Some(page) = manual(t) {
+            return page;
+        }
         // A notebook names its cell: the previous-line forms are the
         // interactive line's (ruling 2026-11-11).
         if let Some(why) = quarb::previous_line_in_a_file(t) {
@@ -542,6 +556,12 @@ impl QuaiSession {
         let line = line.trim();
         if line.is_empty() {
             return envelope("", vec![], None, None);
+        }
+        // `man sort`, `man @|`, `man syntax`: the manual. The page
+        // has no shell and no colon commands; this line is its door
+        // (the user, 2026-11-12). It is no query: it takes no label.
+        if let Some(page) = manual(line) {
+            return page;
         }
         // `&_` — the line before this one, `&-N` the line N back
         // (ruling 2026-11-11): resolved to the label it names before
@@ -669,6 +689,57 @@ mod tests {
             "{doc}"
         );
         assert!(rich_css().contains(".quarb-table th .type"));
+    }
+
+    /// `man sort` as a line and as a cell (the user, 2026-11-12): the
+    /// page has no shell and no colon commands, so the line is its
+    /// door to the manual. It is no query: no label, the history as
+    /// it was.
+    #[test]
+    fn man_is_a_line_of_the_session() {
+        let csv = "Port,Draught (m)\nPiraeus,18.5\nKoper,14\n";
+        let mut s = QuaiSession::new("csv", csv, 1_753_500_000_000.0).unwrap();
+        let read = |text: String| -> serde_json::Value { serde_json::from_str(&text).unwrap() };
+        let r = read(s.run("man upper"));
+        assert_eq!(r["label"], "", "{r}");
+        assert!(r["error"].is_null(), "{r}");
+        assert_eq!(r["lines"][0], "upper — the text in upper case", "{r}");
+        // a glyph, a pipe (its page, then its commands), the glyphs
+        let r = read(s.run("man <=>"));
+        assert_eq!(r["lines"][0], "<=> — correlation", "{r}");
+        let r = read(s.run("man '@|'"));
+        assert_eq!(r["lines"][0], "@| — aggregation pipe", "{r}");
+        assert!(
+            r["lines"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|l| l.as_str().unwrap().starts_with("tree ")),
+            "{r}"
+        );
+        let r = read(s.run("man syntax"));
+        assert!(r["lines"].as_array().unwrap().len() > 250, "{r}");
+        let r = read(s.run("man --ru upper"));
+        assert!(r["lines"][0].as_str().unwrap().contains("верхнем"), "{r}");
+        // a cell the same
+        let r = read(s.run_cell("man sort"));
+        assert!(
+            r["lines"][0].as_str().unwrap().starts_with("sort — "),
+            "{r}"
+        );
+        // a word the manual lacks is the error, and nothing else
+        let r = read(s.run("man qqqq"));
+        assert!(
+            r["error"].as_str().unwrap().contains("no command 'qqqq'"),
+            "{r}"
+        );
+        // no line of these took a label: the first query is &1
+        assert_eq!(s.line(), 1);
+        let r = read(s.run("/row @| count"));
+        assert_eq!(r["label"], "&1", "{r}");
+        // a query that only looks like it is still a query
+        let r = read(s.run("/row[::Port = \"man\"] @| count"));
+        assert_eq!(r["label"], "&2", "{r}");
     }
 
     /// `&_` and `&-N` (ruling 2026-11-11): the line form resolves

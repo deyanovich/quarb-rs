@@ -1395,7 +1395,7 @@ pub fn take_encoding_option(p: &Path, ctx: &SourceCtx) -> anyhow::Result<PathBuf
             Some(("null", label)) => set_csv_option(|c| c.with_null_label(label), ctx)?,
             _ => anyhow::bail!(
                 "unknown option {pair:?} on {path} — a file or folder takes encoding=, \
-                 delimiter=, decimal=, null="
+                 format=, delimiter=, decimal=, null="
             ),
         }
     }
@@ -1837,6 +1837,40 @@ pub struct OpenOpts {
     /// the one-off query's mount (`qua QUERY file.csv`); a session
     /// mounts the file whole and leaves this off.
     pub stream_rows: bool,
+    /// The size from which a JSON, JSON lines or XML file streams
+    /// ([`streams_document`]): `None` never (a session, `--no-stream`),
+    /// `Some(0)` always (`--stream`), [`STREAM_DOCUMENTS_FROM`] by
+    /// default.
+    pub stream_documents: Option<u64>,
+}
+
+/// The size from which a document of elements (a JSON document's
+/// array, JSON lines, an XML document's children) streams when
+/// nothing says otherwise (the user's ruling, 2026-11-12: "Size
+/// threshold"). A stream parses an element when a step reaches it
+/// and holds one: it wins where no element is read (a count, a
+/// slice: 0.07 s and 72 MB against 0.35 s and 700 MB over 48 MB of
+/// JSON) and loses as soon as they are, each step into an element
+/// parsing it again and an element alone costing two to three times
+/// its share of a whole parse (a three-step path: 2.7 s against
+/// 0.86 s). So a file reads whole, as before 0.53, until holding it
+/// would cost gigabytes: a whole read takes fifteen to nineteen
+/// times the file in memory.
+pub const STREAM_DOCUMENTS_FROM: u64 = 128 << 20;
+
+/// Whether a document file of `size` bytes streams under the mount's
+/// setting (`from`: [`OpenOpts::stream_documents`]).
+pub fn streams_document(size: u64, from: Option<u64>) -> bool {
+    from.is_some_and(|least| size >= least)
+}
+
+/// Whether the document file at `p` streams: its size against the
+/// mount's setting.
+fn document_streams(p: &Path, from: Option<u64>) -> bool {
+    from.is_some()
+        && std::fs::metadata(p)
+            .map(|m| streams_document(m.len(), from))
+            .unwrap_or(false)
 }
 
 /// Open any target qua speaks — filesystem paths, documents, and
@@ -3221,22 +3255,21 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
         let r = a.clone();
         return Ok(Mounted::of(a, Box::new(move |n| r.locator(n))));
     }
-    // A JSON document with one array streamed (hash (d) of the
-    // columnar round, 2026-11-06): the array at the root or under a
-    // root key, its elements parsed into their own arbors when a step
-    // reaches them, the rest of the document parsed whole; a document
-    // with no such array, or a small one, reads whole as before.
-    if cli.stream_rows
-        && p.is_file()
+    // A large JSON document with one array streamed (hash (d) of the
+    // columnar round, 2026-11-06; from a size since 2026-11-12,
+    // `STREAM_DOCUMENTS_FROM`, or under `--stream`): the array at the
+    // root or under a root key, its elements parsed into their own
+    // arbors when a step reaches them, the rest of the document
+    // parsed whole; a document with no such array, or a smaller
+    // one, reads whole.
+    if p.is_file()
+        && document_streams(p, cli.stream_documents)
         && ctx.encoding().is_none()
         && ctx.format().is_none()
         && p.extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("json"))
         && !has_wide_bom(p)
-        && std::fs::metadata(p)
-            .map(|m| m.len() >= 256 * 1024)
-            .unwrap_or(false)
         && let Some(a) =
             quarb_json::JsonArray::open(p, quarb_json::Reading::Node).context("parsing JSON")?
     {
@@ -3250,16 +3283,13 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
     // element itself and the prologue parsed whole; a vocabulary the
     // koine route knows (TEI, DocBook, …) reads at the text level as
     // before, and a document of another shape reads whole.
-    if cli.stream_rows
-        && p.is_file()
+    if p.is_file()
+        && document_streams(p, cli.stream_documents)
         && ctx.encoding().is_none()
         && ctx.format().is_none()
         && p.extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("xml"))
-        && std::fs::metadata(p)
-            .map(|m| m.len() >= 256 * 1024)
-            .unwrap_or(false)
         && xml_head_is_plain(p)
         && let Some(a) = quarb_xml::XmlStream::open(p).context("parsing XML")?
     {
@@ -3267,10 +3297,11 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
         let r = a.clone();
         return Ok(Mounted::of(a, Box::new(move |n| r.locator(n))));
     }
-    // JSONL streamed the same way (ruling 2026-11-05): a line parsed
-    // into its own arbor when a node of it is reached.
-    if cli.stream_rows
-        && p.is_file()
+    // A large JSONL file streamed the same way (ruling 2026-11-05;
+    // from the same size since 2026-11-12): a line parsed into its
+    // own arbor when a node of it is reached.
+    if p.is_file()
+        && document_streams(p, cli.stream_documents)
         && ctx.encoding().is_none()
         && ctx.format().is_none()
         && p.extension()
@@ -3399,4 +3430,32 @@ fn has_wide_bom(p: &Path) -> bool {
         .and_then(|mut f| f.read_exact(&mut head))
         .is_ok()
         && matches!(head, [0xFF, 0xFE] | [0xFE, 0xFF])
+}
+
+#[cfg(test)]
+mod stream_threshold_tests {
+    use super::{STREAM_DOCUMENTS_FROM, streams_document};
+
+    /// A document of elements streams from a size, always under
+    /// `--stream`, never under `--no-stream` or in a session.
+    #[test]
+    fn a_document_streams_from_a_size() {
+        let default = Some(STREAM_DOCUMENTS_FROM);
+        assert_eq!(STREAM_DOCUMENTS_FROM, 128 * 1024 * 1024);
+        // the file of the article (48 MB) and anything smaller: whole
+        for size in [0, 300 * 1024, 48 << 20, STREAM_DOCUMENTS_FROM - 1] {
+            assert!(!streams_document(size, default), "{size}");
+        }
+        for size in [STREAM_DOCUMENTS_FROM, 5 << 30] {
+            assert!(streams_document(size, default), "{size}");
+        }
+        // `--stream`: whatever the size
+        for size in [0, 10, 48 << 20, 5 << 30] {
+            assert!(streams_document(size, Some(0)), "{size}");
+        }
+        // `--no-stream`, a session: never
+        for size in [0, 48 << 20, 5 << 30] {
+            assert!(!streams_document(size, None), "{size}");
+        }
+    }
 }

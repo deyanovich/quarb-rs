@@ -19,7 +19,9 @@ queries against the session's mounts; a small directive family
   per notebook; needs the qua binary on PATH).
 - ``%use NAME`` — switch the default document.
 - ``%docs`` — list what's mounted; ``%docs NAME`` — a command's
-  page from the inventory (``%docs @|`` one pipe's commands).
+  page from the inventory (``%docs @|`` one pipe's commands). A
+  cell ``man NAME`` is the same page: ``man sort``, ``man <=>``,
+  ``man syntax``.
 - ``%translate LANG QUERY`` — show a jq / xpath / sql query as
   Quarb text.
 
@@ -138,6 +140,21 @@ def _make_kernel_class():
                         exec(body, self.pyns)  # noqa: S102 — user's own cell
                     if not silent and buf.getvalue():
                         self._send_text(buf.getvalue())
+                    return {
+                        "status": "ok",
+                        "execution_count": self.execution_count,
+                        "payload": [], "user_expressions": {},
+                    }
+                # `man sort`, `man @|`, `man syntax`: the manual, the
+                # line every session host takes (`%docs NAME` is the
+                # same text)
+                first = stripped.split(None, 1)[0] if stripped else ""
+                if first == "man" and "\n" not in stripped:
+                    from . import man
+
+                    words = [w.strip("'\"") or w for w in stripped.split()[1:]]
+                    if not silent:
+                        self._send_text(man(*words) + "\n")
                     return {
                         "status": "ok",
                         "execution_count": self.execution_count,

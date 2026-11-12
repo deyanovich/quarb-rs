@@ -207,10 +207,8 @@ fn eval_operand_in<H: Host>(
             };
             note_all(&recall_field_origins(scope.register, r, name));
             vec![match recall(scope.register, r) {
-                Value::Record(fields) => fields
-                    .into_iter()
-                    .find(|(k, _)| k == name)
-                    .map(|(_, v)| v)
+                Value::Record(fields) => crate::value::ambient::read_field(&fields, name)
+                    .cloned()
                     .unwrap_or(Value::Null),
                 // a table's column as the table answers it (the
                 // record keyed by the labels on an indexed table); a
@@ -2021,7 +2019,17 @@ pub(crate) fn label_lookup(
             for s in specs {
                 match s {
                     LabelSpec::One(k) => {
-                        if let Some(i) = find(k) {
+                        let hit = find(k);
+                        // one label alone is a read of that field,
+                        // tallied as `:name` is (UNKNOWN_FIELD)
+                        if specs.len() == 1 {
+                            crate::value::ambient::field_read(
+                                &r,
+                                &crate::value::Record::key_text(k),
+                                hit.is_some(),
+                            );
+                        }
+                        if let Some(i) = hit {
                             hits.push(i);
                         } else if specs.len() == 1 {
                             return Ok(Value::Null);

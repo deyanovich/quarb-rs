@@ -2059,6 +2059,16 @@ impl Exporter {
                                                 .into(),
                                         ));
                                     }
+                                    // a case order is that
+                                    // collation's (ruling 2026-11-12)
+                                    "--upper-first" | "-u" | "--lower-first" | "-l"
+                                    | "--ignore-case" | "-i" => {
+                                        return Err(SqlError::Semantics(
+                                            "sort_by's case order is the engine's collation's; \
+                                             a backend's differs"
+                                                .into(),
+                                        ));
+                                    }
                                     other => {
                                         return Err(SqlError::Unsupported(format!(
                                             "the '{other}' option of sort_by"
@@ -2096,6 +2106,19 @@ impl Exporter {
                                 ));
                             }
                             let kids = self.arbor.children(s);
+                            // the options name the engine's collation
+                            // and its case order: no backend's (they
+                            // were dropped, and the SQL ordered as the
+                            // backend pleased)
+                            if let Some(&k) = kids
+                                .get(2..)
+                                .and_then(|rest| rest.iter().find(|&&k| self.kind(k) == "option"))
+                            {
+                                return Err(SqlError::Semantics(format!(
+                                    "top({}) names the engine's collation; a backend's differs",
+                                    self.prop_s(k, "name")
+                                )));
+                            }
                             let n = self.prop_s(kids[0], "value");
                             let e = self.operand(kids[1], join.map(|(l, _)| l))?;
                             sel.order_by = Some((e, true));

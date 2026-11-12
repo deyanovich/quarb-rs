@@ -172,7 +172,8 @@ fn a_header_less_table_names_its_positions() {
 
 /// A record's missing field is null, and a row that has left its
 /// table is a record: taken out by position, as the first row, or
-/// with the rows as a list.
+/// with the rows as a list. (The null is told of when no record has
+/// the field: unknown_field.rs.)
 #[test]
 fn a_record_s_missing_field_stays_null() {
     assert_eq!(one("= %(a = 1) | :nosuch"), "null");

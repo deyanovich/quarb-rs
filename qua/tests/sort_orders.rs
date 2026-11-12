@@ -190,9 +190,9 @@ fn the_keyed_commands_take_a_locale() {
         r#"@("a"; "ä"; "z")"#
     );
     // the tag's shape is held at parse; equality takes no locale
-    let e = refused("/w/* @| sort_by(::name; --locale=C) | ::name");
+    let e = refused("/w/* @| sort_by(::name; --locale=x) | ::name");
     assert!(
-        e.contains("sort_by: 'C' is not a Unicode locale identifier"),
+        e.contains("sort_by: 'x' is not a Unicode locale identifier"),
         "{e}"
     );
     let e = refused("/w/* @| unique_by(::name; --locale=de) | ::name");

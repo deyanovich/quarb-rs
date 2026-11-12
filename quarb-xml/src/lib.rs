@@ -16,9 +16,11 @@
 //!   allow prefix-agnostic filtering (`//*[:::local-name =
 //!   "title"]`). The document root is unnamed; the document
 //!   element is its single child.
-//! - Nodes have no traits: XML has no universal structural
-//!   vocabulary, and leaf/container distinctions are already
-//!   available as core metadata (`:is-leaf`, `:n-children`).
+//! - The traits are few: the root wears `document`, every element
+//!   `element`, and a `table` element `tabula` as well. XML has no
+//!   universal structural vocabulary beyond that; the leaf and
+//!   container distinctions are core metadata (`:is-leaf`,
+//!   `:n-children`).
 //! - Attributes are properties: `::pages`, `::href`. The default
 //!   projection (`::`) and `::text` are the element's text
 //!   content; `:::tag`, `:::id`, `:::local-name`, `:::ns-prefix`,
@@ -469,7 +471,7 @@ pub struct XmlStream {
     /// `id` / `xml:id` values anywhere in the children → the child.
     ids: HashMap<String, u32>,
     last: std::cell::RefCell<Option<(u32, XmlAdapter)>>,
-    reader: std::cell::RefCell<(std::io::BufReader<std::fs::File>, u32)>,
+    reader: std::cell::RefCell<(quarb::source::Window, u32)>,
 }
 
 const CHILD_SHIFT: u32 = 32;
@@ -480,7 +482,6 @@ impl XmlStream {
     /// children, no children, or children under half the file),
     /// where the whole read is the right one.
     pub fn open(path: &std::path::Path) -> Result<Option<Self>, XmlError> {
-        use std::io::Seek;
         let bytes =
             std::fs::read(path).map_err(|e| quick_xml::Error::Io(std::sync::Arc::new(e)))?;
         let size = bytes.len() as u64;
@@ -630,12 +631,10 @@ impl XmlStream {
             .children(prefix.root())
             .first()
             .ok_or(XmlError::NoRoot)?;
-        let mut file = std::io::BufReader::with_capacity(
-            1 << 16,
+        let file = quarb::source::Window::new(
             std::fs::File::open(path).map_err(|e| quick_xml::Error::Io(std::sync::Arc::new(e)))?,
+            0,
         );
-        file.seek(std::io::SeekFrom::Start(0))
-            .map_err(|e| quick_xml::Error::Io(std::sync::Arc::new(e)))?;
         Ok(Some(XmlStream {
             size,
             prefix,

@@ -1,9 +1,11 @@
 //! Hash (d) of the columnar round (2026-11-06): a JSON document with
 //! one array — at the root, or under a key of the root object — is
-//! streamed under qua: the rest of the document parsed whole, the
+//! streamed under qua where it is large (128 MiB and up) or where
+//! `--stream` asks: the rest of the document parsed whole, the
 //! array's elements parsed into their own arbors as a step reaches
-//! them. The answers are the whole read's (`--no-stream`), compared
-//! here on a generated document above the streaming threshold.
+//! them. The answers are the whole read's (`--no-stream`, and the
+//! default for a file of this size), compared here on a generated
+//! document under `--stream`.
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -82,15 +84,62 @@ fn the_streamed_document_answers_as_the_whole_read() {
         ("/*[::author = \"Homer\"] @| count", "root.json"),
         ("//tags/* @| count", "root.json"),
         ("/*[3] | %", "root.json"),
+        // elements read out of the file's order: a fold's members
+        // group by group, an order by one field and a read of another
+        (
+            "/books/* | .a(::author) @|{.a} sum(--of=::price) | %($.a; p = $_)",
+            "keyed.json",
+        ),
+        (
+            "/books/* @| sort_by(::price) @| [..3] | ::title",
+            "keyed.json",
+        ),
+        ("/books/* @| reverse @| [..2] | ::title", "keyed.json"),
+        (
+            "/* | .a(::author) @|{.a} max_by(::price) | ::title",
+            "root.json",
+        ),
     ] {
-        let (a, ea, ga) = qua(&d, &[q, f]);
+        let (a, ea, ga) = qua(&d, &["--stream", q, f]);
         let (b, eb, gb) = qua(&d, &["--no-stream", q, f]);
         assert_eq!(ga, gb, "{q} on {f}: {ea} / {eb}");
         assert_eq!(a, b, "{q} on {f}");
     }
-    let (out, err, good) = qua(&d, &["/books/* @| count", "keyed.json"]);
+    let (out, err, good) = qua(&d, &["--stream", "/books/* @| count", "keyed.json"]);
     assert!(good, "{err}");
     assert_eq!(out, "6000");
-    let (out, _, _) = qua(&d, &["/*[::author = \"Homer\"] @| count", "root.json"]);
+    let (out, _, _) = qua(
+        &d,
+        &["--stream", "/*[::author = \"Homer\"] @| count", "root.json"],
+    );
     assert_eq!(out, "1200");
+}
+
+/// A file of this size reads whole unless `--stream` asks (the
+/// user's ruling, 2026-11-12: a document of elements streams from
+/// 128 MiB): the default answers as `--no-stream` does, and the two
+/// flags are one choice.
+#[test]
+fn the_default_reads_a_document_of_this_size_whole() {
+    let d = fixture();
+    for q in [
+        "/books/* @| count",
+        "/books/*/tags/* @| count",
+        "/books/*[::year > 1800] | ::title | first",
+    ] {
+        let (plain, ep, gp) = qua(&d, &[q, "keyed.json"]);
+        let (whole, _, gw) = qua(&d, &["--no-stream", q, "keyed.json"]);
+        let (streamed, _, gs) = qua(&d, &["--stream", q, "keyed.json"]);
+        assert!(gp && gw && gs, "{q}: {ep}");
+        assert_eq!(plain, whole, "{q}");
+        assert_eq!(plain, streamed, "{q}");
+    }
+    let (_, err, good) = qua(
+        &d,
+        &["--stream", "--no-stream", "/books/* @| count", "keyed.json"],
+    );
+    assert!(
+        !good && err.contains("'--stream' cannot be used with '--no-stream'"),
+        "{err}"
+    );
 }

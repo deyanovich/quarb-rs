@@ -303,19 +303,27 @@ fn a_streamed_csv_refuses_a_byte_that_is_not_utf8() {
 
 /// A streamed JSON line that does not parse refuses the query that
 /// reaches it, as the whole reading refuses the file (front ends
-/// B4): it answered a node of nulls under the root's locator.
+/// B4): it answered a node of nulls under the root's locator. Both
+/// readings name the file's line; the whole one, the default for a
+/// file under the stream's size, said "line 1" of every bad line.
 #[test]
 fn a_streamed_json_line_that_does_not_parse_is_refused() {
     let d = fixture("jsonl");
     std::fs::write(
         d.join("bad.jsonl"),
-        "{\"t\":\"Iliad\"}\n{\"t\":\"Odyssey\",,}\n{\"t\":\"Aeneid\"}\n",
+        "{\"t\":\"Iliad\"}\n\n{\"t\":\"Odyssey\",,}\n{\"t\":\"Aeneid\"}\n",
     )
     .unwrap();
-    let whole = refused(&d, &["--no-stream", "/*::t", "bad.jsonl"]);
-    assert!(!whole.is_empty());
-    let streamed = refused(&d, &["/*::t", "bad.jsonl"]);
-    assert!(streamed.contains("line 2"), "{streamed}");
+    // the third line of the file: a blank one stands before it
+    for flags in [&["--no-stream"][..], &[], &["--stream"]] {
+        let mut args = flags.to_vec();
+        args.extend(["/*::t", "bad.jsonl"]);
+        let message = refused(&d, &args);
+        assert!(
+            message.contains("line 3: key must be a string at column 16"),
+            "{flags:?}: {message}"
+        );
+    }
 }
 
 /// `?autounits` decides a column on its first cell that says

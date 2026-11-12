@@ -1725,7 +1725,7 @@ fn group_promise(adapter: &impl AstAdapter, group: &Group) -> Option<String> {
 
 /// The nearest names first, and no more than a message holds: what
 /// a surface has, for the warning that names it.
-fn surface_names(have: &[String], asked: &str) -> String {
+pub(crate) fn surface_names(have: &[String], asked: &str) -> String {
     const SHOWN: usize = 16;
     if have.is_empty() {
         return "none".to_string();

@@ -157,6 +157,43 @@ pub(crate) struct Ambient {
     /// What the run's tests of presence met, by name, in the order
     /// first tested: the verdict falls when the run ends.
     pub(crate) tested: Vec<Tested>,
+    /// The field names the run read on records, in the order first
+    /// read: a name no record read under it has is told of when the
+    /// run ends ([`read_field`]).
+    pub(crate) fields: Vec<FieldRead>,
+}
+
+/// One field name the run read on records.
+#[derive(Default)]
+pub(crate) struct FieldRead {
+    name: String,
+    /// Whether a record read under the name has the field.
+    found: bool,
+    /// The fields of the first records that lack it, in the order
+    /// met: what the warning names.
+    there: Vec<String>,
+    /// How many records gave their fields to `there`.
+    sampled: u8,
+}
+
+impl FieldRead {
+    /// The records whose fields a warning draws on, and the names it
+    /// holds at most: a stream of a million records lacking the field
+    /// is a counter after these.
+    const SAMPLED: u8 = 32;
+    const HELD: usize = 64;
+
+    fn warning(&self) -> Diagnostic {
+        let name = &self.name;
+        Diagnostic::warning(
+            crate::diagnostic::UNKNOWN_FIELD,
+            format!(":{name}"),
+            format!(
+                "no record read here has the field '{name}'; the fields there: {}",
+                crate::graph::steps::surface_names(&self.there, name)
+            ),
+        )
+    }
 }
 
 /// One name the run tested for presence.
@@ -261,6 +298,18 @@ impl Drop for AmbientGuard {
                         done.diagnostics.push(d);
                     }
                 }
+            }
+            // the verdict of the field reads: a name no record read
+            // under it has, one warning each, after the answers; a
+            // run that refused has its error to tell
+            let fields = std::mem::take(&mut done.fields);
+            if done.refusal.is_none() {
+                let unknown: Vec<Diagnostic> = fields
+                    .iter()
+                    .filter(|f| !f.found)
+                    .map(FieldRead::warning)
+                    .collect();
+                done.diagnostics.extend(unknown);
             }
             FINISHED.with(|f| *f.borrow_mut() = done);
         }
@@ -394,6 +443,52 @@ pub(crate) fn presence_found(name: &str) {
         match a.tested.iter_mut().find(|t| t.name == name) {
             Some(t) => t.found = true,
             None => a.tested(name).found = true,
+        }
+    });
+}
+/// The field of `record` under `name`, for a read the query wrote
+/// (`:name` on a record, `$.r:name`, `r["name"]`): the answer is the
+/// field or nothing, as ever, and the read is tallied. A name that no
+/// record read under it has is a warning when the run ends, naming
+/// the fields the records have (UNKNOWN_FIELD, ruling 2026-11-11: a
+/// record's missing field is null, and no longer in silence); where
+/// one record has it the others' nulls are the data's.
+pub(crate) fn read_field<'a>(
+    record: &'a crate::value::Record,
+    name: &str,
+) -> Option<&'a crate::value::Value> {
+    let read = record.get(name);
+    field_read(record, name, read.is_some());
+    read
+}
+/// Tally one read of `name` on `record` for the run's verdict
+/// ([`read_field`]): `found` is whether the record has the field (a
+/// label lookup finds a key as a value, `r[[k]]`).
+pub(crate) fn field_read(record: &crate::value::Record, name: &str, found: bool) {
+    with_ambient(|a| {
+        let i = match a.fields.iter().position(|f| f.name == name) {
+            Some(i) => i,
+            None => {
+                a.fields.push(FieldRead {
+                    name: name.to_string(),
+                    ..FieldRead::default()
+                });
+                a.fields.len() - 1
+            }
+        };
+        let f = &mut a.fields[i];
+        if found {
+            f.found = true;
+        } else if !f.found && f.sampled < FieldRead::SAMPLED {
+            f.sampled += 1;
+            for (k, _) in record {
+                if f.there.len() >= FieldRead::HELD {
+                    break;
+                }
+                if !f.there.iter().any(|t| t == k) {
+                    f.there.push(k.clone());
+                }
+            }
         }
     });
 }
