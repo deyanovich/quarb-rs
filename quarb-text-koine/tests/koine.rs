@@ -106,6 +106,32 @@ fn a_dialektos_definition_refuses() {
     }
 }
 
+/// A YAML header on the koine route: off before the import, which
+/// read it as a rule and a heading, and on the document node as on
+/// the text level.
+#[test]
+fn a_markdown_header_is_declared_identity_on_the_koine_route() {
+    let m = quarb_text_koine::parse_markdown(
+        "---\ntitle: The Iliad\nauthor: Homer\ntags: [epic, greek]\nbooks: 24\n\
+         date: 2026-03-01\n---\n\n# Book I\n\nSing, goddess.\n",
+    )
+    .unwrap();
+    assert_eq!(values(&m, "^::title"), ["The Iliad"]);
+    assert_eq!(values(&m, "^::author"), ["Homer"]);
+    assert_eq!(
+        values(&m, "^ | %(::tags)"),
+        [r#"%(tags = @("epic"; "greek"))"#]
+    );
+    assert_eq!(values(&m, "^::published"), ["2026-03-01"]);
+    assert_eq!(values(&m, "^ | :::books"), ["24"]);
+    assert_eq!(
+        values(&m, "^ | %(:traits)"),
+        [r#"%(traits = @("document"; "tag:epic"; "tag:greek"))"#]
+    );
+    assert_eq!(values(&m, "//section::lemma"), ["Book I"]);
+    assert_eq!(values(&m, "//paragraph::"), ["Sing, goddess."]);
+}
+
 /// Markdown through atrep's endomorphosis: at-markdown's flat
 /// heading endos carry their level in the name, flat item runs
 /// wrap into lists, fence info strings become :::lang.

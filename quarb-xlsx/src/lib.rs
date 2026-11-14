@@ -1,12 +1,16 @@
 //! Spreadsheet adapter for the Quarb query engine.
 //!
-//! Workbooks (`.xlsx`, `.xls`, `.ods`) map onto the relational
+//! Workbooks (`.xlsx`, `.xls`, `.ods`, and Excel's `.xlsm`, `.xlsb`,
+//! `.xlam`) map onto the relational
 //! model's shape: each sheet is a table, its first row the column
 //! headers, every following row a node named by its spreadsheet
 //! row number (2, 3, ...), cells as properties typed by what the
 //! cell holds (numbers arrive numeric, not stringly). No keys, no
-//! foreign keys — a spreadsheet declares none — but the `-->` hint
-//! form and a `--refs` document work as on any schemaless source.
+//! foreign keys — a spreadsheet declares none — so a row's key is
+//! its row number. The `-->` hint form works as on any schemaless
+//! source, and a `--model` file declares the references a workbook
+//! has (`ref … --> /sheet/*[::id = $] as name;`); a `--refs`
+//! document is not read for a workbook.
 //!
 //! Headerless or ragged sheets get positional column names
 //! (`c1`, `c2`, ...) where a header cell is empty or duplicated.
@@ -64,13 +68,45 @@ fn cell_value(d: &Data) -> Value {
 impl XlsxAdapter {
     /// Open a workbook; every sheet becomes a table.
     pub fn open(path: &std::path::Path) -> Result<Self, XlsxError> {
-        let mut wb =
+        let wb =
             calamine::open_workbook_auto(path).map_err(|e| XlsxError::Calamine(e.to_string()))?;
+        Self::build(wb)
+    }
+
+    /// A workbook held in memory.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, XlsxError> {
+        let wb = calamine::open_workbook_auto_from_rs(std::io::Cursor::new(bytes.to_vec()))
+            .map_err(|e| XlsxError::Calamine(e.to_string()))?;
+        Self::build(wb)
+    }
+
+    fn build<RS: std::io::Read + std::io::Seek>(
+        mut wb: calamine::Sheets<RS>,
+    ) -> Result<Self, XlsxError> {
         let mut tables = Vec::new();
-        let sheet_names = wb.sheet_names().to_vec();
+        // Only a worksheet is a table: a chart sheet, a macro sheet
+        // or a dialog sheet holds none and is left out without a
+        // word. (An OpenDocument sheet is always a worksheet.)
+        let sheet_names: Vec<String> = wb
+            .sheets_metadata()
+            .iter()
+            .filter(|s| s.typ == calamine::SheetType::WorkSheet)
+            .map(|s| s.name.clone())
+            .collect();
         for sheet in sheet_names {
-            let Ok(range) = wb.worksheet_range(&sheet) else {
-                continue;
+            let range = match wb.worksheet_range(&sheet) {
+                Ok(range) => range,
+                // A worksheet the reader fails on is left out, and
+                // the mount says so: a table missing from the file
+                // is not a thing to learn from a count.
+                Err(e) => {
+                    quarb::raise_at_mount(quarb::Diagnostic::warning(
+                        quarb::diagnostic::UNREADABLE_SHEET,
+                        "mount",
+                        format!("the sheet '{sheet}' could not be read and is left out: {e}"),
+                    ));
+                    continue;
+                }
             };
             let mut rows_iter = range.rows();
             // Headers from the first row; empty/duplicate cells

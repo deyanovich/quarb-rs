@@ -31,6 +31,25 @@ thread_local! {
     static SENTENCE_BONDS: RefCell<Option<Rc<dyn SentenceBonds>>> = const { RefCell::new(None) };
     static AMBIENTS: RefCell<Vec<Ambient>> = const { RefCell::new(Vec::new()) };
     static FINISHED: RefCell<Ambient> = RefCell::new(Ambient::default());
+    /// What sources had to tell when they were mounted, until a run
+    /// ends and tells it ([`raise_at_mount`]).
+    static AT_MOUNT: RefCell<Vec<Diagnostic>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Raise a diagnostic outside a run: what a source has to tell when
+/// it is mounted (a sheet of a workbook it could not read). No run
+/// is open then to carry it, and one recorded on the last run's
+/// record would be dropped by the next. A host takes these with
+/// [`take_at_mount`] where it reports a run's diagnostics and tells
+/// them in front of the run's own, once: the tools and the session
+/// do; a parse or a run a host reports nothing of leaves them be.
+pub fn raise_at_mount(d: Diagnostic) {
+    AT_MOUNT.with(|m| m.borrow_mut().push(d));
+}
+
+/// Take what the mounts raised and no run has told yet.
+pub fn take_at_mount() -> Vec<Diagnostic> {
+    AT_MOUNT.with(|m| std::mem::take(&mut *m.borrow_mut()))
 }
 
 /// The invocation instant, pinned once by the tool layer (`qua

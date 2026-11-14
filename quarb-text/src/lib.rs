@@ -394,7 +394,16 @@ impl CastRow {
     /// word — with every
     /// other column kept as the character's fields.
     pub fn read_csv(path: &str) -> Result<Vec<CastRow>, String> {
-        let mut reader = csv::Reader::from_path(path).map_err(|e| e.to_string())?;
+        Self::read(csv::Reader::from_path(path).map_err(|e| e.to_string())?)
+    }
+
+    /// The same table from its text: a host that holds the file's
+    /// contents and no path (a browser).
+    pub fn read_csv_text(text: &str) -> Result<Vec<CastRow>, String> {
+        Self::read(csv::Reader::from_reader(text.as_bytes()))
+    }
+
+    fn read<R: std::io::Read>(mut reader: csv::Reader<R>) -> Result<Vec<CastRow>, String> {
         let headers: Vec<String> = reader
             .headers()
             .map_err(|e| e.to_string())?
@@ -1219,6 +1228,11 @@ pub struct HeadMeta {
     /// Every declaration, name → values, in document order; a
     /// repeated name accumulates.
     pub declared: Vec<(String, Vec<String>)>,
+    /// The declarations of a source whose values have types (a
+    /// Markdown note's YAML header): name → value as declared, a
+    /// number a number, a list a list, a mapping a record. Answered
+    /// before `declared` under the same name.
+    pub typed: Vec<(String, Value)>,
     pub title: Option<String>,
     pub description: Option<String>,
     pub author: Option<String>,
@@ -1252,9 +1266,90 @@ impl HeadMeta {
         self.tags.push(tag);
     }
 
-    /// A declaration's value: the string when declared once, the
-    /// list when repeated.
+    /// What a YAML header declares (a Markdown note's front matter),
+    /// in the two layers an HTML head has. The lossless layer is
+    /// every key under its own name with its value as written, types
+    /// kept. The curated core reads the keys the static-site and
+    /// note-taking conventions share:
+    ///
+    /// - `title`, `description`, `author` (a list of authors joined
+    ///   with commas), each a text;
+    /// - `tags`, also `keywords`: a list, or one text split at
+    ///   commas; each tag is a trait of the document too;
+    /// - `category`, or `categories` when it holds exactly one;
+    /// - `published` from `date`, `published` or `created`, and
+    ///   `modified` from `modified`, `updated`, `lastmod` or
+    ///   `last_modified_at`: the first of them that reads as an ISO
+    ///   date or timestamp (so Jekyll's `published: false` is no
+    ///   date and stays a boolean of the lossless layer).
+    pub fn from_header(entries: Vec<(String, Value)>) -> HeadMeta {
+        fn text(v: &Value) -> Option<String> {
+            let s = match v {
+                Value::Str(s) => normalize_ws(s),
+                Value::Int(_) | Value::Float(_) => v.to_string(),
+                _ => return None,
+            };
+            (!s.is_empty()).then_some(s)
+        }
+        fn texts(v: &Value) -> Vec<String> {
+            match v {
+                Value::List(items) => items.iter().filter_map(text).collect(),
+                Value::Str(s) => s
+                    .split(',')
+                    .map(normalize_ws)
+                    .filter(|t| !t.is_empty())
+                    .collect(),
+                _ => Vec::new(),
+            }
+        }
+        fn instant(v: &Value) -> Option<Value> {
+            let Value::Str(s) = v else { return None };
+            quarb::temporal::parse_iso(s.trim()).map(|(secs, nanos, offset_min)| Value::Instant {
+                secs,
+                nanos,
+                offset_min,
+                calendar: Default::default(),
+            })
+        }
+        let mut h = HeadMeta::default();
+        let get = |name: &str| entries.iter().find(|(k, _)| k == name).map(|(_, v)| v);
+        h.title = get("title").and_then(text);
+        h.description = get("description").and_then(text);
+        h.author = get("author").and_then(|v| match v {
+            Value::List(_) => {
+                let all = texts(v);
+                (!all.is_empty()).then(|| all.join(", "))
+            }
+            other => text(other),
+        });
+        for key in ["tags", "keywords"] {
+            for t in get(key).map(texts).unwrap_or_default() {
+                h.tag(&t);
+            }
+        }
+        h.category = get("category").and_then(text).or_else(|| {
+            match get("categories").map(texts)?.as_slice() {
+                [one] => Some(one.clone()),
+                _ => None,
+            }
+        });
+        h.published = ["date", "published", "created"]
+            .iter()
+            .find_map(|k| get(k).and_then(instant));
+        h.modified = ["modified", "updated", "lastmod", "last_modified_at"]
+            .iter()
+            .find_map(|k| get(k).and_then(instant));
+        h.typed = entries;
+        h
+    }
+
+    /// A declaration's value: as declared where the source has
+    /// types; else the string when declared once, the list when
+    /// repeated.
     pub fn declared_value(&self, name: &str) -> Option<Value> {
+        if let Some((_, v)) = self.typed.iter().find(|(k, _)| k == name) {
+            return Some(v.clone());
+        }
         let (_, vs) = self.declared.iter().find(|(k, _)| k == name)?;
         Some(match vs.as_slice() {
             [one] => Value::Str(one.clone()),

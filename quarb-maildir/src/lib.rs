@@ -15,8 +15,10 @@
 //!
 //! Messages expose their headers as properties, lowercased
 //! (`::subject`, `::from`, `::to`, `::date`, `::in-reply-to`,
-//! `::message-id`, ...) with RFC 2047 left as-is (v1); the body
-//! is the node's value (`::`). For multipart messages the body is
+//! `::message-id`, ...), RFC 2047 encoded words decoded
+//! (`=?utf-8?B?…?=` reads as its text); `| %` is the record of
+//! them, a header that occurs twice read as its first occurrence.
+//! The body is the node's value (`::`). For multipart messages the body is
 //! the raw MIME body — as stored, not pretty; a `text/plain` part
 //! extractor is a recorded refinement. `:::n-messages` on the
 //! root; `<message>` trait; `:::epoch` parses the `Date` header
@@ -438,6 +440,26 @@ impl AstAdapter for MaildirAdapter {
     /// `::in-reply-to`, ...
     fn property(&self, node: NodeId, name: &str) -> Option<Value> {
         self.header(node, name).map(|v| Value::Str(v.to_string()))
+    }
+
+    /// The names of a message's headers, in the message's own
+    /// order: what `| %` lists and `:props` names (they answered
+    /// nothing, the headers answering by name alone). A header that
+    /// occurs more than once is one name, read as its first
+    /// occurrence, as `::received` reads it; `:::n-headers` counts
+    /// them all. The serializers are untouched: a message is still
+    /// its body to `| json`.
+    fn property_names(&self, node: NodeId) -> Vec<String> {
+        let Some(m) = self.msg(node) else {
+            return Vec::new();
+        };
+        let mut out: Vec<String> = Vec::new();
+        for (k, _) in &m.headers {
+            if !out.contains(k) {
+                out.push(k.clone());
+            }
+        }
+        out
     }
 
     /// The message body.

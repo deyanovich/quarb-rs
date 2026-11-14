@@ -260,7 +260,8 @@ fn property_value(value: &Cbor) -> Value {
 }
 
 /// The property reading: containers are nodes, scalars are values
-/// on them — the JSON adapter's `json2`, over CBOR.
+/// on them — the JSON adapter's second reading, over CBOR
+/// (`cbor2:FILE`).
 fn build_property(
     value: &Cbor,
     name: Option<String>,
@@ -341,8 +342,8 @@ impl CborAdapter {
         Self::parse_as(bytes, Reading::Node)
     }
 
-    /// Decode under the given reading (`json2` is the property
-    /// reading).
+    /// Decode under the given reading (the property reading is
+    /// `cbor2:FILE`).
     pub fn parse_as(bytes: &[u8], reading: Reading) -> Result<Self, CborError> {
         let value: Cbor =
             ciborium::from_reader(bytes).map_err(|e| CborError::Decode(e.to_string()))?;

@@ -149,6 +149,13 @@ pub fn read_source(
     Ok(source_decoding(explicit).and_then(|d| d.decode(name, &bytes)))
 }
 
+/// The bytes of an archive's member: the hook an archive mount and
+/// every archive grafted inside another hand to
+/// [`ComposeAdapter::with_source_bytes`].
+pub fn archive_member_bytes(a: &quarb_archive::ArchiveAdapter, node: NodeId) -> Option<Vec<u8>> {
+    a.member_bytes(node)
+}
+
 /// Whether a leaf's name says archive: the one list quarb-archive
 /// keeps.
 fn archive_name(name: &str) -> bool {
@@ -229,7 +236,11 @@ pub fn self_declared(content: &str) -> Option<&'static str> {
     if t.starts_with("<?xml") {
         return Some("xml");
     }
-    if t.len() >= 9 && t[..9].eq_ignore_ascii_case("<!doctype") {
+    // by `get`: the ninth byte of a text that opens with a curly
+    // quote is no character boundary, and a cut there panics
+    if t.get(..9)
+        .is_some_and(|w| w.eq_ignore_ascii_case("<!doctype"))
+    {
         let rest = t[9..].trim_start();
         return Some(
             if rest.len() >= 4 && rest[..4].eq_ignore_ascii_case("html") {
@@ -443,6 +454,10 @@ pub struct ComposeAdapter<A: AstAdapter> {
     /// substrate has one. Enables archive grafts, which are
     /// binary and open by path rather than parsing from text.
     source_path: Option<fn(&A, NodeId) -> Option<PathBuf>>,
+    /// Maps an outer leaf to its bytes, when the outer substrate
+    /// holds them and has no path to give (a member of an archive).
+    /// Enables the graft of an archive inside an archive.
+    source_bytes: Option<fn(&A, NodeId) -> Option<Vec<u8>>>,
     /// The level source-file leaves graft at.
     source_graft: SourceGraft,
     /// The level marked-up documents graft at.
@@ -500,6 +515,7 @@ impl<A: AstAdapter> ComposeAdapter<A> {
             interned: RefCell::new(HashMap::new()),
             reverse: RefCell::new(Vec::new()),
             source_path: None,
+            source_bytes: None,
             source_graft: SourceGraft::default(),
             document_graft: DocumentGraft::default(),
             document_url: None,
@@ -626,6 +642,14 @@ impl<A: AstAdapter> ComposeAdapter<A> {
             source_path: Some(source_path),
             ..Self::new(outer)
         }
+    }
+
+    /// A hook mapping outer leaves to their bytes (builder-style):
+    /// an archive leaf with no filesystem path, a member of an
+    /// archive, grafts from them, and composes in turn.
+    pub fn with_source_bytes(mut self, bytes: fn(&A, NodeId) -> Option<Vec<u8>>) -> Self {
+        self.source_bytes = Some(bytes);
+        self
     }
 
     /// The wrapped adapter (for outer-specific calls).
@@ -894,14 +918,35 @@ impl<A: AstAdapter> ComposeAdapter<A> {
                 return Some(grafts.len() - 1);
             }
             let name = self.outer.name(node)?;
+            // An archive leaf: opened by its path where the substrate
+            // has one (a folder's file), else from its bytes where it
+            // holds them (a member of an archive: a zip inside a zip).
+            // The grafted archive composes in turn, and hands its
+            // own members' bytes on, so the nesting has no fixed
+            // depth.
+            let nested = || {
+                if let Some(path_of) = self.source_path
+                    && let Some(path) = path_of(&self.outer, node)
+                {
+                    return quarb_archive::ArchiveAdapter::open_with_decoding(
+                        &path,
+                        self.decoding.clone(),
+                    )
+                    .ok();
+                }
+                let bytes = self.source_bytes?(&self.outer, node)?;
+                quarb_archive::ArchiveAdapter::from_bytes_with_decoding(
+                    &bytes,
+                    self.decoding.clone(),
+                )
+                .ok()
+            };
             if archive_name(&name)
-                && let Some(path_of) = self.source_path
-                && let Some(path) = path_of(&self.outer, node)
-                && let Ok(a) =
-                    quarb_archive::ArchiveAdapter::open_with_decoding(&path, self.decoding.clone())
+                && let Some(a) = nested()
             {
                 let inner = Inner::Archive(Box::new(
                     ComposeAdapter::new(a)
+                        .with_source_bytes(archive_member_bytes)
                         .with_source_graft(self.source_graft)
                         .with_document_graft(self.document_graft)
                         .with_decoding(self.decoding.clone())
@@ -1077,8 +1122,15 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
                 if !named.is_empty() {
                     return named;
                 }
+                // (or an archive leaf the substrate holds the bytes of:
+                // it has no text, and its members are its children)
+                let holds_archive = || {
+                    self.source_bytes.is_some()
+                        && self.outer.name(node).is_some_and(|n| archive_name(&n))
+                };
                 if self.source_path.is_none()
                     && !matches!(self.outer.default_value(node), Some(Value::Str(_)))
+                    && !holds_archive()
                 {
                     return Vec::new();
                 }

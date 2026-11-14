@@ -93,6 +93,26 @@ fn the_html_part_reads_as_html_through_the_graft() {
     );
 }
 
+/// The envelope is read whole, so it is held to the bound a tar and
+/// a 7z are: past it the open is refused, the file named.
+#[test]
+fn an_envelope_past_the_bound_is_refused() {
+    let dir = std::env::temp_dir().join(format!("quarb-mhtml-bound-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("dead-souls.mhtml");
+    std::fs::write(&path, mhtml()).unwrap();
+    let err = ArchiveAdapter::open_bounded(&path, Default::default(), 64)
+        .err()
+        .map(|e| e.to_string())
+        .unwrap();
+    assert!(
+        err.contains("dead-souls.mhtml") && err.contains("exceed 64 bytes decompressed"),
+        "{err}"
+    );
+    assert!(ArchiveAdapter::open_bounded(&path, Default::default(), 1 << 20).is_ok());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_file_that_is_no_envelope_is_refused() {
     let dir = tempfile::tempdir().unwrap();

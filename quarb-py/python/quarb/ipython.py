@@ -59,7 +59,15 @@ def load_ipython_extension(ipython):
 
         @line_magic
         def quarb(self, line):
-            """%quarb QUERY — run against the default document."""
+            """%quarb QUERY — run against the default document.
+
+            A mount line (``%quarb mount NAME: ?options``) reads a
+            mounted source again under the options.
+            """
+            remount = Session.remount_statements(line)
+            if remount is not None:
+                self.session.remount(remount)
+                return None
             return self.session.run(line)
 
         @cell_magic("quarb")
@@ -71,6 +79,10 @@ def load_ipython_extension(ipython):
             later ``%quarb`` / ``%%quarb`` cell.
             """
             body = cell.strip()
+            remount = Session.remount_statements(body)
+            if remount is not None:
+                self.session.remount(remount)
+                return None
             if Session.is_defs(body):
                 print(self.session.add_defs(body))
                 return None

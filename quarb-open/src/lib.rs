@@ -1,7 +1,8 @@
 //! `quarb-open` — one `open` for every target the Quarb tools
 //! speak: filesystem paths, documents by extension or content,
 //! the reading prefixes (`text:`, `corpus:`, `lit:`, `koine:`,
-//! `code:`, `web:`, `lines:`, `json2:`), archives, databases and
+//! `code:`, `web:`, `lines:`, `json2:` and its twins `yaml2:`,
+//! `toml2:`, `cbor2:`), archives, databases and
 //! the adapter-scheme fleet (`gcl:`, `kafka:`, `neo4j://`, …).
 //! The CLI, the session (quai, the Python package) and every
 //! other front-end mount through [`open_target`], so a target
@@ -13,6 +14,8 @@
 //! delimited files, `?references=STANDARD` for a text reading,
 //! and the record of the decoding a read made goes on the
 //! mount's root as `:::encoding` / `:::replaced`.
+
+pub mod offline;
 
 use anyhow::Context;
 use quarb::{AstAdapter, NodeId};
@@ -220,11 +223,21 @@ pub fn is_archive(path: &Path) -> bool {
     if known_text_ext(path) {
         return false;
     }
-    let mut buf = [0u8; 2];
-    std::fs::File::open(path)
-        .and_then(|mut f| std::io::Read::read(&mut f, &mut buf))
-        .map(|n| n == 2 && (buf == *b"PK" || buf == [0x1f, 0x8b]))
-        .unwrap_or(false)
+    // By its first bytes under any other name: the magic of a zip, a
+    // compressed stream, a 7z, a RAR, a CHM, or a tar's header block
+    // (`backup.dat`).
+    let mut buf = [0u8; 512];
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut got = 0;
+    while got < buf.len() {
+        match std::io::Read::read(&mut f, &mut buf[got..]) {
+            Ok(0) | Err(_) => break,
+            Ok(k) => got += k,
+        }
+    }
+    quarb_archive::sniff(&buf[..got])
 }
 
 /// Whether the input is a SQLite database: by extension
@@ -797,24 +810,54 @@ pub fn koine_level_inner(spec: &str, ctx: &SourceCtx) -> anyhow::Result<quarb_te
 /// Markdown, LaTeX, atrep, TEI and the other koine dialects,
 /// .docx and .epub. An archive keeps to `text:` for now, and a
 /// PDF's reading is line geometry, never prose.
-/// A document under the property reading (`json2:`).
+/// A document under the property reading (`json2:`, `yaml2:`,
+/// `toml2:`, `cbor2:`).
 pub enum PropertyDoc {
     Json(JsonAdapter),
     Cbor(quarb_cbor::CborAdapter),
 }
 
-/// Read `target` under the property reading: the format by
-/// extension (JSON by default; JSONL, YAML, TOML, CBOR by theirs),
-/// every one of them the JSON data model read the `json2` way —
-/// containers as nodes, scalars as properties.
-pub fn property_reading(target: &Path, ctx: &SourceCtx) -> anyhow::Result<PropertyDoc> {
+/// The prefixes of the property reading, each named for the notation
+/// it reads (ruling 2026-11-12: "if we need a second reading on yaml,
+/// that should be yaml2, and part of quarb-yaml"; `json2:` is JSON's
+/// and JSON lines').
+pub const PROPERTY_PREFIXES: [&str; 4] = ["json2", "yaml2", "toml2", "cbor2"];
+
+/// Read `target` under the property reading the prefix names: every
+/// one of them the JSON data model with containers as nodes and
+/// scalars as properties. The prefix names the notation: `json2:`
+/// reads JSON (JSON lines by its extension, or where the text is no
+/// one document), `yaml2:` YAML, `toml2:` TOML, `cbor2:` CBOR. A
+/// file whose extension names another of the four is refused under
+/// `json2:`, naming its own prefix: a user is not made to write
+/// `json2:file.yaml`.
+pub fn property_reading(
+    prefix: &str,
+    target: &Path,
+    ctx: &SourceCtx,
+) -> anyhow::Result<PropertyDoc> {
     use quarb_json::Reading;
     let ext = target
         .extension()
         .and_then(|e| e.to_str())
         .map(|e| e.to_ascii_lowercase())
         .unwrap_or_default();
-    if ext == "cbor" {
+    if prefix == "json2" {
+        let own = match ext.as_str() {
+            "yaml" | "yml" => Some(("YAML", "yaml2")),
+            "toml" => Some(("TOML", "toml2")),
+            "cbor" => Some(("CBOR", "cbor2")),
+            _ => None,
+        };
+        if let Some((what, right)) = own {
+            anyhow::bail!(
+                "json2: reads JSON and JSON lines; '{}' is {what}: write '{right}:{}'",
+                target.display(),
+                target.display()
+            );
+        }
+    }
+    if prefix == "cbor2" {
         let bytes =
             std::fs::read(target).with_context(|| format!("reading {}", target.display()))?;
         let a =
@@ -822,10 +865,10 @@ pub fn property_reading(target: &Path, ctx: &SourceCtx) -> anyhow::Result<Proper
         return Ok(PropertyDoc::Cbor(a));
     }
     let text = read_prose(target, ctx)?;
-    let a = match ext.as_str() {
-        "yaml" | "yml" => quarb_yaml::parse_as(&text, Reading::Property).context("parsing YAML")?,
-        "toml" => quarb_toml::parse_as(&text, Reading::Property).context("parsing TOML")?,
-        "jsonl" | "ndjson" => {
+    let a = match prefix {
+        "yaml2" => quarb_yaml::parse_as(&text, Reading::Property).context("parsing YAML")?,
+        "toml2" => quarb_toml::parse_as(&text, Reading::Property).context("parsing TOML")?,
+        _ if matches!(ext.as_str(), "jsonl" | "ndjson") => {
             JsonAdapter::parse_lines_as(&text, Reading::Property).context("parsing JSONL")?
         }
         _ => match JsonAdapter::parse_as(&text, Reading::Property) {
@@ -2100,12 +2143,139 @@ pub fn parse_kaiv_ext(
     parsed.map_err(|e| anyhow::anyhow!("parsing {ext}: {e}"))
 }
 
+/// How large the file inside a lone compressed file may be: it is
+/// unpacked to a temporary file and read from there, so the bound is
+/// on disk, not on memory.
+pub const MAX_UNPACKED_BYTES: u64 = 16 << 30;
+
+/// The directory a lone compressed file was unpacked into, removed
+/// when the mount that reads it is dropped.
+struct Unpacked(PathBuf);
+
+impl Drop for Unpacked {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A mounted adapter with what it reads from kept beside it.
+struct Kept {
+    inner: Box<dyn AstAdapter>,
+    _keep: Unpacked,
+}
+
+impl AstAdapter for Kept {
+    quarb::forward_ast_adapter!(inner);
+}
+
+/// A compressed file that holds one file and no tar (`notes.json.gz`;
+/// also `.xz`, `.bz2`, `.zst`) is the file inside it: unpacked under
+/// the file's own name without the compression's extension, and the
+/// target rewritten to that file, so a reading prefix and the mount
+/// options apply to the inner file as they would to it bare
+/// (`text:hymn.md.gz`, `grain.csv.gz?delimiter=semicolon`), and a
+/// name nothing reads (`dump.gz`) is refused as `dump` would be,
+/// `?format=` being the way through. `None` for any other target:
+/// one that is no such file, or a compressed tar, which is an
+/// archive.
+fn unpack_lone(p: &Path) -> anyhow::Result<Option<(PathBuf, Unpacked)>> {
+    let Some(s) = p.to_str() else {
+        return Ok(None);
+    };
+    // the target without its options: a path that exists is taken as
+    // it is, as the option takers do
+    let (head, query) = match s.split_once('?') {
+        Some((h, q)) if !Path::new(s).exists() => (h, Some(q)),
+        _ => (s, None),
+    };
+    // a reading prefix before the file's path
+    let (prefix, file) = match head.split_once(':') {
+        Some((scheme, rest))
+            if !Path::new(head).is_file()
+                && scheme.len() > 1
+                && scheme.chars().all(|c| c.is_ascii_alphanumeric())
+                && Path::new(rest).is_file() =>
+        {
+            (Some(scheme), Path::new(rest))
+        }
+        _ => (None, Path::new(head)),
+    };
+    let compressed = file
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(quarb_archive::compression_extension);
+    let Some(inner) = file
+        .file_stem()
+        .filter(|_| compressed && file.is_file())
+        .map(|n| n.to_os_string())
+    else {
+        return Ok(None);
+    };
+    static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "quarb-unpacked-{}-{}",
+        std::process::id(),
+        COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).with_context(|| format!("unpacking {}", file.display()))?;
+    let keep = Unpacked(dir.clone());
+    let out_path = dir.join(&inner);
+    let mut out = std::fs::File::create(&out_path)
+        .with_context(|| format!("unpacking {}", file.display()))?;
+    let lone = quarb_archive::decompress_lone(file, &mut out, MAX_UNPACKED_BYTES)
+        .with_context(|| format!("unpacking {}", file.display()))?;
+    drop(out);
+    if !lone {
+        // a tar inside: an archive, opened as one
+        return Ok(None);
+    }
+    let mut target = String::new();
+    if let Some(scheme) = prefix {
+        target.push_str(scheme);
+        target.push(':');
+    }
+    target.push_str(&out_path.to_string_lossy());
+    if let Some(q) = query {
+        target.push('?');
+        target.push_str(q);
+    }
+    Ok(Some((PathBuf::from(target), keep)))
+}
+
 /// Open one input as a boxed adapter plus its locator renderer, for
 /// mounting. Format detection matches the single-input flow. The
 /// source boundary is applied here: `?encoding=` comes off the
 /// target first, and the decoding record a read leaves goes on the
 /// mount's root.
 pub fn open_mount(p: &Path, cli: &OpenOpts) -> anyhow::Result<Mounted> {
+    // The offline switch (`QUARB_OFFLINE`): a target that would
+    // reach the network is refused here, before anything is read.
+    if let Some(s) = p.to_str() {
+        offline::gate(s)?;
+    }
+    // a lone compressed file is the file inside it
+    let Some((inner, keep)) = unpack_lone(p)? else {
+        return open_mount_as_written(p, cli);
+    };
+    let m = open_mount_as_written(&inner, cli).with_context(|| {
+        format!(
+            "reading the file inside {} (unpacked to {})",
+            target_text(p),
+            keep.0.display()
+        )
+    })?;
+    Ok(Mounted {
+        adapter: Box::new(Kept {
+            inner: m.adapter,
+            _keep: keep,
+        }),
+        render: m.render,
+        family: m.family,
+    })
+}
+
+/// [`open_mount`] of the target as it is written.
+fn open_mount_as_written(p: &Path, cli: &OpenOpts) -> anyhow::Result<Mounted> {
     // `?root=PATH` comes off any target first (spec: Mounts, the
     // root option): the source opens whole, then the subtree at
     // PATH is the tree
@@ -2584,13 +2754,16 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
         let r = a.clone();
         return Ok(Mounted::of(a, Box::new(move |n| r.locator(n))));
     }
-    // The property reading (`json2:`), matching the single-input flow.
+    // The property reading (`json2:`, `yaml2:`, `toml2:`, `cbor2:`),
+    // matching the single-input flow.
     if let Some(s) = p.to_str()
-        && let Some(rest) = s.strip_prefix("json2:")
+        && let Some((prefix, rest)) = PROPERTY_PREFIXES
+            .iter()
+            .find_map(|pre| Some((*pre, s.strip_prefix(pre)?.strip_prefix(':')?)))
         && !rest.is_empty()
     {
         let rest = &take_reader_encoding(rest, ctx)?;
-        return Ok(match property_reading(Path::new(rest), ctx)? {
+        return Ok(match property_reading(prefix, Path::new(rest), ctx)? {
             PropertyDoc::Json(adapter) => {
                 let a = Rc::new(adapter);
                 let r = a.clone();
@@ -2683,6 +2856,7 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
                     ArchiveAdapter::open_with_decoding(target, current_decoding(ctx)?)
                         .context("opening archive")?,
                 )
+                .with_source_bytes(quarb_compose::archive_member_bytes)
                 .with_decoding(current_decoding(ctx)?)
                 .with_csv_options(ctx.csv())
                 .with_document_graft(DocumentGraft::Text)
@@ -3161,8 +3335,13 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
     }
     // Spreadsheets before the archive check — .xlsx/.ods ARE zips (PK
     // magic), but the sheets are the point, not the raw XML entries.
+    // The macro-enabled, binary and add-in workbooks (.xlsm, .xlsb,
+    // .xlam) are workbooks too: they once fell to the archive check.
     if let Some(ext) = p.extension().and_then(|e| e.to_str())
-        && matches!(ext.to_ascii_lowercase().as_str(), "xlsx" | "xls" | "ods")
+        && matches!(
+            ext.to_ascii_lowercase().as_str(),
+            "xlsx" | "xls" | "ods" | "xlsm" | "xlsb" | "xlam"
+        )
     {
         let a = Rc::new(XlsxAdapter::open(p).context("opening workbook")?);
         let r = a.clone();
@@ -3213,6 +3392,7 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
                 ArchiveAdapter::open_with_decoding(p, current_decoding(ctx)?)
                     .context("opening archive")?,
             )
+            .with_source_bytes(quarb_compose::archive_member_bytes)
             .with_decoding(current_decoding(ctx)?)
             .with_csv_options(ctx.csv())
             .with_string_reader(string_reader(ctx)),
@@ -3248,6 +3428,7 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
     if cli.stream_rows
         && p.is_file()
         && ctx.encoding().is_none()
+        && ctx.format().is_none()
         && !has_wide_bom(p)
         && let Some(delim) = csv_delimiter(Some(p))
     {
@@ -3323,6 +3504,14 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
         None => text,
     };
     let path = Some(p);
+    // `?format=NOTATION` on a file declares its notation where its
+    // name does not, or says otherwise (`notes.txt?format=csv`,
+    // `dump?format=text`): the notation's reader takes the text. The
+    // option was accepted on a file and not acted on; the file read
+    // by its name all the same.
+    if let Some(notation) = ctx.format() {
+        return open_text_as(&notation, &text, ctx);
+    }
     if is_quarb(path) {
         let a = Rc::new(quarb::reflect::QueryArbor::parse(&text).context("parsing Quarb query")?);
         let r = a.clone();
@@ -3416,6 +3605,75 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
         };
         let r = a.clone();
         Ok(Mounted::of(a, Box::new(move |n| r.pointer(n))))
+    }
+}
+
+/// A file's text under the notation its mount declares
+/// (`?format=NOTATION`): the reader the notation's own extension
+/// would have chosen.
+fn open_text_as(notation: &str, text: &str, ctx: &SourceCtx) -> anyhow::Result<Mounted> {
+    let notation = quarb_compose::canonical_notation(notation);
+    match notation.as_str() {
+        "json" => {
+            let a = Rc::new(JsonAdapter::parse(text).context("parsing JSON")?);
+            let r = a.clone();
+            Ok(Mounted::of(a, Box::new(move |n| r.pointer(n))))
+        }
+        "jsonl" => {
+            let a = Rc::new(JsonAdapter::parse_lines(text).context("parsing JSONL")?);
+            let r = a.clone();
+            Ok(Mounted::of(a, Box::new(move |n| r.pointer(n))))
+        }
+        "yaml" => {
+            let a = Rc::new(quarb_yaml::parse(text).context("parsing YAML")?);
+            let r = a.clone();
+            Ok(Mounted::of(a, Box::new(move |n| r.pointer(n))))
+        }
+        "toml" => {
+            let a = Rc::new(quarb_toml::parse(text).context("parsing TOML")?);
+            let r = a.clone();
+            Ok(Mounted::of(a, Box::new(move |n| r.pointer(n))))
+        }
+        "xml" => {
+            let a = Rc::new(XmlAdapter::parse(text).context("parsing XML")?);
+            let r = a.clone();
+            Ok(Mounted::of(a, Box::new(move |n| r.locator(n))))
+        }
+        "html" => {
+            let a = Rc::new(HtmlAdapter::parse(text));
+            let r = a.clone();
+            Ok(Mounted::of(a, Box::new(move |n| r.locator(n))))
+        }
+        "markdown" => {
+            let a = Rc::new(quarb_markdown::parse(text));
+            let r = a.clone();
+            Ok(Mounted::of(a, Box::new(move |n| r.locator(n))))
+        }
+        "text" => {
+            let a = Rc::new(quarb_text::TextModel::parse_plain(text));
+            let r = a.clone();
+            Ok(Mounted::of(a, Box::new(move |n| r.locator(n))))
+        }
+        "csv" | "tsv" => {
+            let delim = if notation == "tsv" { b'\t' } else { b',' };
+            let a =
+                Rc::new(CsvAdapter::parse_declared(text, delim, ctx.csv()).context("parsing CSV")?);
+            let r = a.clone();
+            Ok(Mounted::of(a, Box::new(move |n| r.locator(n))))
+        }
+        "fb2" => {
+            let a = Rc::new(
+                quarb_text_koine::parse_xml_as(text, "fb2").context("reading FictionBook")?,
+            );
+            let r = a.clone();
+            Ok(Mounted::of(a, Box::new(move |n| r.locator(n))))
+        }
+        // a source language: its reader goes by the file's name
+        other => anyhow::bail!(
+            "format={other} names a source language, which a file is read as by its \
+             extension; format= on a file takes one of {}",
+            quarb_compose::NOTATIONS.join(", ")
+        ),
     }
 }
 

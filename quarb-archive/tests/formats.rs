@@ -122,6 +122,157 @@ fn an_unknown_container_is_refused() {
     );
 }
 
+/// An archive is told by its bytes under any name: a plain tar by
+/// its first block (a header's checksum), the compressed ones and
+/// the zip by their magic; `.TAR` in any case. A compressed file
+/// that holds one file and no tar is said to be no tar, and its
+/// bytes are what a front-end mounts in its place.
+#[test]
+fn an_archive_is_told_by_its_bytes_under_any_name() {
+    let dir = fixture("told-by-bytes");
+    let tar = plain_tar(&dir);
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    gz.write_all(&tar).unwrap();
+    let gz = gz.finish().unwrap();
+    let mut xz = Vec::new();
+    lzma_rs::xz_compress(&mut std::io::Cursor::new(&tar), &mut xz).unwrap();
+    let mut bz = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
+    bz.write_all(&tar).unwrap();
+    let bz = bz.finish().unwrap();
+    let zst = ruzstd::encoding::compress_to_vec(
+        std::io::Cursor::new(&tar),
+        ruzstd::encoding::CompressionLevel::Fastest,
+    );
+    for (name, bytes) in [
+        ("backup.dat", &tar),
+        ("P.TAR", &tar),
+        ("backup-gz.dat", &gz),
+        ("backup-xz.dat", &xz),
+        ("backup-bz2.dat", &bz),
+        ("backup-zst.dat", &zst),
+    ] {
+        std::fs::write(dir.join(name), bytes).unwrap();
+        assert!(
+            quarb_archive::sniff(&bytes[..bytes.len().min(512)]),
+            "{name}"
+        );
+        let a = ArchiveAdapter::open(&dir.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(values(&a, "/shelf/* @| count"), ["2"], "{name}");
+        check(&a);
+    }
+    // what is no archive: a text, a document, three letters that
+    // open a bzip2 stream and nothing more
+    for head in [
+        &b"Sing, goddess, the wrath of Achilles"[..],
+        b"{\"keeper\": \"Callimachus\"}",
+        b"BZhello, a text",
+        &[0u8; 512][..],
+    ] {
+        assert!(!quarb_archive::sniff(head), "{head:?}");
+    }
+    // a compressed file that holds one file: no tar, and said so
+    let mut one = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    one.write_all(b"{\"keeper\": \"Callimachus\"}\n").unwrap();
+    let one = one.finish().unwrap();
+    std::fs::write(dir.join("notes.json.gz"), &one).unwrap();
+    let err = ArchiveAdapter::open(&dir.join("notes.json.gz"))
+        .err()
+        .map(|e| e.to_string())
+        .unwrap();
+    assert!(err.contains("holds no tar"), "{err}");
+    assert!(ArchiveAdapter::from_tar_bytes(&one).is_err());
+    // its bytes, for the front-end that mounts the file inside
+    let mut inner = Vec::new();
+    assert!(
+        quarb_archive::decompress_lone(&dir.join("notes.json.gz"), &mut inner, 1 << 20).unwrap()
+    );
+    assert_eq!(inner, b"{\"keeper\": \"Callimachus\"}\n");
+    // past the bound it is refused
+    let mut sink = Vec::new();
+    let err = quarb_archive::decompress_lone(&dir.join("notes.json.gz"), &mut sink, 8)
+        .err()
+        .map(|e| e.to_string())
+        .unwrap();
+    assert!(err.contains("exceed 8 bytes decompressed"), "{err}");
+    // a compressed tar is an archive, and a file that is not
+    // compressed is nothing of the kind: neither is unpacked
+    let mut sink = Vec::new();
+    assert!(
+        !quarb_archive::decompress_lone(&dir.join("backup-gz.dat"), &mut sink, 1 << 20).unwrap()
+    );
+    assert!(!quarb_archive::decompress_lone(&dir.join("backup.dat"), &mut sink, 1 << 20).unwrap());
+    assert!(sink.is_empty());
+    // an archive of no members still opens (a stream of nothing, a
+    // block of zeros)
+    std::fs::write(dir.join("none.tar"), b"").unwrap();
+    assert_eq!(
+        values(
+            &ArchiveAdapter::open(&dir.join("none.tar")).unwrap(),
+            "//* @| count"
+        ),
+        ["0"]
+    );
+    std::fs::write(dir.join("zeros.tar"), [0u8; 1024]).unwrap();
+    assert!(ArchiveAdapter::open(&dir.join("zeros.tar")).is_ok());
+}
+
+/// A member that is an archive itself hands over its bytes (a zip's
+/// read on demand, a tar's kept at the open), and they open as an
+/// archive under the holder's rule: what a nested archive grafts
+/// from.
+#[test]
+fn a_member_that_is_an_archive_hands_over_its_bytes() {
+    let dir = fixture("nested");
+    let tar = plain_tar(&dir);
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    gz.write_all(&tar).unwrap();
+    let gz = gz.finish().unwrap();
+    // a zip holding a tar.gz and a note
+    let mut buf = std::io::Cursor::new(Vec::new());
+    {
+        let mut z = zip::ZipWriter::new(&mut buf);
+        let o = zip::write::SimpleFileOptions::default();
+        z.start_file("inner/shelf.tar.gz", o).unwrap();
+        z.write_all(&gz).unwrap();
+        z.start_file("manifest.txt", o).unwrap();
+        z.write_all(b"one shelf").unwrap();
+        z.finish().unwrap();
+    }
+    let outer_zip = buf.into_inner();
+    // a tar holding that zip
+    let mut b = tar::Builder::new(Vec::new());
+    let mut h = tar::Header::new_gnu();
+    h.set_size(outer_zip.len() as u64);
+    h.set_mode(0o644);
+    h.set_cksum();
+    b.append_data(&mut h, "crate.zip", &outer_zip[..]).unwrap();
+    let outer_tar = b.into_inner().unwrap();
+
+    let find = |a: &ArchiveAdapter, q: &str| match quarb::run(q, a).unwrap() {
+        QueryResult::Nodes(ns) => ns[0],
+        QueryResult::Values(_) => panic!("{q}: values"),
+    };
+    // from a tar: the zip's bytes were kept
+    let t = ArchiveAdapter::from_tar_bytes(&outer_tar).unwrap();
+    let zip_bytes = t.member_bytes(find(&t, "/crate.zip")).unwrap();
+    assert_eq!(zip_bytes, outer_zip);
+    // from a zip: the tar.gz's bytes are read now
+    let z = ArchiveAdapter::from_bytes(&zip_bytes).unwrap();
+    let gz_bytes = z.member_bytes(find(&z, "/inner/shelf.tar.gz")).unwrap();
+    check(&ArchiveAdapter::from_bytes(&gz_bytes).unwrap());
+    // a member that is no archive: a zip reads it, a tar kept none
+    assert_eq!(
+        z.member_bytes(find(&z, "/manifest.txt")).as_deref(),
+        Some(&b"one shelf"[..])
+    );
+    let plain = ArchiveAdapter::from_tar_bytes(&tar).unwrap();
+    assert!(
+        plain
+            .member_bytes(find(&plain, "/shelf/note.txt"))
+            .is_none()
+    );
+}
+
 /// Finding 20: a tar (or 7z) archive is held in memory, so its
 /// decompressed size is bounded at open — past the bound the open
 /// is refused naming the member it stopped at; an xz stream, which

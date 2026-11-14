@@ -82,3 +82,34 @@ fn encoded_word_headers_decode() {
         ["Илиада Гомера"]
     );
 }
+
+/// `| %` on a message is the record of its headers, in the
+/// message's order (it answered the empty record: the headers
+/// answered by name and were not listed).
+/// A header that occurs twice is one field, its first occurrence.
+#[test]
+fn a_messages_record_is_its_headers() {
+    let dir = std::env::temp_dir().join(format!("quarb-maildir-record-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("cur")).unwrap();
+    std::fs::create_dir_all(dir.join("new")).unwrap();
+    std::fs::write(
+        dir.join("cur/100.a:2,S"),
+        "Received: by relay-b\nReceived: by relay-a\nFrom: ada@x\n\
+         Subject: =?utf-8?B?VGhlIGVuZ2luZQ==?=\nMessage-ID: <p1@x>\n\nIt weaves.\n",
+    )
+    .unwrap();
+    let a = MaildirAdapter::open(&dir).unwrap();
+    assert_eq!(
+        values(&a, "/* | %"),
+        [
+            r#"%(received = "by relay-b"; from = "ada@x"; subject = "The engine"; message-id = "<p1@x>")"#
+        ]
+    );
+    assert_eq!(values(&a, "/* | :::n-headers"), ["5"]);
+    // the root has no headers; a message is still its body to a
+    // serializer
+    assert_eq!(values(&a, "^ | %"), ["%()"]);
+    assert_eq!(values(&a, "/* | json"), [r#""It weaves.\n""#]);
+    let _ = std::fs::remove_dir_all(&dir);
+}

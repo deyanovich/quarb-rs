@@ -588,7 +588,10 @@ impl<'a> Lower<'a> {
                     let name = e.name();
                     let name = name.as_ref();
                     if !in_body {
-                        if name == b"office:text" {
+                        // OpenOffice.org 1.0 (`.sxw`) keeps the
+                        // prose in `office:body` itself; OpenDocument
+                        // in the `office:text` inside it
+                        if matches!(name, b"office:text" | b"office:body") {
                             in_body = true;
                         }
                         buf.clear();
@@ -604,13 +607,20 @@ impl<'a> Lower<'a> {
                             let para = self.read_para(&mut reader, e, "content.xml")?;
                             self.emit_para(para, !lists.is_empty());
                         }
-                        b"text:list" => {
+                        // `text:list`, its kind from the style;
+                        // in OpenOffice.org 1.0 the element says it
+                        b"text:list" | b"text:unordered-list" | b"text:ordered-list" => {
                             self.close_quote();
                             let style = attr(e, b"text:style-name")
                                 .or_else(|| lists.last().map(|(s, _)| s.clone()))
                                 .unwrap_or_default();
                             let level = lists.len() as u8 + 1;
-                            let kind = if self.styles.ordered(&style, level) {
+                            let ordered = match name {
+                                b"text:ordered-list" => true,
+                                b"text:unordered-list" => false,
+                                _ => self.styles.ordered(&style, level),
+                            };
+                            let kind = if ordered {
                                 Container::OrderedList { start: 1 }
                             } else {
                                 Container::UnorderedList
@@ -658,7 +668,7 @@ impl<'a> Lower<'a> {
                         continue;
                     }
                     match name {
-                        b"office:text" => break,
+                        b"office:text" | b"office:body" => break,
                         b"text:list-item" | b"text:list-header" => {
                             if let Some((_, open)) = lists.last_mut()
                                 && *open
@@ -667,7 +677,7 @@ impl<'a> Lower<'a> {
                                 *open = false;
                             }
                         }
-                        b"text:list" => {
+                        b"text:list" | b"text:unordered-list" | b"text:ordered-list" => {
                             if let Some((_, open)) = lists.pop() {
                                 if open {
                                     self.out.push(Block::Close { hypograph: None });
@@ -785,7 +795,12 @@ impl<'a> Lower<'a> {
         let mut para = Para {
             style: attr(start, b"text:style-name"),
             outline: (start.name().as_ref() == b"text:h")
-                .then(|| attr(start, b"text:outline-level").and_then(|v| v.parse().ok()))
+                .then(|| {
+                    // `text:level` is OpenOffice.org 1.0's spelling
+                    attr(start, b"text:outline-level")
+                        .or_else(|| attr(start, b"text:level"))
+                        .and_then(|v| v.parse().ok())
+                })
                 .flatten(),
             ..Default::default()
         };
@@ -841,20 +856,27 @@ impl<'a> Lower<'a> {
                         b"text:alphabetical-index-mark-start" => {
                             mark = Some(para.text.len() as u32)
                         }
-                        b"text:note" => {
+                        // OpenOffice.org 1.0 names the family in
+                        // the element: `text:footnote`, `text:endnote`
+                        b"text:note" | b"text:footnote" | b"text:endnote" => {
                             let id = attr(e, b"text:id").unwrap_or_default();
                             let family = match attr(e, b"text:note-class").as_deref() {
                                 Some("endnote") => NoteFamily::Endnote,
+                                _ if name == b"text:endnote" => NoteFamily::Endnote,
                                 _ => NoteFamily::Footnote,
                             };
                             note = Some((id, family, para.at(), Vec::new()));
                         }
-                        b"text:note-citation" => {
+                        b"text:note-citation"
+                        | b"text:footnote-citation"
+                        | b"text:endnote-citation" => {
                             // The label is presentation; its text
                             // stays out of the prose.
                             skip += 1;
                         }
-                        b"text:note-body" => in_note_body = true,
+                        b"text:note-body" | b"text:footnote-body" | b"text:endnote-body" => {
+                            in_note_body = true
+                        }
                         b"text:p" | b"text:h" if in_note_body => {
                             // The body's paragraphs, lowered in their
                             // own right (their apparatus too).
@@ -972,8 +994,10 @@ impl<'a> Lower<'a> {
                                     }
                                 }
                             }
-                            b"text:note-body" => in_note_body = false,
-                            b"text:note" => {
+                            b"text:note-body" | b"text:footnote-body" | b"text:endnote-body" => {
+                                in_note_body = false
+                            }
+                            b"text:note" | b"text:footnote" | b"text:endnote" => {
                                 if let Some((id, family, at, blocks)) = note.take() {
                                     para.apparatus.push(Apparatus::Note(id.clone(), family, at));
                                     self.notes.push((id, family, blocks));
@@ -1075,7 +1099,15 @@ fn read_table(
                 depth += 1;
                 let name = e.name();
                 let name = name.as_ref();
-                if skip > 0 || is_dropped(name) || name == b"text:note-citation" {
+                if skip > 0
+                    || is_dropped(name)
+                    || matches!(
+                        name,
+                        b"text:note-citation"
+                            | b"text:footnote-citation"
+                            | b"text:endnote-citation"
+                    )
+                {
                     skip += 1;
                     buf.clear();
                     continue;

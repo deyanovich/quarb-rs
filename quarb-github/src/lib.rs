@@ -609,6 +609,26 @@ impl AstAdapter for GithubAdapter {
         };
         match plan {
             Plan::Root => {
+                // An anchored target roots its entity here, so its
+                // own name answers first: under `github:ada/boiler`
+                // the root lists `boiler`, and `/boiler` must reach
+                // what `/*` lists (a name at the root was always a
+                // login, and the step answered nothing). Any other
+                // name is a login, as ever.
+                let anchored: Vec<NodeId> = self
+                    .anchor
+                    .iter()
+                    .copied()
+                    .filter(|n| {
+                        self.nodes.borrow()[n.0 as usize]
+                            .name
+                            .as_deref()
+                            .is_some_and(|own| own.eq_ignore_ascii_case(name))
+                    })
+                    .collect();
+                if !anchored.is_empty() {
+                    return anchored;
+                }
                 if let Some(&n) = self.users.borrow().get(name) {
                     return vec![n];
                 }

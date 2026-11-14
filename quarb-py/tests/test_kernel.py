@@ -197,3 +197,83 @@ def test_kernel_completion(kernel, tmp_path_factory):
     reply = kernel.complete("/serv", 5)
     msg = kernel.get_shell_msg(timeout=15)
     assert msg["content"]["matches"] == ["servers"]
+
+
+def _texts(result):
+    """A result's values as their texts, a null as None."""
+    return [None if v is None else str(v) for v in result.values]
+
+
+def test_session_mount_line(tmp_path):
+    """A mount line reads a mounted source again under options (as a
+    session's line does in quai); a refused re-read leaves the
+    session as it was."""
+    from quarb.session import Session
+
+    # what is one, and what is not
+    stmts = Session.remount_statements
+    assert stmts("mount ledger: ?delimiter=semicolon") == [("ledger", "delimiter=semicolon")]
+    assert stmts("mount: ?null=NA;") == [("", "null=NA")]
+    assert stmts("mount a: ?x=1;\nmount b: ?") == [("a", "x=1"), ("b", "")]
+    assert stmts("/row | ::tons") is None
+    assert stmts("mount ledger: ledger.csv") is None, "a target is a mount, no re-read"
+    assert stmts("mountain: ?x") is None
+    assert stmts("") is None
+
+    ledger = tmp_path / "ledger.csv"
+    ledger.write_text('port,tons\nPiraeus,"1,5"\nKoper,NA\n')
+    s = Session()
+    s.mount(str(ledger))
+    assert [str(v) for v in s.run("/row | ::tons").values] == ["1,5", "NA"]
+    # by name
+    s.remount([("ledger", "decimal=comma&null=NA")])
+    assert _texts(s.run("/row | ::tons")) == ["1.5", None]
+    # the options stand in place of the earlier ones
+    s.remount([("ledger", "null=NA")])
+    assert [str(v) for v in s.run("/row[1] | ::tons").values] == ["1,5"]
+    assert s.run("/row[2] | ::tons").values == [None]
+    # the name left out where one source is mounted; no options at
+    # all is the bare target again
+    s.remount([("", "")])
+    assert [str(v) for v in s.run("/row | ::tons").values] == ["1,5", "NA"]
+    # refused: the session stays as it was
+    with pytest.raises(ValueError):
+        s.remount([("ledger", "delimiter=nonsense")])
+    assert [str(v) for v in s.run("/row | ::tons").values] == ["1,5", "NA"]
+    with pytest.raises(ValueError, match="no source is mounted as 'nope'; the sources: ledger"):
+        s.remount([("nope", "null=NA")])
+
+    # two sources under one root: each by its own name, and a line
+    # with no name is asked for one
+    other = tmp_path / "ports.csv"
+    other.write_text("port,sea\nPiraeus,Aegean\n")
+    s.mount(f"{ledger} {other}")
+    with pytest.raises(ValueError, match="name the source to re-read"):
+        s.remount([("", "null=NA")])
+    s.remount([("ledger", "decimal=comma&null=NA")])
+    assert _texts(s.run("/ledger/row | ::tons")) == ["1.5", None]
+    assert [str(v) for v in s.run("/ports/row | ::sea").values] == ["Aegean"]
+
+
+def test_kernel_mount_line(kernel, tmp_path_factory):
+    """The mount line as a cell: it went to the engine as a query."""
+    tmp = tmp_path_factory.mktemp("kmount")
+    ledger = tmp / "grain.csv"
+    ledger.write_text('port,tons\nPiraeus,"1,5"\nKoper,NA\n')
+    status, out = run_cell(kernel, f"%mount {ledger}\n/row | ::tons")
+    assert status == "ok"
+    result = [o for o in out if o["msg_type"] == "execute_result"]
+    assert result and "1,5" in result[0]["content"]["data"]["text/plain"]
+    # the line answers nothing
+    status, out = run_cell(kernel, "mount grain: ?decimal=comma&null=NA")
+    assert status == "ok"
+    assert not [o for o in out if o["msg_type"] in ("execute_result", "error")]
+    status, out = run_cell(kernel, "/row[1] | ::tons")
+    result = [o for o in out if o["msg_type"] == "execute_result"]
+    assert status == "ok" and result
+    assert "1.5" in result[0]["content"]["data"]["text/plain"]
+    # a source that is not mounted is said so, the sources named
+    status, out = run_cell(kernel, "mount nope: ?null=NA")
+    assert status == "error"
+    errors = [o for o in out if o["msg_type"] == "error"]
+    assert errors and "no source is mounted as 'nope'" in errors[0]["content"]["evalue"]

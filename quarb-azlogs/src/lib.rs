@@ -286,6 +286,13 @@ fn bearer_token() -> Result<String, AzlError> {
     {
         return Ok(t.trim().to_string());
     }
+    // under the offline switch az is run only as its stand-in
+    quarb_http::check_tool(
+        "az",
+        Some("QUARB_AZ"),
+        Some("AZURE_LOG_TOKEN holds a token to send"),
+    )
+    .map_err(AzlError::Api)?;
     let bin = std::env::var("QUARB_AZ").unwrap_or_else(|_| "az".into());
     let out = std::process::Command::new(&bin)
         .args([

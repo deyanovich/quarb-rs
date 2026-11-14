@@ -114,4 +114,26 @@ fn mock_github() {
         quarb::QueryResult::Nodes(ns) => ns.iter().map(|&n| b.locator(n)).collect(),
     };
     assert_eq!(vb("/*::stars"), ["42"]);
+
+    // An anchored target: the root lists its one entity, and that
+    // entity's name reaches it (a name at the root was always read
+    // as a login, so `/boiler` answered nothing).
+    let b = GithubAdapter::connect("github:ada/boiler").unwrap();
+    let vb = |q: &str| match quarb::run(q, &b).unwrap() {
+        quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+        quarb::QueryResult::Nodes(ns) => ns.iter().map(|&n| b.locator(n)).collect(),
+    };
+    assert_eq!(vb("/* | :name"), ["boiler"]);
+    assert_eq!(vb("/boiler::stars"), ["42"]);
+    assert_eq!(vb("/boiler/issues/* @| count"), ["1"]);
+    assert_eq!(vb("/boiler/files/README.md::"), ["boil the ocean\n"]);
+    // a login still answers by direct address
+    assert_eq!(vb("/ada/boiler::stars"), ["42"]);
+    let u = GithubAdapter::connect("github:ada").unwrap();
+    let vu = |q: &str| match quarb::run(q, &u).unwrap() {
+        quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+        quarb::QueryResult::Nodes(ns) => ns.iter().map(|&n| u.locator(n)).collect(),
+    };
+    assert_eq!(vu("/* | :name"), ["ada"]);
+    assert_eq!(vu("/ada/boiler::stars"), ["42"]);
 }

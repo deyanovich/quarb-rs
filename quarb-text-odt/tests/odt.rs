@@ -255,3 +255,71 @@ fn head_from_meta() {
     assert_eq!(values(&m, "^::description"), ["A novel."]);
     assert_eq!(values(&m, "^::tags"), ["regency, manners"]);
 }
+
+/// An OpenOffice.org 1.0 document (`.sxw`): the same reading under
+/// the older vocabulary. It read as empty: the prose stands in
+/// `office:body` itself (no `office:text`), a heading's depth is
+/// `text:level`, a list says its kind in its element
+/// (`text:unordered-list`, `text:ordered-list`), and a note names
+/// its family in its (`text:footnote`, `text:endnote`).
+#[test]
+fn an_openoffice_1_0_document_reads_under_its_older_names() {
+    let content = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE office:document-content PUBLIC "-//OpenOffice.org//DTD OfficeDocument 1.0//EN" "office.dtd">
+<office:document-content xmlns:office="http://openoffice.org/2000/office" xmlns:style="http://openoffice.org/2000/style" xmlns:text="http://openoffice.org/2000/text" xmlns:table="http://openoffice.org/2000/table" office:class="text" office:version="1.0">
+<office:automatic-styles/>
+<office:body>
+<text:sequence-decls><text:sequence-decl text:display-outline-level="0" text:name="Illustration"/></text:sequence-decls>
+<text:h text:style-name="Heading 1" text:level="1">The Odyssey</text:h>
+<text:p text:style-name="Standard">Tell me, Muse, of the man of many ways.<text:footnote text:id="ftn1"><text:footnote-citation>1</text:footnote-citation><text:footnote-body><text:p text:style-name="Footnote">Odysseus, son of Laertes.</text:p></text:footnote-body></text:footnote></text:p>
+<text:h text:style-name="Heading 2" text:level="2">Ithaca</text:h>
+<text:unordered-list text:style-name="L1"><text:list-item><text:p>the loom</text:p></text:list-item><text:list-item><text:p>the harbour</text:p></text:list-item></text:unordered-list>
+<text:ordered-list><text:list-item><text:p>string the bow</text:p></text:list-item><text:list-item><text:p>shoot through the axes</text:p></text:list-item></text:ordered-list>
+<text:p text:style-name="Standard">So the tale ends.<text:endnote text:id="edn1"><text:endnote-citation>i</text:endnote-citation><text:endnote-body><text:p>Or begins again.</text:p></text:endnote-body></text:endnote></text:p>
+</office:body>
+</office:document-content>"#;
+    let styles = r#"<?xml version="1.0" encoding="UTF-8"?>
+<office:document-styles xmlns:office="http://openoffice.org/2000/office" xmlns:style="http://openoffice.org/2000/style" office:version="1.0"><office:styles/></office:document-styles>"#;
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    {
+        let mut z = zip::ZipWriter::new(&mut cursor);
+        let opts = zip::write::SimpleFileOptions::default();
+        z.start_file("mimetype", opts).unwrap();
+        z.write_all(b"application/vnd.sun.xml.writer").unwrap();
+        z.start_file("content.xml", opts).unwrap();
+        z.write_all(content.as_bytes()).unwrap();
+        z.start_file("styles.xml", opts).unwrap();
+        z.write_all(styles.as_bytes()).unwrap();
+        z.finish().unwrap();
+    }
+    let m = quarb_text_odt::parse(&cursor.into_inner()).unwrap();
+    // the outline, by `text:level`
+    assert_eq!(values(&m, "/section::lemma"), ["The Odyssey"]);
+    assert_eq!(values(&m, "/section/section::lemma"), ["Ithaca"]);
+    // the prose, the callouts out of it
+    assert_eq!(
+        values(&m, "//paragraph::"),
+        [
+            "Tell me, Muse, of the man of many ways.",
+            "So the tale ends.",
+            "Odysseus, son of Laertes.",
+            "Or begins again."
+        ]
+    );
+    // the lists, each of the kind its element says
+    assert_eq!(
+        values(&m, "//unordered-item::"),
+        ["the loom", "the harbour"]
+    );
+    assert_eq!(
+        values(&m, "//ordered-item::"),
+        ["string the bow", "shoot through the axes"]
+    );
+    // the notes, each of its family, each reached from its callout
+    assert_eq!(
+        values(&m, "//*<deixis>->footnote::"),
+        ["Odysseus, son of Laertes."]
+    );
+    assert_eq!(values(&m, "//*<deixis>->endnote::"), ["Or begins again."]);
+    assert_eq!(values(&m, "//*<dangling> @| count"), ["0"]);
+}

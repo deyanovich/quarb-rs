@@ -85,6 +85,9 @@ fn token(account: Option<&str>) -> Result<String, BigqueryError> {
     {
         return Ok(t.trim().to_string());
     }
+    // under the offline switch gcloud is not run for a token
+    quarb_http::check_tool("gcloud", None, Some("QUARB_BQ_TOKEN holds a token to send"))
+        .map_err(BigqueryError::Auth)?;
     let mut cmd = std::process::Command::new("gcloud");
     cmd.args(["auth", "print-access-token"]);
     if let Some(a) = account {

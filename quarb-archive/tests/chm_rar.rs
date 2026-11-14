@@ -35,6 +35,13 @@ fn a_chm_is_an_archive_of_pages() {
     let a = ArchiveAdapter::open(&path).unwrap();
     let n: usize = values(&a, "//*<file> @| count")[0].parse().unwrap();
     assert!(n > 1000, "{n} members");
+    // The pages are held in memory, so the file is held to the
+    // bound a tar is: past it the open is refused, naming a member.
+    let err = ArchiveAdapter::open_bounded(&path, Default::default(), 1024)
+        .err()
+        .map(|e| e.to_string())
+        .unwrap();
+    assert!(err.contains("exceed 1024 bytes decompressed"), "{err}");
     // The system records are not members; the sitemap is.
     assert_eq!(values(&a, "/*[:name == (/^[#$]/)] @| count"), ["0"]);
     assert_eq!(values(&a, "//*[:name == (/\\.hhc$/)] @| count"), ["1"]);
@@ -53,6 +60,13 @@ fn a_rar_is_read_only_with_the_feature() {
         let a = opened.unwrap();
         let names = values(&a, "//*<file> | :name");
         assert!(!names.is_empty(), "{names:?}");
+        // held in memory, so bounded as a tar is: the header's size
+        // is checked before the member is read
+        let err = ArchiveAdapter::open_bounded(&path, Default::default(), 1)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap();
+        assert!(err.contains("exceed 1 bytes decompressed"), "{err}");
     } else {
         let e = opened.err().map(|e| e.to_string()).unwrap_or_default();
         assert!(e.contains("`rar` feature"), "{e}");

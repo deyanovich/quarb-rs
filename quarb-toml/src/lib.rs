@@ -9,8 +9,8 @@ pub fn parse(text: &str) -> Result<JsonAdapter, toml::de::Error> {
     parse_as(text, Reading::Node)
 }
 
-/// Parse TOML `text` under the given reading (`json2` is the
-/// property reading).
+/// Parse TOML `text` under the given reading (the property reading
+/// is `toml2:FILE`).
 pub fn parse_as(text: &str, reading: Reading) -> Result<JsonAdapter, toml::de::Error> {
     let mut value: serde_json::Value = toml::from_str(text)?;
     flatten_datetimes(&mut value);

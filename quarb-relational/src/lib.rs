@@ -454,7 +454,12 @@ impl RelationalModel {
                         columns: spec.columns.clone(),
                         pk: spec.pk,
                         fks: spec.fks.clone(),
-                        json_columns: Vec::new(),
+                        // the columns the schema types json keep
+                        // their declaration: an eager load (a
+                        // database from its bytes, the browser's
+                        // only door) dropped it, and no cell of one
+                        // grafted
+                        json_columns: spec.json_columns.clone(),
                         column_types: spec.column_types.clone(),
                     },
                     data: Default::default(),

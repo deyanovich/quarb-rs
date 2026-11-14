@@ -154,6 +154,15 @@ impl Doc {
             "toml" => quarb_toml::parse(input)
                 .map(Doc::Json)
                 .context("parsing TOML"),
+            // The property reading of YAML and of TOML, under their
+            // own names (`yaml2:FILE`, `toml2:FILE`; ruling
+            // 2026-11-12).
+            "yaml2" => quarb_yaml::parse_as(input, quarb_json::Reading::Property)
+                .map(Doc::Json)
+                .context("parsing YAML"),
+            "toml2" => quarb_toml::parse_as(input, quarb_json::Reading::Property)
+                .map(Doc::Json)
+                .context("parsing TOML"),
             "csv" => quarb_csv::CsvAdapter::parse_declared(input, b',', Default::default())
                 .map(Doc::Csv)
                 .context("parsing CSV"),
@@ -197,13 +206,13 @@ impl Doc {
             }
             // BibTeX / BibLaTeX, imported through atrep's
             // bibliogramma: a document of bib entries.
-            #[cfg(feature = "native")]
+            #[cfg(feature = "koine")]
             "text-bibtex" | "bibtex" => quarb_text_koine::parse_bibtex(input)
                 .map(Doc::Text)
                 .map_err(anyhow::Error::new),
             // FictionBook 2 at the text level, through the koine
             // route (atrep's importer).
-            #[cfg(feature = "native")]
+            #[cfg(feature = "koine")]
             "text-fb2" | "fb2" => quarb_text_koine::parse_xml_as(input, "fb2")
                 .map(Doc::Text)
                 .map_err(anyhow::Error::new),
@@ -225,7 +234,29 @@ impl Doc {
             "code-c" => quarb_code::CodeModel::parse(input, "c")
                 .map(Doc::boxed_code)
                 .context("parsing C at the code level"),
-            other => bail!("unknown format: {other}"),
+            // Line atoms (`lines:FILE`): every line a node, its
+            // text the value.
+            "lines" => {
+                let a = Rc::new(quarb_lines::LinesAdapter::parse(input));
+                let r = a.clone();
+                Ok(Doc::Boxed(
+                    Dyn(Box::new(quarb_mount::Shared(a))),
+                    Box::new(move |n| r.locator(n)),
+                    "lines",
+                ))
+            }
+            // A reading of a notation (`text-atd`, `corpus-tei`,
+            // `lit-usx`, `koine-rst`): what `text:`, `corpus:`,
+            // `lit:` and `koine:` read from a file of that
+            // extension, here from its text.
+            other => match other.split_once('-') {
+                Some((reading, notation))
+                    if matches!(reading, "text" | "corpus" | "lit" | "koine") =>
+                {
+                    crate::source::text_reading(reading, notation, input).map(Doc::Text)
+                }
+                _ => bail!("unknown format: {other}"),
+            },
         }
     }
 
@@ -551,7 +582,9 @@ impl Doc {
     /// (the `Shared` pattern), so the mount renders a node as the
     /// source would.
     #[allow(clippy::type_complexity)]
-    fn into_mounted(self) -> Result<(Box<dyn quarb::AstAdapter>, Box<dyn Fn(NodeId) -> String>)> {
+    pub(crate) fn into_mounted(
+        self,
+    ) -> Result<(Box<dyn quarb::AstAdapter>, Box<dyn Fn(NodeId) -> String>)> {
         use quarb_mount::Shared;
         macro_rules! shared {
             ($a:expr, $render:ident) => {{
@@ -587,7 +620,8 @@ impl Doc {
     /// door the command line mounts through, so a target opens the
     /// same way everywhere: paths, documents by extension or
     /// content, the reading prefixes (`text:`, `corpus:`, `lit:`,
-    /// `koine:`, `code:`, `web:`, `lines:`, `json2:`), archives,
+    /// `koine:`, `code:`, `web:`, `lines:`, `json2:`, `yaml2:`,
+    /// `toml2:`, `cbor2:`), archives,
     /// databases and the adapter-scheme fleet.
     pub fn open(path: &Path, opts: &Options) -> Result<Doc> {
         let target = path.to_string_lossy();

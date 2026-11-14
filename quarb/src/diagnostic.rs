@@ -171,6 +171,13 @@ pub const UNKNOWN_PROPERTY: &str = "UNKNOWN_PROPERTY";
 /// where one record read under the name has the field. One warning
 /// per name, when the run ends.
 pub const UNKNOWN_FIELD: &str = "UNKNOWN_FIELD";
+/// Warning: a worksheet of a workbook could not be read and is left
+/// out of the mount; the sheet and the reader's error are named
+/// (ruling 2026-11-13: a table missing from a file the user mounted
+/// is told, as a record's missing field is). Raised once per sheet,
+/// at the mount, and told with the first run. Sheets that hold no
+/// table (a chart sheet, a macro sheet) are left out without it.
+pub const UNREADABLE_SHEET: &str = "UNREADABLE_SHEET";
 /// Warning: a plain correlation (`<=>`, `<=>?`) bound the first of
 /// several satisfying candidates for some driver, and the query
 /// reads that witness: the answer depends on which one was bound.

@@ -381,6 +381,7 @@ fn main() -> Result<()> {
             let base_dir = path.parent();
             for mt in m.mounts.iter().rev() {
                 let target = quarb_model::resolve_mount_target(&mt.target, base_dir);
+                let target = resolve_option_files(&target, base_dir);
                 // An environment is mounted from the command line
                 // only: a model file mounts sources, never code.
                 if quarb::Environment::is_environment_target(&target) {
@@ -639,8 +640,12 @@ fn run_file(
             println!();
             continue;
         }
-        if quarb_model::STATEMENTS.contains(&first) {
-            if let Err(e) = apply_model_cell(session, remount, &q, base_dir) {
+        // `mount: ?options` re-reads the one source; the bare
+        // `mount:` is no keyword to the splitter above.
+        let re_read = remount_cell(&q);
+        if quarb_model::STATEMENTS.contains(&first) || re_read.is_some() {
+            let cell = re_read.as_deref().unwrap_or(&q);
+            if let Err(e) = apply_model_cell(session, remount, cell, base_dir) {
                 failed = true;
                 println!("    error: {e:#}");
             }
@@ -777,7 +782,9 @@ fn run_file(
 /// The reading schemes a mount target may open with, as on the
 /// command line (`text:FILE`, `corpus:DIR`, `lit:FILE`, `koine:FILE`):
 /// a relative path behind one resolves against the file's directory.
-const READING_SCHEMES: [&str; 5] = ["text", "corpus", "lit", "koine", "json2"];
+const READING_SCHEMES: [&str; 8] = [
+    "text", "corpus", "lit", "koine", "json2", "yaml2", "toml2", "cbor2",
+];
 
 /// Apply a model cell to the session: parse it as a model file, mount
 /// what it mounts (named, relative targets against `base_dir`), join
@@ -794,7 +801,59 @@ fn apply_model_cell(
         anyhow::bail!("a model cell needs an in-process session (not --daemon)");
     };
     let added = ctx.specs.len();
+    // the targets a re-read replaces, to put back if it is refused
+    let mut replaced: Vec<(usize, std::path::PathBuf)> = Vec::new();
     for mt in &m.mounts {
+        // `mount NAME: ?options` (ruling 2026-11-12): the source
+        // already mounted as NAME, read again under the options, in
+        // place of whatever its target carried after `?`. The name
+        // may be left out where one source is mounted.
+        if let Some(options) = mt.target.strip_prefix('?') {
+            let names = |specs: &[MountSpec]| {
+                specs
+                    .iter()
+                    .map(mounted_name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let at = if mt.name.is_empty() {
+                if ctx.specs.len() != 1 {
+                    anyhow::bail!(
+                        "name the source to re-read, 'mount NAME: ?{options}'; the sources: {}",
+                        names(&ctx.specs)
+                    );
+                }
+                0
+            } else {
+                ctx.specs
+                    .iter()
+                    .position(|s| mounted_name(s) == mt.name)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "no source is mounted as '{}'; the sources: {}",
+                            mt.name,
+                            names(&ctx.specs)
+                        )
+                    })?
+            };
+            let old = ctx.specs[at].path.clone();
+            let target = old.to_string_lossy();
+            // a file whose name holds a `?` is taken as it is
+            let bare = match target.rsplit_once('?') {
+                Some((path, _)) if !old.exists() => path.to_string(),
+                _ => target.to_string(),
+            };
+            ctx.specs[at].path = if options.is_empty() {
+                std::path::PathBuf::from(bare)
+            } else {
+                std::path::PathBuf::from(resolve_option_files(
+                    &format!("{bare}?{options}"),
+                    base_dir,
+                ))
+            };
+            replaced.push((at, old));
+            continue;
+        }
         // A reading scheme ahead of a relative path (`text:tom.txt`,
         // `corpus:dir/`) resolves the path against the file's
         // directory too, scheme kept; a URL or an absolute path stays.
@@ -811,6 +870,7 @@ fn apply_model_cell(
             }
             _ => quarb_model::resolve_mount_target(&mt.target, base_dir),
         };
+        let target = resolve_option_files(&target, base_dir);
         if quarb::Environment::is_environment_target(&target) {
             anyhow::bail!(
                 "mount '{}' names an environment ({target}); environments are mounted \
@@ -833,6 +893,9 @@ fn apply_model_cell(
         Ok(executor) => session.borrow_mut().set_executor(executor),
         Err(e) => {
             ctx.specs.truncate(added);
+            for (at, old) in replaced {
+                ctx.specs[at].path = old;
+            }
             return Err(e);
         }
     }
@@ -840,6 +903,80 @@ fn apply_model_cell(
         session.borrow_mut().seed_defs(&m.defs_text)?;
     }
     Ok(())
+}
+
+/// The mount options that name a file of their own.
+const FILE_OPTIONS: [&str; 5] = ["conllu", "sentences", "desm", "cast", "places"];
+
+/// A mount target with the files its options name resolved as the
+/// target itself is: a relative one against the notebook's
+/// directory (`base_dir`), a URL or an absolute path left alone.
+/// Such a file was read against the working directory, so a notebook
+/// run from another directory failed its mount and the cells after
+/// it answered nothing.
+fn resolve_option_files(target: &str, base_dir: Option<&Path>) -> String {
+    let Some((path, query)) = target.rsplit_once('?') else {
+        return target.to_string();
+    };
+    let pairs: Vec<String> = query
+        .split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some((key, file)) if FILE_OPTIONS.contains(&key) && !file.is_empty() => {
+                format!(
+                    "{key}={}",
+                    quarb_model::resolve_mount_target(file, base_dir)
+                )
+            }
+            _ => pair.to_string(),
+        })
+        .collect();
+    format!("{path}?{}", pairs.join("&"))
+}
+
+/// The name a spec is mounted under: its alias, else its file's
+/// stem (a reading prefix and the options after `?` set aside).
+fn mounted_name(spec: &MountSpec) -> String {
+    if let Some(name) = &spec.name {
+        return name.clone();
+    }
+    let target = spec.path.to_string_lossy();
+    let path = match target.rsplit_once('?') {
+        Some((path, _)) if !spec.path.exists() => path,
+        _ => &target,
+    };
+    let path = match path.split_once(':') {
+        Some((scheme, rest)) if READING_SCHEMES.contains(&scheme) => rest,
+        _ => path,
+    };
+    std::path::Path::new(path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// A line or a cell that re-reads mounted sources under options,
+/// as a model cell the parser reads: `mount NAME: ?options`, the
+/// name left out where one source is mounted (`mount: ?null=NA`),
+/// a closing `;` or none. `None` for any other text: a query, or a
+/// model cell whose mounts name targets.
+fn remount_cell(text: &str) -> Option<String> {
+    let mut out = String::new();
+    for stmt in text.split(';') {
+        let stmt = stmt.trim();
+        if stmt.is_empty() {
+            continue;
+        }
+        let rest = stmt.strip_prefix("mount")?;
+        if !rest.starts_with(|c: char| c.is_whitespace() || c == ':') {
+            return None;
+        }
+        let (name, target) = rest.split_once(':')?;
+        if !target.trim().starts_with('?') {
+            return None;
+        }
+        out.push_str(&format!("mount {}: {};\n", name.trim(), target.trim()));
+    }
+    (!out.is_empty()).then_some(out)
 }
 
 fn bind_now(spec: Option<&str>) -> Result<(i64, u32)> {
@@ -903,6 +1040,20 @@ fn repl(
             match page {
                 Ok(text) => println!("{text}"),
                 Err(e) => println!("{e}"),
+            }
+            continue;
+        }
+        // `mount NAME: ?options`: a mounted source read again under
+        // options (ruling 2026-11-12), the line every host of a
+        // session takes. It takes its ordinal, as a notebook's model
+        // cell does, and answers nothing; a refused re-read leaves
+        // the source as it was and takes none.
+        if let Some(cell) = remount_cell(line) {
+            match apply_model_cell(&session, remount, &cell, None) {
+                Ok(()) => {
+                    session.borrow_mut().commit(line, Vec::new());
+                }
+                Err(e) => eprintln!("{}: {e:#}", error_prefix()),
             }
             continue;
         }
@@ -1035,7 +1186,11 @@ impl rustyline::Helper for QuaiHelper {}
 /// grab).
 fn fetch_web(url: &str) -> Result<(String, String)> {
     const CAP: u64 = 10_000_000;
-    let resp = ureq::get(url)
+    // under the offline switch a link is not followed off this
+    // machine (the shared agent would refuse it too; this says why)
+    quarb_http::check_url(url).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let resp = quarb_http::agent()
+        .get(url)
         .timeout(std::time::Duration::from_secs(30))
         .call()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -1420,6 +1575,7 @@ fn command(session: &mut Session, remount: &mut Option<Remount>, line: &str) -> 
                  &-N           the line N back: &-1 is &_, &-2 the one before it\n  \
                  def &x: …;    add a named fragment to the session\n  \
                  :mount SPEC   add a source (PATH or NAME=TARGET) to the session\n  \
+                 mount NAME: ?OPTIONS  read a mounted source again under options: mount grain: ?null=NA&decimal=comma (one source: mount: ?…)\n  \
                  :follow [on|off|N]  acquisition rounds per line for ::href--> refs (interactive default: on)\n  \
                  :plan QUERY   price a query before it runs: its static plan as kaiv (--budget sets the bound)\n  \
                  man [NAME]    the manual: every command, one command's page, a glyph's (man <=>, man @|), man syntax [KIND] for the glyphs; --ru for Russian (also :man)\n  \

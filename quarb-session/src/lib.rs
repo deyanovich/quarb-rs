@@ -20,6 +20,7 @@
 pub mod doc;
 mod local;
 mod session;
+mod source;
 mod store;
 
 pub use doc::{Doc, Options};
@@ -58,6 +59,7 @@ impl MountSpec {
 }
 pub use local::LocalExecutor;
 pub use session::Session;
+pub use source::Source;
 #[cfg(feature = "native")]
 pub use store::FileStore;
 pub use store::{MemStore, SessionState, Store};

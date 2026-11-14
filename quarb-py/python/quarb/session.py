@@ -264,6 +264,10 @@ class Session:
         self.resident: dict[str, list[str]] = {}
         self.default: str | None = None
         self.qua = qua
+        # What each document was mounted from: its targets as
+        # written and the graft flags, so a mount line can read a
+        # source again under other options.
+        self.origins: dict[str, tuple[list[str], bool, bool]] = {}
         # The session's fragment table as definition text, prepended
         # to every query so `&name` refs resolve across cells — the
         # same text-level mechanism quai uses for its `&N` history.
@@ -368,6 +372,7 @@ class Session:
         if len(paths) == 1:
             name = Path(paths[0].removeprefix("git:")).stem or paths[0]
             self.docs[name] = _open(paths[0], graft, no_graft)
+            self.origins[name] = (paths, graft, no_graft)
             self.default = name
             return f"mounted: {name}"
         # Several paths mount together under one root, so a single
@@ -376,8 +381,100 @@ class Session:
         stems = [Path(p.removeprefix("git:")).stem or p for p in paths]
         name = "+".join(stems)
         self.docs[name] = _mount(paths, graft, no_graft)
+        self.origins[name] = (paths, graft, no_graft)
         self.default = name
         return f"mounted: {name} (children: {', '.join('/' + s for s in stems)})"
+
+    # -- the mount line ------------------------------------------
+    _REMOUNT = re.compile(r"mount(?:\s+(?P<name>[^\s:]+))?\s*:\s*\?(?P<options>\S*)")
+
+    @classmethod
+    def remount_statements(cls, text: str):
+        """The re-read statements of a cell, or ``None``.
+
+        A mount line reads a mounted source again under options
+        (ruling 2026-11-12): ``mount NAME: ?delimiter=semicolon``,
+        the name left out where one source is mounted
+        (``mount: ?null=NA``), a closing ``;`` or none, several in
+        one cell. ``(name, options)`` per statement; ``None`` for a
+        cell that is anything else, a query among them.
+        """
+        out = []
+        for stmt in text.split(";"):
+            stmt = stmt.strip()
+            if not stmt:
+                continue
+            m = cls._REMOUNT.fullmatch(stmt)
+            if m is None:
+                return None
+            out.append((m.group("name") or "", m.group("options")))
+        return out or None
+
+    def _sources(self):
+        """Every mounted source: (document, position, name)."""
+        out = []
+        for doc, (paths, _, _) in self.origins.items():
+            if len(paths) == 1:
+                out.append((doc, 0, doc))
+            else:
+                for i, p in enumerate(paths):
+                    out.append((doc, i, Path(p.removeprefix("git:")).stem or p))
+        return out
+
+    def remount(self, statements) -> None:
+        """Read mounted sources again, each under its statement's options.
+
+        The options stand in place of whatever the source's target
+        carried after ``?``; with none (``mount NAME: ?``) the source
+        reads as its bare target. Every statement is checked and
+        every source reopened before anything is replaced, so a
+        re-read that is refused leaves the session as it was.
+        """
+        sources = self._sources()
+        names = ", ".join(n for _, _, n in sources) or "none"
+        targets = {doc: list(paths) for doc, (paths, _, _) in self.origins.items()}
+        touched = []
+        for name, options in statements:
+            if name:
+                hits = [s for s in sources if s[2] == name]
+                # the default document's source wins a shared name
+                hits = [s for s in hits if s[0] == self.default] or hits
+                if not hits:
+                    if name in self.resident:
+                        raise ValueError(
+                            f"'{name}' is a resident target set: connect it "
+                            "again with the options on its targets"
+                        )
+                    raise ValueError(
+                        f"no source is mounted as '{name}'; the sources: {names}"
+                    )
+            else:
+                hits = [s for s in sources if s[0] == self.default] or sources
+                if len(hits) != 1:
+                    raise ValueError(
+                        f"name the source to re-read, 'mount NAME: ?{options}'; "
+                        f"the sources: {names}"
+                    )
+            doc, at, _ = hits[0]
+            old = targets[doc][at]
+            # a file whose name holds a `?` is taken as it is
+            bare = old.rsplit("?", 1)[0] if "?" in old and not Path(old).exists() else old
+            targets[doc][at] = f"{bare}?{options}" if options else bare
+            if doc not in touched:
+                touched.append(doc)
+        opened = {}
+        for doc in touched:
+            _, graft, no_graft = self.origins[doc]
+            paths = targets[doc]
+            opened[doc] = (
+                _open(paths[0], graft, no_graft)
+                if len(paths) == 1
+                else _mount(paths, graft, no_graft)
+            )
+        for doc, document in opened.items():
+            _, graft, no_graft = self.origins[doc]
+            self.docs[doc] = document
+            self.origins[doc] = (targets[doc], graft, no_graft)
 
     def connect(self, line: str) -> str:
         """Register a resident target set (served by qua --resident).

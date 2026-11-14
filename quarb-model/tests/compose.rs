@@ -117,3 +117,43 @@ fn a_ref_may_target_another_mount_directly() {
         vec!["0"]
     );
 }
+
+/// `mount NAME: ?options` names no source: it is the line that
+/// re-reads a mounted source in a session. In a model file it was
+/// taken for a target and failed on an empty path; it is refused in
+/// plain words, the name given or left out.
+#[test]
+fn a_re_read_line_in_a_model_file_is_refused_plainly() {
+    let dir = tempfile::tempdir().unwrap();
+    let named = write(
+        dir.path(),
+        "named.model",
+        "mount ledger: ?delimiter=semicolon&decimal=comma;\n",
+    );
+    let err = parse_model_file(&named).unwrap_err();
+    assert!(
+        err.contains("'mount ledger: ?delimiter=semicolon&decimal=comma' names no source")
+            && err.contains("re-reads a mounted source in a session")
+            && err.contains("'mount ledger: FILE?delimiter=semicolon&decimal=comma'"),
+        "{err}"
+    );
+    let bare = write(dir.path(), "bare.model", "mount: ?null=NA;\n");
+    let err = parse_model_file(&bare).unwrap_err();
+    assert!(
+        err.contains("names no source") && err.contains("'mount NAME: FILE?null=NA'"),
+        "{err}"
+    );
+    assert!(!err.contains("unknown model statement"), "{err}");
+    // reached through a file it uses, too
+    write(dir.path(), "outer.model", "use named.model;\n");
+    let err = parse_model_file(&dir.path().join("outer.model")).unwrap_err();
+    assert!(err.contains("names no source"), "{err}");
+    // a mount that names its source with options is a mount
+    let full = write(
+        dir.path(),
+        "full.model",
+        "mount ledger: ledger.csv?delimiter=semicolon;\n",
+    );
+    let m = parse_model_file(&full).unwrap();
+    assert_eq!(m.mounts[0].target, "ledger.csv?delimiter=semicolon");
+}

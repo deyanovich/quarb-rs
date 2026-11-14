@@ -6,9 +6,15 @@
 //! YAML admits one shape JSON does not: mappings whose keys are not
 //! strings (numbers, booleans, `null`). Those keys are stringified on
 //! the way in, since JSON object keys are always strings, so such a
-//! document is still queryable rather than rejected. Multi-document
-//! streams (`---`-separated) are not yet supported — a file must hold
-//! a single document.
+//! document is still queryable rather than rejected.
+//!
+//! A file may hold several documents, `---` between them (a
+//! Kubernetes manifest does). A file of two or more mounts with the
+//! root a list of the documents in file order, as a JSON lines file's
+//! root is the list of its lines: `/*[::kind = "Deployment"]` reads
+//! one kind, `^ | :::length` counts them. A file of one document is
+//! that document, a leading `---` or not, so a document does not
+//! change shape for having a separator before it.
 
 use quarb_json::{JsonAdapter, Reading};
 
@@ -17,8 +23,8 @@ pub fn parse(text: &str) -> Result<JsonAdapter, serde_yaml_ng::Error> {
     parse_as(text, Reading::Node)
 }
 
-/// Parse YAML `text` under the given reading (`json2` is the
-/// property reading).
+/// Parse YAML `text` under the given reading (the property reading
+/// is `yaml2:FILE`).
 pub fn parse_as(text: &str, reading: Reading) -> Result<JsonAdapter, serde_yaml_ng::Error> {
     // Fast path: a document whose mapping keys are all strings maps
     // straight onto the JSON model, exactly as before.
@@ -27,14 +33,97 @@ pub fn parse_as(text: &str, reading: Reading) -> Result<JsonAdapter, serde_yaml_
         // Fall back for a shape `serde_json::Value` rejects but that is
         // still valid YAML: a mapping with non-string keys. Parsing into
         // YAML's own value model and stringifying the keys recovers it.
-        Err(_) => {
-            let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(text)?;
-            Ok(JsonAdapter::from_json_value_as(
+        Err(_) => match serde_yaml_ng::from_str::<serde_yaml_ng::Value>(text) {
+            Ok(value) => Ok(JsonAdapter::from_json_value_as(
                 yaml_to_json(value),
                 reading,
-            ))
-        }
+            )),
+            // Neither reading takes a file of several documents:
+            // the root is the list of them. Any other failure is
+            // the one-document reading's own.
+            Err(e) => match documents(text) {
+                Ok(docs) if docs.len() > 1 => Ok(JsonAdapter::from_json_value_as(
+                    serde_json::Value::Array(docs),
+                    reading,
+                )),
+                _ => Err(e),
+            },
+        },
     }
+}
+
+/// A YAML header at the top of a text (a Markdown note's front
+/// matter): its keys in order, each value in Quarb's data model, and
+/// the text after it.
+///
+/// A header counts only when the first line is `---`, a later line
+/// is `---` or `...`, and what stands between parses as a YAML
+/// mapping. Anything else (a rule that opens a document, a block
+/// that is a list or a sentence, a header never closed) is no
+/// header, and the text is the caller's as it stands.
+///
+/// Values keep their YAML types: a number is a number, a list a
+/// list, a nested mapping a record with its keys in order. A date is
+/// the text the author wrote; reading it as an instant is the
+/// caller's (a curated `published`).
+pub fn front_matter(text: &str) -> Option<(Vec<(String, quarb::Value)>, &str)> {
+    let t = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut lines = t.split_inclusive('\n');
+    if lines.next()?.trim_end() != "---" {
+        return None;
+    }
+    let mut at = t.find('\n')? + 1;
+    let open = at;
+    for line in lines {
+        let l = line.trim_end();
+        if l == "---" || l == "..." {
+            let block = &t[open..at];
+            let body = &t[at + line.len()..];
+            let serde_yaml_ng::Value::Mapping(map) =
+                serde_yaml_ng::from_str::<serde_yaml_ng::Value>(block).ok()?
+            else {
+                return None;
+            };
+            let entries = map
+                .into_iter()
+                .map(|(k, v)| (yaml_key_to_string(k), yaml_to_value(v)))
+                .collect();
+            return Some((entries, body));
+        }
+        at += line.len();
+    }
+    None
+}
+
+/// A YAML value in Quarb's data model.
+fn yaml_to_value(value: serde_yaml_ng::Value) -> quarb::Value {
+    use quarb::Value;
+    use serde_yaml_ng::Value as Yaml;
+    match value {
+        Yaml::Null => Value::Null,
+        Yaml::Bool(b) => Value::Bool(b),
+        Yaml::Number(n) => match n.as_i64() {
+            Some(i) => Value::Int(i),
+            None => n.as_f64().map_or(Value::Null, Value::Float),
+        },
+        Yaml::String(s) => Value::Str(s),
+        Yaml::Sequence(items) => Value::list(items.into_iter().map(yaml_to_value).collect()),
+        Yaml::Mapping(map) => Value::record(
+            map.into_iter()
+                .map(|(k, v)| (yaml_key_to_string(k), yaml_to_value(v)))
+                .collect(),
+        ),
+        Yaml::Tagged(tagged) => yaml_to_value(tagged.value),
+    }
+}
+
+/// The documents of a `---`-separated stream, each in the JSON data
+/// model (an empty document is null).
+fn documents(text: &str) -> Result<Vec<serde_json::Value>, serde_yaml_ng::Error> {
+    use serde::Deserialize;
+    serde_yaml_ng::Deserializer::from_str(text)
+        .map(|doc| serde_yaml_ng::Value::deserialize(doc).map(yaml_to_json))
+        .collect()
 }
 
 /// Convert a natively-parsed YAML value into the JSON data model,

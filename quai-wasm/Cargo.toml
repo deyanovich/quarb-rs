@@ -13,14 +13,19 @@ homepage.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# The text-format subset only (no `native` feature): json/yaml/toml/
-# csv/xml/html/markdown, driven by Doc::parse. No daemon, no fs.
-quarb-session = { path = "../quarb-session", default-features = false, features = ["sqlite"] }
-quarb-model = { path = "../quarb-model", version = "0.62.0" }
+# No `native` feature (no daemon, no filesystem opener): the sources
+# come from the page as text or bytes and are read by Doc::read. The
+# composing layer (graft on demand, a declared notation at a hop,
+# a database's JSON columns) and the koine reader (an atrep
+# document, TEI and the other vocabularies at the text level) are
+# asked for by name; both are pure Rust.
+quarb-session = { path = "../quarb-session", default-features = false, features = ["sqlite", "compose", "koine", "xlsx", "archives", "docx", "odt"] }
+quarb-model = { path = "../quarb-model", version = "0.63.0" }
 quarb = { path = "../quarb" }
 # The web level over pages held in memory (a site loaded from its
-# sitemap by the browser extension): the memory store alone — no
-# archive or filesystem reader in this build.
+# sitemap by the browser extension). The session's reader also opens
+# a site's tarball (`web:…/site.tgz` in a notebook's mount line)
+# through quarb-web's archive store, which quarb-session links.
 quarb-web = { path = "../quarb-web", default-features = false }
 quarb-mount = { path = "../quarb-mount" }
 wasm-bindgen = "0.2"

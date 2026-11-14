@@ -57,8 +57,11 @@
 //!   `dc:creator`, `dc:description`, `dc:subject`, `cp:keywords`,
 //!   `cp:category`, the dates) under the HTML head's keys, as the
 //!   OpenDocument reader reads `meta.xml`.
+//! - A text box (`w:txbxContent`) is blocks of its own after the
+//!   paragraph it is anchored in, read once: the modern drawing is
+//!   the reading, its VML fallback the same text again.
 //! - Out of band in this version, recorded in the design row:
-//!   headers/footers, textboxes.
+//!   headers/footers.
 //!
 //! The same file keeps its other readings untouched: plain
 //! `report.docx` is the archive graft with the raw OOXML grafted
@@ -325,6 +328,10 @@ fn append_notes(
                 let text = quarb_text::normalize_ws(&para.text);
                 if !text.is_empty() {
                     out.push(Block::Paragraph { text });
+                    // the marks in a note's text (an index entry, a
+                    // citation, a mention) stand on its paragraph,
+                    // as in the body; they were dropped
+                    emit_callouts(&para, out);
                 }
             }
             Event::Eof => break,
@@ -390,6 +397,11 @@ struct Style {
     based_on: Option<String>,
     /// Word's built-in quote vocabulary, by styleId.
     quote: bool,
+    /// The list a paragraph of this style belongs to, where the
+    /// style declares one (`w:pPr/w:numPr`: List Bullet, List
+    /// Number): the numId, and the level when the style says it (a
+    /// level named in numbering.xml by `w:pStyle` otherwise).
+    num: Option<(String, Option<u8>)>,
 }
 
 type Styles = HashMap<String, Style>;
@@ -437,6 +449,15 @@ fn parse_styles(xml: &str) -> Styles {
                     b"w:outlineLvl" => {
                         style.outline = attr(e, b"w:val").and_then(|v| v.parse().ok());
                     }
+                    b"w:numId" => {
+                        if let Some(id) = attr(e, b"w:val") {
+                            style.num.get_or_insert((String::new(), None)).0 = id;
+                        }
+                    }
+                    b"w:ilvl" => {
+                        let lvl = attr(e, b"w:val").and_then(|v| v.parse().ok());
+                        style.num.get_or_insert((String::new(), None)).1 = lvl;
+                    }
                     _ => {}
                 }
             }
@@ -446,6 +467,30 @@ fn parse_styles(xml: &str) -> Styles {
         buf.clear();
     }
     out
+}
+
+/// The list a style declares, through the basedOn chain: the numId
+/// and the level, the level from the style itself or from the level
+/// of that list which numbering.xml links to the declaring style. A
+/// numId of "0" in the chain is the declaration that there is none.
+fn style_list(styles: &Styles, numbering: &Numbering, id: &str) -> Option<(String, u8)> {
+    let mut id = id.to_string();
+    for _ in 0..16 {
+        let style = styles.get(&id)?;
+        if let Some((num_id, ilvl)) = &style.num
+            && !num_id.is_empty()
+        {
+            if num_id == "0" {
+                return None;
+            }
+            let ilvl = ilvl
+                .or_else(|| numbering.level_of_style(num_id, &id))
+                .unwrap_or(0);
+            return Some((num_id.clone(), ilvl));
+        }
+        id = style.based_on.clone()?;
+    }
+    None
 }
 
 /// Resolve a property through the basedOn chain (cycle-capped).
@@ -471,6 +516,9 @@ struct Numbering {
     nums: HashMap<String, String>,
     /// (abstractNumId, ilvl) -> numFmt
     fmts: HashMap<(String, u8), String>,
+    /// (abstractNumId, styleId) -> ilvl: the level a paragraph
+    /// style is linked to (`w:lvl/w:pStyle`).
+    style_levels: HashMap<(String, String), u8>,
 }
 
 impl Numbering {
@@ -482,6 +530,14 @@ impl Numbering {
             .get(num_id)
             .and_then(|a| self.fmts.get(&(a.clone(), ilvl)))
             .is_some_and(|f| f != "bullet" && f != "none")
+    }
+
+    /// The level of list `num_id` linked to paragraph style `style`.
+    fn level_of_style(&self, num_id: &str, style: &str) -> Option<u8> {
+        let a = self.nums.get(num_id)?;
+        self.style_levels
+            .get(&(a.clone(), style.to_string()))
+            .copied()
     }
 }
 
@@ -502,6 +558,13 @@ fn parse_numbering(xml: &str) -> Numbering {
                         (abstract_id.clone(), lvl, attr(e, b"w:val"))
                     {
                         out.fmts.insert((a, l), f);
+                    }
+                }
+                b"w:pStyle" => {
+                    if let (Some(a), Some(l), Some(s)) =
+                        (abstract_id.clone(), lvl, attr(e, b"w:val"))
+                    {
+                        out.style_levels.insert((a, s), l);
                     }
                 }
                 b"w:num" => num_id = attr(e, b"w:numId"),
@@ -632,6 +695,23 @@ struct Para {
     /// label (Word's heading cross-reference bookmarks), the
     /// attachment rule.
     label: Option<String>,
+    /// The paragraph says it is in no list (`w:numId` 0): a list
+    /// its style declares does not apply.
+    unnumbered: bool,
+    /// The text boxes anchored in the paragraph, in run order: each
+    /// a run of blocks of its own, emitted after the paragraph's
+    /// block.
+    boxes: Vec<BoxItem>,
+}
+
+/// One block of a text box (`w:txbxContent`).
+enum BoxItem {
+    Para(Para),
+    Table(
+        Option<Vec<String>>,
+        Vec<Vec<Cell>>,
+        Vec<(String, NoteFamily)>,
+    ),
 }
 
 /// One piece of inline apparatus met in a paragraph's runs.
@@ -686,8 +766,17 @@ fn lower(
                 } else {
                     pending_label = None;
                 }
+                let boxes = std::mem::take(&mut para.boxes);
                 emit_para(
                     para,
+                    styles,
+                    numbering,
+                    &mut frames,
+                    &mut quote_open,
+                    &mut out,
+                );
+                emit_boxes(
+                    boxes,
                     styles,
                     numbering,
                     &mut frames,
@@ -698,14 +787,8 @@ fn lower(
             Event::Start(e) if e.name().as_ref() == b"w:tbl" => {
                 close_lists(&mut frames, 0, &mut out);
                 close_quote(&mut quote_open, &mut out);
-                let (headers, rows) = read_table(&mut reader)?;
-                if !rows.is_empty() || headers.is_some() {
-                    out.push(Block::Table {
-                        lemma: None,
-                        headers,
-                        rows,
-                    });
-                }
+                let (headers, rows, notes) = read_table(&mut reader)?;
+                emit_table(headers, rows, notes, &mut out);
             }
             Event::Eof => break,
             _ => {}
@@ -715,6 +798,59 @@ fn lower(
     close_lists(&mut frames, 0, &mut out);
     close_quote(&mut quote_open, &mut out);
     Ok(out)
+}
+
+/// A table, and after it the note callouts met in its cells: a
+/// cell is flat text, so a callout stands on the table.
+fn emit_table(
+    headers: Option<Vec<String>>,
+    rows: Vec<Vec<Cell>>,
+    notes: Vec<(String, NoteFamily)>,
+    out: &mut Vec<Block>,
+) {
+    if rows.is_empty() && headers.is_none() {
+        return;
+    }
+    out.push(Block::Table {
+        lemma: None,
+        headers,
+        rows,
+    });
+    for (onym, family) in notes {
+        out.push(Block::NoteRef {
+            onym,
+            family: Some(family),
+            margin: false,
+            at: None,
+        });
+    }
+}
+
+/// The blocks of the text boxes anchored in a paragraph, after it:
+/// a text box is a block of its own, never part of the sentence it
+/// floats beside.
+fn emit_boxes(
+    boxes: Vec<BoxItem>,
+    styles: &Styles,
+    numbering: &Numbering,
+    frames: &mut Vec<Frame>,
+    quote_open: &mut bool,
+    out: &mut Vec<Block>,
+) {
+    for item in boxes {
+        match item {
+            BoxItem::Para(mut para) => {
+                let inner = std::mem::take(&mut para.boxes);
+                emit_para(para, styles, numbering, frames, quote_open, out);
+                emit_boxes(inner, styles, numbering, frames, quote_open, out);
+            }
+            BoxItem::Table(headers, rows, notes) => {
+                close_lists(frames, 0, out);
+                close_quote(quote_open, out);
+                emit_table(headers, rows, notes, out);
+            }
+        }
+    }
 }
 
 fn emit_para(
@@ -745,7 +881,15 @@ fn emit_para(
         emit_callouts(&para, out);
         return;
     }
-    if let Some((num_id, ilvl)) = &para.num {
+    // The list: declared on the paragraph, else by its style (List
+    // Bullet, List Number), unless the paragraph says it is in none.
+    let num = para.num.clone().or_else(|| {
+        if para.unnumbered {
+            return None;
+        }
+        style_list(styles, numbering, para.style.as_deref()?)
+    });
+    if let Some((num_id, ilvl)) = &num {
         close_quote(quote_open, out);
         let depth = (*ilvl as usize) + 1;
         close_lists(frames, depth.min(frames.len()), out);
@@ -888,6 +1032,12 @@ fn read_para(
     // The accumulated field instruction, XE-parsed at the field's
     // end or separate fldChar (instructions span several runs).
     let mut instr = String::new();
+    // Open `mc:AlternateContent`s: what the paragraph held when the
+    // choice began (text length, boxes, apparatus). A choice that
+    // read something is the reading; its fallback says the same
+    // again in an older vocabulary (a text box as VML) and is
+    // skipped.
+    let mut alternates: Vec<(usize, usize, usize)> = Vec::new();
     loop {
         let ev = reader
             .read_event_into(&mut buf)
@@ -897,12 +1047,30 @@ fn read_para(
                 depth += 1;
                 let name = e.name();
                 let name = name.as_ref();
-                if skip > 0 || matches!(name, b"w:del" | b"w:moveFrom") {
+                let said_already = name == b"mc:Fallback"
+                    && alternates.last().is_some_and(|&(text, boxes, marks)| {
+                        para.text.len() > text
+                            || para.boxes.len() > boxes
+                            || para.apparatus.len() > marks
+                    });
+                if skip > 0 || said_already || matches!(name, b"w:del" | b"w:moveFrom") {
                     skip += 1;
                     buf.clear();
                     continue;
                 }
                 match name {
+                    b"mc:AlternateContent" => {
+                        alternates.push((para.text.len(), para.boxes.len(), para.apparatus.len()));
+                    }
+                    // A text box: its paragraphs and tables are
+                    // blocks of their own, read to the box's end
+                    // and emitted after this paragraph. They were
+                    // merged into its text, and their properties
+                    // overwrote its own.
+                    b"w:txbxContent" => {
+                        read_box(reader, rels, in_bibliography, &mut para.boxes)?;
+                        depth -= 1;
+                    }
                     b"w:t" => in_text = true,
                     b"w:instrText" => in_instr = true,
                     b"w:hyperlink" => {
@@ -1025,9 +1193,11 @@ fn read_para(
                             }
                             instr.clear();
                         }
+                        // The listing ends: what the paragraph
+                        // said before the field is its own text
+                        // (it was emptied here).
                         if ty == "end" && *in_bibliography {
                             *in_bibliography = false;
-                            para.text.clear();
                         }
                         if ty == "end"
                             && let Some((t, internal, at)) = pending_field.take()
@@ -1069,6 +1239,9 @@ fn read_para(
                     match e.name().as_ref() {
                         b"w:t" => in_text = false,
                         b"w:instrText" => in_instr = false,
+                        b"mc:AlternateContent" => {
+                            alternates.pop();
+                        }
                         b"w:hyperlink" => {
                             if let Some((t, internal, at)) = hl.take() {
                                 let text =
@@ -1088,12 +1261,15 @@ fn read_para(
                 }
                 if depth == 0 {
                     // A numId of "0" (or one never set) is the
-                    // OOXML spelling of "not numbered".
+                    // OOXML spelling of "not numbered"; the zero
+                    // also takes the paragraph out of a list its
+                    // style declares.
                     if para
                         .num
                         .as_ref()
                         .is_some_and(|(id, _)| id.is_empty() || id == "0")
                     {
+                        para.unnumbered = para.num.as_ref().is_some_and(|(id, _)| id == "0");
                         para.num = None;
                     }
                     return Ok(para);
@@ -1106,13 +1282,62 @@ fn read_para(
     }
 }
 
+/// Read a text box's content (`w:txbxContent`, its start tag just
+/// read) to its end tag: each paragraph and table a block.
+fn read_box(
+    reader: &mut Reader<&[u8]>,
+    rels: &std::collections::HashMap<String, String>,
+    in_bibliography: &mut bool,
+    out: &mut Vec<BoxItem>,
+) -> Result<(), DocxError> {
+    let mut buf = Vec::new();
+    let mut depth = 1usize;
+    loop {
+        let ev = reader
+            .read_event_into(&mut buf)
+            .map_err(|e| DocxError::Xml("word/document.xml", e))?;
+        match &ev {
+            Event::Start(e) if e.name().as_ref() == b"w:p" => {
+                out.push(BoxItem::Para(read_para(reader, rels, in_bibliography)?));
+            }
+            Event::Start(e) if e.name().as_ref() == b"w:tbl" => {
+                let (headers, rows, notes) = read_table(reader)?;
+                out.push(BoxItem::Table(headers, rows, notes));
+            }
+            Event::Start(_) => depth += 1,
+            Event::End(_) => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(());
+                }
+            }
+            Event::Eof => return Ok(()),
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
+/// `w:val` of an on/off property: on unless it says otherwise.
+fn on(e: &quick_xml::events::BytesStart) -> bool {
+    !matches!(attr(e, b"w:val").as_deref(), Some("false" | "0" | "off"))
+}
+
 /// Read one `w:tbl` to its end tag. The declared `w:tblHeader` on
 /// leading rows yields the header vector; nested tables flatten
-/// into their cell's text.
+/// into their cell's text. The third part is the note callouts met
+/// in the cells, in order.
 #[allow(clippy::type_complexity)]
 fn read_table(
     reader: &mut Reader<&[u8]>,
-) -> Result<(Option<Vec<String>>, Vec<Vec<Cell>>), DocxError> {
+) -> Result<
+    (
+        Option<Vec<String>>,
+        Vec<Vec<Cell>>,
+        Vec<(String, NoteFamily)>,
+    ),
+    DocxError,
+> {
     let mut buf = Vec::new();
     let mut depth = 1usize;
     let mut skip = 0usize;
@@ -1120,6 +1345,11 @@ fn read_table(
     let mut row: Option<(bool, Vec<Cell>)> = None;
     let mut cell: Option<String> = None;
     let mut in_text = false;
+    let mut notes: Vec<(String, NoteFamily)> = Vec::new();
+    // As in a paragraph: a fallback that repeats its choice (a text
+    // box in a cell) is skipped. The mark is the cell's length when
+    // the choice began.
+    let mut alternates: Vec<usize> = Vec::new();
     loop {
         let ev = reader
             .read_event_into(&mut buf)
@@ -1129,12 +1359,27 @@ fn read_table(
                 depth += 1;
                 let name = e.name();
                 let name = name.as_ref();
-                if skip > 0 || matches!(name, b"w:del" | b"w:moveFrom" | b"w:instrText") {
+                let said_already = name == b"mc:Fallback"
+                    && alternates
+                        .last()
+                        .is_some_and(|&mark| cell.as_ref().is_some_and(|c| c.len() > mark));
+                if skip > 0
+                    || said_already
+                    || matches!(name, b"w:del" | b"w:moveFrom" | b"w:instrText")
+                {
                     skip += 1;
                     buf.clear();
                     continue;
                 }
                 match name {
+                    b"mc:AlternateContent" => {
+                        alternates.push(cell.as_ref().map_or(0, String::len));
+                    }
+                    b"w:tblHeader" => {
+                        if let Some((header, _)) = row.as_mut() {
+                            *header = on(e);
+                        }
+                    }
                     b"w:tr" => row = Some((false, Vec::new())),
                     b"w:tc" => cell = Some(String::new()),
                     b"w:t" => in_text = true,
@@ -1142,14 +1387,28 @@ fn read_table(
                 }
             }
             Event::Empty(e) if skip == 0 => match e.name().as_ref() {
+                // on unless it says otherwise: `w:val="false"`
+                // made the row a header all the same
                 b"w:tblHeader" => {
                     if let Some((header, _)) = row.as_mut() {
-                        *header = true;
+                        *header = on(e);
                     }
                 }
                 b"w:tab" | b"w:br" | b"w:cr" => {
                     if let Some(c) = cell.as_mut() {
                         c.push(' ');
+                    }
+                }
+                // a callout in a cell: kept for after the table
+                // (it was lost)
+                b"w:footnoteReference" => {
+                    if let Some(id) = attr(e, b"w:id") {
+                        notes.push((id, NoteFamily::Footnote));
+                    }
+                }
+                b"w:endnoteReference" => {
+                    if let Some(id) = attr(e, b"w:id") {
+                        notes.push((id, NoteFamily::Endnote));
                     }
                 }
                 _ => {}
@@ -1173,6 +1432,9 @@ fn read_table(
                 } else {
                     match name {
                         b"w:t" => in_text = false,
+                        b"mc:AlternateContent" => {
+                            alternates.pop();
+                        }
                         b"w:tc" => {
                             if let (Some((_, cells)), Some(text)) = (row.as_mut(), cell.take()) {
                                 cells.push(Cell {
@@ -1202,10 +1464,10 @@ fn read_table(
                     } else {
                         None
                     };
-                    return Ok((headers, rows.into_iter().map(|(_, r)| r).collect()));
+                    return Ok((headers, rows.into_iter().map(|(_, r)| r).collect(), notes));
                 }
             }
-            Event::Eof => return Ok((None, Vec::new())),
+            Event::Eof => return Ok((None, Vec::new(), notes)),
             _ => {}
         }
         buf.clear();

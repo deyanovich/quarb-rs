@@ -57,6 +57,14 @@ pub fn run(format: &str, input: &str, query: &str, now_millis: f64) -> String {
         "toml" => quarb_toml::parse(input)
             .map_err(|e| mount_error(format!("parsing TOML: {e}")))
             .and_then(|a| go(query, &a, |n| a.pointer(n), secs, nanos)),
+        // The property reading of YAML and of TOML, under their own
+        // names (ruling 2026-11-12).
+        "yaml2" => quarb_yaml::parse_as(input, quarb_json::Reading::Property)
+            .map_err(|e| mount_error(format!("parsing YAML: {e}")))
+            .and_then(|a| go(query, &a, |n| a.pointer(n), secs, nanos)),
+        "toml2" => quarb_toml::parse_as(input, quarb_json::Reading::Property)
+            .map_err(|e| mount_error(format!("parsing TOML: {e}")))
+            .and_then(|a| go(query, &a, |n| a.pointer(n), secs, nanos)),
         // `csv` / `tsv`, or `csv;` / `csv;comma` — the delimiter and
         // the decimal convention after the format's name, as the
         // mount options say them.

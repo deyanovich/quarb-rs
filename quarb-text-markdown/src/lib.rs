@@ -22,11 +22,24 @@
 //!   callout that resolves to it.
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use quarb_text::{Block, Container, NoteFamily, TextModel};
+use quarb_text::{Block, Container, HeadMeta, NoteFamily, TextModel};
 
 /// Parse Markdown `text` and lower it to a text-level document.
+///
+/// A YAML header at the top (`---`, a mapping, `---` or `...`: a
+/// note's front matter) is what the document declares about itself,
+/// as an HTML head is: every key answers on the document node under
+/// its own name with its YAML type (`:::year`), and the curated core
+/// as properties (`::title`, `::author`, `::tags`, `::published`),
+/// the tags as traits too ([`HeadMeta::from_header`]). The header is
+/// no part of the text: no rule, no heading, no paragraph.
 pub fn parse(text: &str) -> TextModel {
-    TextModel::build(blocks(text))
+    let Some((entries, body)) = quarb_yaml::front_matter(text) else {
+        return TextModel::build(blocks(text));
+    };
+    let mut model = TextModel::build(blocks(body));
+    model.set_head_meta(HeadMeta::from_header(entries));
+    model
 }
 
 /// Pandoc-style bracketed citations: every `@key` inside a

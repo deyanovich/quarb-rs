@@ -25,6 +25,12 @@ queries against the session's mounts; a small directive family
 - ``%translate LANG QUERY`` — show a jq / xpath / sql query as
   Quarb text.
 
+A cell holding a mount line reads a mounted source again under
+options, as a session's line does in quai:
+``mount ledger: ?delimiter=semicolon&decimal=comma``, the name left
+out where one source is mounted (``mount: ?null=NA``). The options
+stand in place of whatever the target carried after ``?``.
+
 A cell holding only ``def``/``macro`` statements (and ``#``
 comments) extends the session's fragment table instead of
 running: the names it defines resolve in every later cell, so an
@@ -169,9 +175,16 @@ def _make_kernel_class():
                         self._send_text(out + "\n")
                 if query_lines:
                     text = "\n".join(query_lines)
+                    # A mount line reads a mounted source again
+                    # under options, as in quai (`mount NAME:
+                    # ?delimiter=semicolon`), and answers nothing; it
+                    # went to the engine as a query and failed there.
+                    remount = Session.remount_statements(text)
+                    if remount is not None:
+                        self.qsession.remount(remount)
                     # A defs-only cell extends the session's fragment
                     # table: its names resolve in every later cell.
-                    if Session.is_defs(text):
+                    elif Session.is_defs(text):
                         out = self.qsession.add_defs(text)
                         if not silent and out:
                             self._send_text(out + "\n")

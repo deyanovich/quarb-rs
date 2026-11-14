@@ -46,6 +46,12 @@ pub(crate) fn gcp_token(account: Option<&str>) -> Result<String, String> {
     {
         return Ok(t.trim().to_string());
     }
+    // under the offline switch gcloud is not run for a token
+    quarb_http::check_tool(
+        "gcloud",
+        None,
+        Some("QUARB_GCP_TOKEN holds a token to send"),
+    )?;
     let mut cmd = std::process::Command::new("gcloud");
     cmd.args(["auth", "print-access-token"]);
     if let Some(a) = account {

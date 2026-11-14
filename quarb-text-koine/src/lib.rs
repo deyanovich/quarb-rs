@@ -124,8 +124,31 @@ pub fn parse_str(source: &str, dir: &Path) -> Result<TextModel, KoineError> {
 
 /// Import Markdown through atrep's endomorphosis (`at-markdown`)
 /// and lower it — `koine:notes.md`.
+///
+/// A YAML header at the top is what the document declares about
+/// itself, as on the text level (`quarb-text-markdown`): it comes
+/// off before the import, which would read it as a rule and a
+/// heading, and lands on the document node.
 pub fn parse_markdown(text: &str) -> Result<TextModel, KoineError> {
-    import(atrep::endo::markdown_to_document(text)?)
+    let Some((entries, body)) = quarb_yaml::front_matter(text) else {
+        return import(atrep::endo::markdown_to_document(text)?);
+    };
+    let mut model = import(atrep::endo::markdown_to_document(body)?)?;
+    let mut head = quarb_text::HeadMeta::from_header(entries);
+    // what the import declared stands where the header is silent
+    let was = model.head_meta().clone();
+    head.declared = was.declared;
+    head.title = head.title.or(was.title);
+    head.description = head.description.or(was.description);
+    head.author = head.author.or(was.author);
+    head.category = head.category.or(was.category);
+    head.published = head.published.or(was.published);
+    head.modified = head.modified.or(was.modified);
+    for t in &was.tags {
+        head.tag(t);
+    }
+    model.set_head_meta(head);
+    Ok(model)
 }
 
 /// Import HTML through atrep's endomorphosis (`at-html`) and

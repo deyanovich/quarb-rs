@@ -202,6 +202,15 @@ impl LocalExecutor {
     }
 }
 
+/// A run's diagnostics behind what the mounts raised and no run has
+/// told yet (a sheet a workbook could not read): told with the first
+/// line the session reports, once.
+fn told_with(diagnostics: Vec<quarb::Diagnostic>) -> Vec<quarb::Diagnostic> {
+    let mut told = quarb::take_at_mount();
+    told.extend(diagnostics);
+    told
+}
+
 impl Executor for LocalExecutor {
     fn session_memory(&self) -> Option<quarb::SessionMemory> {
         Some(self.session.clone())
@@ -214,7 +223,7 @@ impl Executor for LocalExecutor {
             run_doc(&self.doc, query, &run)?
         };
         *self.refs.borrow_mut() = refs;
-        *self.diagnostics.borrow_mut() = diagnostics;
+        *self.diagnostics.borrow_mut() = told_with(diagnostics);
         *self.drawing.borrow_mut() = drawing;
         Ok(cells)
     }
@@ -278,7 +287,7 @@ impl Executor for LocalExecutor {
             .run_rendering(query, &run)
             .map_err(anyhow::Error::new)?;
         *self.refs.borrow_mut() = out.refs;
-        *self.diagnostics.borrow_mut() = out.diagnostics;
+        *self.diagnostics.borrow_mut() = told_with(out.diagnostics);
         let Some(closing) = out.closing.filter(|c| !c.csv) else {
             // Not a table after all (a csv, or no closing command):
             // the rows as the run would have printed them.

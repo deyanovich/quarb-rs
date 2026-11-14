@@ -1273,7 +1273,25 @@ pub fn parse_model_file(path: &std::path::Path) -> Result<Model, String> {
         std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text).to_owned();
     let mut visited = vec![path.canonicalize().unwrap_or_else(|_| path.to_path_buf())];
-    parse_model_in(&text, path.parent(), &mut visited, &mut Vec::new())
+    let model = parse_model_in(&text, path.parent(), &mut visited, &mut Vec::new())?;
+    // `mount NAME: ?options` names no source: it is the line that
+    // re-reads a mounted source under options, a session's (quai, a
+    // notebook's cell). A file has nothing mounted to re-read; the
+    // statement was taken for a target and failed on an empty path.
+    if let Some(m) = model
+        .mounts
+        .iter()
+        .find(|m| m.target.trim_start().starts_with('?'))
+    {
+        return Err(format!(
+            "'mount {name}: {target}' names no source, only options: that line re-reads a \
+             mounted source in a session; a model file mounts a source by its target, \
+             'mount {name}: FILE{target}'",
+            name = m.name,
+            target = m.target.trim()
+        ));
+    }
+    Ok(model)
 }
 
 fn parse_model_in(
@@ -1728,6 +1746,17 @@ fn parse_model_in(
                     unit,
                     stmt: stmt.to_string(),
                 });
+            }
+            // `mount: ?options`, the name left out: the line that
+            // re-reads the one mounted source of a session. No
+            // statement of a model; said so, not "unknown".
+            "mount:" => {
+                return Err(format!(
+                    "'{stmt}' names no source, only options: that line re-reads a mounted \
+                     source in a session; a model mounts a source by a name and its target, \
+                     'mount NAME: FILE{}'",
+                    rest.trim()
+                ));
             }
             other => {
                 return Err(format!(

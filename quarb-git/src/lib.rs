@@ -32,8 +32,10 @@
 //! Everything is read through git plumbing over subprocess
 //! (`rev-list`, `rev-parse`, `ls-tree`, `cat-file`, ...) — no
 //! libgit2, no new dependencies — lazily, one object on first
-//! touch, cached for the adapter's lifetime. The adapter never
-//! writes.
+//! touch. The tree and the commits are kept for the adapter's
+//! lifetime; a blob's content is read again at each read, through
+//! one open `cat-file --batch` pipe, so a large file is never held.
+//! The adapter never writes.
 
 use quarb::{AstAdapter, NodeId, Value};
 use std::cell::RefCell;

@@ -3025,6 +3025,39 @@ nothing about encodings.
   ordinal, or party and year; the citations become \texttt{cit}
   nodes and the resolution pass runs again.
 
+\paragraph{The offline switch.}
+A gate that replays recorded data sets \texttt{QUARB\_OFFLINE},
+  and a target that would reach the network is then refused where
+  it is mounted, before anything is read: under \texttt{1}
+  nothing on the network is reached, under \texttt{localhost}
+  nothing but this machine's own addresses (the name
+  \texttt{localhost}, 127.0.0.0/8, \texttt{::1}; a name is never
+  resolved to find out), \texttt{0} is the switch off as with the
+  variable unset, and any other value, the empty one too, refuses
+  every mount.
+The switch has two layers.
+One table, \texttt{quarb\_open::offline::OUTSIDE}, says how each
+  kind of target names what it reaches: the host of its authority,
+  a URL after the prefix, a cloud service unless
+  \texttt{endpoint=} names another address, or a program run in
+  the target's place (\texttt{gh}, \texttt{glab},
+  \texttt{kubectl}, \texttt{gcloud}), which is let through only
+  when the variable naming a recorded stand-in for it is set.
+\texttt{offline::gate} reads the table at the top of
+  \texttt{open\_mount}, and \texttt{qua} calls it for every
+  target before it opens the doors it keeps to itself (the
+  relational stores, for pushdown; the web level).
+Behind the table, the resolver of the shared HTTP agent
+  (\texttt{quarb-http}) refuses the same hosts on every request an
+  adapter makes later, a page of results or a followed link, and
+  \texttt{quarb\_http::check\_tool} keeps \texttt{az} and
+  \texttt{gcloud} from being run for a token.
+A new adapter that leaves this machine gets a row in the table;
+  one that speaks HTTP goes through \texttt{quarb\_http::agent()}
+  and is held by the resolver with no further code.
+A program the user names (\texttt{serve:}, a query's own
+  commands) is out of the switch's reach by design.
+
 \section{Worked Example: the Filesystem Adapter}
 
 \texttt{quarb-fs} implements the live trait over a directory tree. It

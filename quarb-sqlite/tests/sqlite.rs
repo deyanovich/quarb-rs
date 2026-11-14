@@ -716,3 +716,41 @@ fn prefetch_surfaces_bad_filter() {
     let good = SqliteAdapter::open_filtered(&path, "t", "x = \"a\"").unwrap();
     assert!(good.prefetch("t").is_ok());
 }
+
+/// A column the schema types JSON declares its cells' notation
+/// (spec: Grafting), whichever way the database was read: from its
+/// file, from an open connection, from its bytes. The eager load
+/// (a connection, bytes: what the browser hands over) lost the
+/// declaration, so `payload<json>/user/name` answered nothing
+/// there and the cell's children were none.
+#[test]
+fn a_loaded_database_declares_its_json_columns() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE events (id INTEGER PRIMARY KEY, kind TEXT, payload JSON);
+        INSERT INTO events VALUES (1, 'login', '{"user": {"name": "ada"}, "ip": "10.0.0.7"}');
+        "#,
+    )
+    .unwrap();
+    let declared = |a: &SqliteAdapter| {
+        let events = a.children_named(a.root(), "events")[0];
+        let row = a.children(events)[0];
+        (
+            a.declared_notation(a.children_named(row, "payload")[0]),
+            a.declared_notation(a.children_named(row, "kind")[0]),
+        )
+    };
+    let loaded = SqliteAdapter::load(&conn).unwrap();
+    assert_eq!(declared(&loaded), (Some("json".to_string()), None));
+    // the same database from its bytes, and from its file
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("audit.db");
+    conn.execute(&format!("VACUUM INTO '{}'", path.display()), [])
+        .unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let from_bytes = SqliteAdapter::from_bytes(&bytes).unwrap();
+    assert_eq!(declared(&from_bytes), (Some("json".to_string()), None));
+    let opened = SqliteAdapter::open(&path).unwrap();
+    assert_eq!(declared(&opened), (Some("json".to_string()), None));
+}

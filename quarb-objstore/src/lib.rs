@@ -97,6 +97,9 @@ fn gcp_token(account: Option<&str>) -> Option<String> {
     {
         return Some(t.trim().to_string());
     }
+    // under the offline switch gcloud is not run for a token: a
+    // recorded server takes none, and the cloud is not reached
+    quarb_http::check_tool("gcloud", None, None).ok()?;
     let mut cmd = std::process::Command::new("gcloud");
     cmd.args(["auth", "print-access-token"]);
     if let Some(a) = account {

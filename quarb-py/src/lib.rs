@@ -91,6 +91,14 @@ impl Doc {
             "toml" => quarb_toml::parse(input)
                 .map(Doc::Json)
                 .map_err(|e| format!("parsing TOML: {e}")),
+            // The property reading of YAML and of TOML, under their
+            // own names (ruling 2026-11-12).
+            "yaml2" => quarb_yaml::parse_as(input, quarb_json::Reading::Property)
+                .map(Doc::Json)
+                .map_err(|e| format!("parsing YAML: {e}")),
+            "toml2" => quarb_toml::parse_as(input, quarb_json::Reading::Property)
+                .map(Doc::Json)
+                .map_err(|e| format!("parsing TOML: {e}")),
             "csv" | "tsv" => {
                 let delim = if format == "tsv" { b'\t' } else { b',' };
                 quarb_csv::CsvAdapter::parse_with_delimiter(input, delim)

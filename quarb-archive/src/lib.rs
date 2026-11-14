@@ -56,9 +56,13 @@ pub enum ArchiveError {
     )]
     Format,
     #[error(
-        "archive: {name}: the members read so far exceed {limit} bytes decompressed; this reading holds a tar or 7z archive in memory"
+        "archive: {name}: the members read so far exceed {limit} bytes decompressed; this reading holds the members of a tar, 7z, rar, chm or mhtml archive in memory"
     )]
     TooLarge { name: String, limit: u64 },
+    #[error(
+        "archive: the file holds no tar (its first block is no tar header); a compressed file that holds one file mounts as that file when its name ends in the compression's extension (notes.json.gz)"
+    )]
+    NotATar,
     #[error("archive: 7z: {0}")]
     SevenZ(String),
     #[error("archive: chm: {0}")]
@@ -91,6 +95,7 @@ struct Node {
 
 enum Source {
     Zip(RefCell<zip::ZipArchive<std::fs::File>>),
+    ZipBytes(RefCell<zip::ZipArchive<std::io::Cursor<Vec<u8>>>>),
     /// Tar contents are read up front (streaming format).
     Tar,
 }
@@ -151,6 +156,179 @@ impl Compression {
             Compression::None
         }
     }
+}
+
+/// Whether a member's name says archive (its extension).
+fn archive_member(name: &str) -> bool {
+    name.rsplit_once('.')
+        .is_some_and(|(_, ext)| archive_extension(ext))
+}
+
+/// Whether an extension names a compression that wraps one stream
+/// (gzip, xz, bzip2, zstd): the stream is a tar, or one file.
+pub fn compression_extension(ext: &str) -> bool {
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "gz" | "xz" | "bz2" | "zst"
+    )
+}
+
+/// Whether a 512-byte block is a tar header: its checksum field
+/// holds the sum of its bytes (the field read as spaces), which no
+/// text and no other format meets by accident. With `empty`, a block
+/// of zeros counts too: an archive of no members begins with one.
+fn tar_block(block: &[u8], empty: bool) -> bool {
+    if block.len() < 512 {
+        return false;
+    }
+    let block = &block[..512];
+    if block.iter().all(|b| *b == 0) {
+        return empty;
+    }
+    let field: String = block[148..156]
+        .iter()
+        .map(|b| *b as char)
+        .filter(|c| c.is_ascii_digit())
+        .collect();
+    let Ok(declared) = u32::from_str_radix(&field, 8) else {
+        return false;
+    };
+    let sum = |signed: bool| -> i64 {
+        block
+            .iter()
+            .enumerate()
+            .map(|(i, b)| match (148..156).contains(&i) {
+                true => 32,
+                false if signed => *b as i8 as i64,
+                false => *b as i64,
+            })
+            .sum()
+    };
+    // some old writers summed the bytes as signed
+    declared as i64 == sum(false) || declared as i64 == sum(true)
+}
+
+/// Whether the first bytes of a file say archive: the magic of a
+/// zip, a gzip, xz, bzip2 or zstd stream, a 7z, a RAR, a CHM, or a
+/// tar header in the first block. What a front-end asks of a file
+/// whose name says nothing (`backup.dat`).
+pub fn sniff(head: &[u8]) -> bool {
+    head.starts_with(b"PK")
+        || head.starts_with(&[0x1f, 0x8b])
+        || head.starts_with(&[0xFD, b'7', b'z', b'X', b'Z', 0x00])
+        // "BZh", the level, then the first block's magic: three
+        // letters alone could open a text
+        || (head.len() >= 10
+            && head.starts_with(b"BZh")
+            && head[3].is_ascii_digit()
+            && head[4..10] == [0x31, 0x41, 0x59, 0x26, 0x53, 0x59])
+        || head.starts_with(&[0x28, 0xB5, 0x2F, 0xFD])
+        || head.starts_with(&[b'7', b'z', 0xBC, 0xAF, 0x27, 0x1C])
+        || head.starts_with(b"Rar!\x1a\x07")
+        || head.starts_with(b"ITSF")
+        || tar_block(head, false)
+}
+
+/// The stream a compression wraps, decoded. The xz decoder holds
+/// its whole output in memory and is bounded by `limit` before it
+/// starts (the stream's index declares its size); the others
+/// stream.
+fn decoder<'a, R: Read + 'a>(
+    mut f: R,
+    compression: Compression,
+    limit: u64,
+) -> Result<Box<dyn Read + 'a>, ArchiveError> {
+    Ok(match compression {
+        Compression::None => Box::new(f),
+        Compression::Gzip => Box::new(flate2::read::GzDecoder::new(f)),
+        Compression::Bzip2 => Box::new(bzip2::read::BzDecoder::new(f)),
+        Compression::Zstd => Box::new(
+            ruzstd::decoding::StreamingDecoder::new(f)
+                .map_err(|e| std::io::Error::other(e.to_string()))?,
+        ),
+        // lzma-rs decodes a whole stream at once and holds it
+        // in memory before writing a byte, so the bound is
+        // checked first against what the stream declares: the
+        // xz index at the end of the file records every
+        // block's uncompressed size. A stream declaring more
+        // than the bound (or whose compressed form alone
+        // exceeds it) is refused before any decoding; the sink
+        // still stops at the bound should a stream lie.
+        Compression::Xz => {
+            let mut compressed = Vec::new();
+            (&mut f).take(limit + 1).read_to_end(&mut compressed)?;
+            let declared = xz_uncompressed_size(&compressed);
+            if compressed.len() as u64 > limit || declared.is_none_or(|d| d > limit) {
+                return Err(ArchiveError::TooLarge {
+                    name: "(xz stream)".into(),
+                    limit,
+                });
+            }
+            let mut input = std::io::Cursor::new(compressed);
+            let mut out = Capped {
+                buf: Vec::new(),
+                limit,
+                over: false,
+            };
+            match lzma_rs::xz_decompress(&mut input, &mut out) {
+                Ok(()) => {}
+                Err(_) if out.over => {
+                    return Err(ArchiveError::TooLarge {
+                        name: "(xz stream)".into(),
+                        limit,
+                    });
+                }
+                Err(e) => return Err(std::io::Error::other(e.to_string()).into()),
+            }
+            Box::new(std::io::Cursor::new(out.buf))
+        }
+    })
+}
+
+/// A compressed file that holds one file and no tar
+/// (`notes.json.gz`): its decompressed bytes written to `out`, and
+/// `true`. `false`, with nothing written, for a file that is not
+/// compressed or that holds a tar: an archive, left to
+/// [`ArchiveAdapter::open`]. Past `limit` bytes decompressed the
+/// file is refused. (An xz stream is decoded in memory, so it is
+/// held to [`MAX_ARCHIVE_BYTES`] whatever `limit` allows.)
+pub fn decompress_lone(path: &Path, out: &mut dyn Write, limit: u64) -> Result<bool, ArchiveError> {
+    let mut f = std::fs::File::open(path)?;
+    let mut magic = [0u8; 6];
+    let n = f.read(&mut magic)?;
+    let compression = Compression::of(&magic[..n]);
+    if compression == Compression::None {
+        return Ok(false);
+    }
+    drop(f);
+    let f = std::fs::File::open(path)?;
+    let bound = match compression {
+        Compression::Xz => limit.min(MAX_ARCHIVE_BYTES),
+        _ => limit,
+    };
+    let mut reader = decoder(f, compression, bound)?;
+    let mut head = Vec::with_capacity(512);
+    (&mut reader).take(512).read_to_end(&mut head)?;
+    if tar_block(&head, true) {
+        return Ok(false);
+    }
+    let too_large = || ArchiveError::TooLarge {
+        name: path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        limit,
+    };
+    if head.len() as u64 > limit {
+        return Err(too_large());
+    }
+    out.write_all(&head)?;
+    let left = limit - head.len() as u64;
+    let copied = std::io::copy(&mut (&mut reader).take(left.saturating_add(1)), out)?;
+    if copied > left {
+        return Err(too_large());
+    }
+    Ok(true)
 }
 
 /// How much a tar or 7z archive may decompress into memory at
@@ -538,6 +716,10 @@ pub struct ArchiveAdapter {
     decoding: SourceDecoding,
     /// Per entry: the decoding record, once read.
     records: RefCell<Vec<Option<(String, usize)>>>,
+    /// The bytes of the members a tar holds that are archives
+    /// themselves (by their names): what a nested archive opens
+    /// from. A zip reads a member's bytes on demand and keeps none.
+    raw: HashMap<usize, Vec<u8>>,
 }
 
 impl ArchiveAdapter {
@@ -591,12 +773,28 @@ impl ArchiveAdapter {
             return Self::open_7z(path, decoding, limit);
         }
         if head.starts_with(b"ITSF") {
-            return Self::open_chm(path, decoding);
+            return Self::open_chm(path, decoding, limit);
         }
         if head.starts_with(b"Rar!\x1a") {
-            return Self::open_rar(path, decoding);
+            return Self::open_rar(path, decoding, limit);
         }
-        if path.extension().and_then(|e| e.to_str()) == Some("tar") {
+        // A plain tar: by its name, in any case (`P.TAR`), or by its
+        // first block under any name.
+        let named_tar = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("tar"));
+        let mut block = [0u8; 512];
+        let mut f = std::fs::File::open(path)?;
+        let mut got = 0;
+        while got < block.len() {
+            match f.read(&mut block[got..])? {
+                0 => break,
+                k => got += k,
+            }
+        }
+        drop(f);
+        if named_tar || tar_block(&block[..got], false) {
             return Self::open_tar(path, Compression::None, decoding, limit);
         }
         // A MIME envelope: by its extension, or by the header
@@ -606,7 +804,7 @@ impl ArchiveAdapter {
             .and_then(|e| e.to_str())
             .map(|e| e.to_ascii_lowercase());
         if matches!(ext.as_deref(), Some("mhtml" | "mht")) || looks_like_mime(path)? {
-            return Self::open_mhtml(path, decoding);
+            return Self::open_mhtml(path, decoding, limit);
         }
         Err(ArchiveError::Format)
     }
@@ -620,7 +818,18 @@ impl ArchiveAdapter {
     /// the source boundary; its transfer encoding (base64,
     /// quoted-printable, 7bit/8bit/binary) is undone first. A
     /// single-part file is one member.
-    fn open_mhtml(path: &Path, decoding: SourceDecoding) -> Result<Self, ArchiveError> {
+    fn open_mhtml(path: &Path, decoding: SourceDecoding, limit: u64) -> Result<Self, ArchiveError> {
+        // the envelope is read whole and its parts are no larger
+        // than it: the bound is on the file
+        if std::fs::metadata(path)?.len() > limit {
+            return Err(ArchiveError::TooLarge {
+                name: path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                limit,
+            });
+        }
         let bytes = std::fs::read(path)?;
         let parts = mime::parts(&bytes);
         if parts.is_empty() {
@@ -660,6 +869,7 @@ impl ArchiveAdapter {
             source: Source::Tar,
             decoding,
             records: RefCell::new(records),
+            raw: HashMap::new(),
         })
     }
 
@@ -670,8 +880,9 @@ impl ArchiveAdapter {
     /// a page without one decodes under the code page of the
     /// `#SYSTEM` record's locale, the format's own declaration of
     /// its text's encoding.
-    fn open_chm(path: &Path, decoding: SourceDecoding) -> Result<Self, ArchiveError> {
+    fn open_chm(path: &Path, decoding: SourceDecoding, limit: u64) -> Result<Self, ArchiveError> {
         let mut chm = libchm::ChmFile::open(path).map_err(|e| ArchiveError::Chm(e.to_string()))?;
+        let mut total: u64 = 0;
         let locale_label = chm
             .read_path("/#SYSTEM")
             .ok()
@@ -688,6 +899,11 @@ impl ArchiveAdapter {
             if entry.kind == libchm::EntryKind::Dir {
                 b.dir(&name);
                 continue;
+            }
+            // the pages are held in memory: the same bound as a tar's
+            total = total.saturating_add(entry.length);
+            if total > limit {
+                return Err(ArchiveError::TooLarge { name, limit });
             }
             let buf = chm
                 .read(&entry)
@@ -720,6 +936,7 @@ impl ArchiveAdapter {
             source: Source::Tar,
             decoding,
             records: RefCell::new(records),
+            raw: HashMap::new(),
         })
     }
 
@@ -727,10 +944,11 @@ impl ArchiveAdapter {
     /// read up front (the format is solid as often as not), under
     /// the mount's rule like tar's.
     #[cfg(feature = "rar")]
-    fn open_rar(path: &Path, decoding: SourceDecoding) -> Result<Self, ArchiveError> {
+    fn open_rar(path: &Path, decoding: SourceDecoding, limit: u64) -> Result<Self, ArchiveError> {
         let mut archive = unrar::Archive::new(path)
             .open_for_processing()
             .map_err(|e| ArchiveError::Rar(e.to_string()))?;
+        let mut total: u64 = 0;
         let mut b = TreeBuilder::new();
         let mut contents = Vec::new();
         let mut records = Vec::new();
@@ -751,6 +969,13 @@ impl ArchiveAdapter {
                 continue;
             }
             let size = header.unpacked_size as i64;
+            // the members are held in memory: the same bound as a
+            // tar's, checked on what the header declares before the
+            // member is read
+            total = total.saturating_add(header.unpacked_size);
+            if total > limit {
+                return Err(ArchiveError::TooLarge { name, limit });
+            }
             let (buf, next) = at_file
                 .read()
                 .map_err(|e| ArchiveError::Rar(e.to_string()))?;
@@ -776,11 +1001,16 @@ impl ArchiveAdapter {
             source: Source::Tar,
             decoding,
             records: RefCell::new(records),
+            raw: HashMap::new(),
         })
     }
 
     #[cfg(not(feature = "rar"))]
-    fn open_rar(_path: &Path, _decoding: SourceDecoding) -> Result<Self, ArchiveError> {
+    fn open_rar(
+        _path: &Path,
+        _decoding: SourceDecoding,
+        _limit: u64,
+    ) -> Result<Self, ArchiveError> {
         Err(ArchiveError::RarUnavailable)
     }
 
@@ -846,12 +1076,94 @@ impl ArchiveAdapter {
             source: Source::Tar,
             decoding,
             records: RefCell::new(records),
+            raw: HashMap::new(),
         })
     }
 
     fn open_zip(path: &Path, decoding: SourceDecoding) -> Result<Self, ArchiveError> {
         let f = std::fs::File::open(path)?;
         let mut zip = zip::ZipArchive::new(f)?;
+        let (nodes, zip_names, zip_indices) = Self::zip_tree(&mut zip, &decoding)?;
+        let n = zip_names.len();
+        Ok(ArchiveAdapter {
+            nodes,
+            contents: RefCell::new(vec![None; n]),
+            zip_names,
+            zip_indices,
+            source: Source::Zip(RefCell::new(zip)),
+            decoding,
+            records: RefCell::new(vec![None; n]),
+            raw: HashMap::new(),
+        })
+    }
+
+    /// A zip held in memory: the form a host has that was handed
+    /// the file's bytes (a browser after one fetch, a dropped file).
+    pub fn from_zip_bytes(bytes: &[u8]) -> Result<Self, ArchiveError> {
+        Self::from_zip_bytes_with_decoding(bytes, SourceDecoding::default())
+    }
+
+    /// [`from_zip_bytes`](Self::from_zip_bytes) under a mount's
+    /// source-boundary rule.
+    pub fn from_zip_bytes_with_decoding(
+        bytes: &[u8],
+        decoding: SourceDecoding,
+    ) -> Result<Self, ArchiveError> {
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec()))?;
+        let (nodes, zip_names, zip_indices) = Self::zip_tree(&mut zip, &decoding)?;
+        let n = zip_names.len();
+        Ok(ArchiveAdapter {
+            nodes,
+            contents: RefCell::new(vec![None; n]),
+            zip_names,
+            zip_indices,
+            source: Source::ZipBytes(RefCell::new(zip)),
+            decoding,
+            records: RefCell::new(vec![None; n]),
+            raw: HashMap::new(),
+        })
+    }
+
+    /// An archive held in memory, told by its first bytes: a zip
+    /// (`PK`), else a tar, plain or compressed.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ArchiveError> {
+        Self::from_bytes_with_decoding(bytes, SourceDecoding::default())
+    }
+
+    /// [`from_bytes`](Self::from_bytes) under a mount's
+    /// source-boundary rule: what an archive inside an archive
+    /// opens with, its members read as its holder's are.
+    pub fn from_bytes_with_decoding(
+        bytes: &[u8],
+        decoding: SourceDecoding,
+    ) -> Result<Self, ArchiveError> {
+        if bytes.starts_with(b"PK") {
+            Self::from_zip_bytes_with_decoding(bytes, decoding)
+        } else {
+            Self::from_tar_bytes_with_decoding(bytes, decoding)
+        }
+    }
+
+    /// The bytes of a member, as the archive holds them: a zip's
+    /// read now, a tar's kept at the open for the members that are
+    /// archives themselves. What a nested archive opens from; a
+    /// member that is no archive in a tar answers none.
+    pub fn member_bytes(&self, node: NodeId) -> Option<Vec<u8>> {
+        let entry = self.nodes.get(node.0 as usize)?.entry?;
+        match &self.source {
+            Source::Zip(zip) => self.read_member(&mut zip.borrow_mut(), entry),
+            Source::ZipBytes(zip) => self.read_member(&mut zip.borrow_mut(), entry),
+            Source::Tar => self.raw.get(&entry).cloned(),
+        }
+    }
+
+    /// The members of a zip as the tree, with each file's name and
+    /// its index in the archive.
+    #[allow(clippy::type_complexity)]
+    fn zip_tree<R: Read + std::io::Seek>(
+        zip: &mut zip::ZipArchive<R>,
+        decoding: &SourceDecoding,
+    ) -> Result<(Vec<Node>, Vec<String>, Vec<usize>), ArchiveError> {
         let mut b = TreeBuilder::new();
         let mut zip_names = Vec::new();
         let mut zip_indices = Vec::new();
@@ -880,21 +1192,11 @@ impl ArchiveAdapter {
                 Some(e.compressed_size() as i64),
             );
         }
-        let n = zip_names.len();
-        Ok(ArchiveAdapter {
-            nodes: b.nodes,
-            contents: RefCell::new(vec![None; n]),
-            zip_names,
-            zip_indices,
-            source: Source::Zip(RefCell::new(zip)),
-            decoding,
-            records: RefCell::new(vec![None; n]),
-        })
+        Ok((b.nodes, zip_names, zip_indices))
     }
 
-    /// A tar or gzipped tar held in memory — the form a browser
-    /// has after one fetch. Zip needs a seekable file and stays
-    /// with [`open`](Self::open).
+    /// A tar, plain or compressed, held in memory — the form a
+    /// browser has after one fetch.
     pub fn from_tar_bytes(bytes: &[u8]) -> Result<Self, ArchiveError> {
         Self::from_tar_bytes_with_decoding(bytes, SourceDecoding::default())
     }
@@ -928,55 +1230,23 @@ impl ArchiveAdapter {
         decoding: SourceDecoding,
         limit: u64,
     ) -> Result<Self, ArchiveError> {
-        let reader: Box<dyn Read + 'a> = match compression {
-            Compression::None => Box::new(f),
-            Compression::Gzip => Box::new(flate2::read::GzDecoder::new(f)),
-            Compression::Bzip2 => Box::new(bzip2::read::BzDecoder::new(f)),
-            Compression::Zstd => Box::new(
-                ruzstd::decoding::StreamingDecoder::new(f)
-                    .map_err(|e| std::io::Error::other(e.to_string()))?,
-            ),
-            // lzma-rs decodes a whole stream at once and holds it
-            // in memory before writing a byte, so the bound is
-            // checked first against what the stream declares: the
-            // xz index at the end of the file records every
-            // block's uncompressed size. A stream declaring more
-            // than the bound (or whose compressed form alone
-            // exceeds it) is refused before any decoding; the sink
-            // still stops at the bound should a stream lie.
-            Compression::Xz => {
-                let mut compressed = Vec::new();
-                f.take(limit + 1).read_to_end(&mut compressed)?;
-                let declared = xz_uncompressed_size(&compressed);
-                if compressed.len() as u64 > limit || declared.is_none_or(|d| d > limit) {
-                    return Err(ArchiveError::TooLarge {
-                        name: "(xz stream)".into(),
-                        limit,
-                    });
-                }
-                let mut input = std::io::Cursor::new(compressed);
-                let mut out = Capped {
-                    buf: Vec::new(),
-                    limit,
-                    over: false,
-                };
-                match lzma_rs::xz_decompress(&mut input, &mut out) {
-                    Ok(()) => {}
-                    Err(_) if out.over => {
-                        return Err(ArchiveError::TooLarge {
-                            name: "(xz stream)".into(),
-                            limit,
-                        });
-                    }
-                    Err(e) => return Err(std::io::Error::other(e.to_string()).into()),
-                }
-                Box::new(std::io::Cursor::new(out.buf))
-            }
-        };
+        let mut reader = decoder(f, compression, limit)?;
+        // The first block says whether this is a tar at all. A
+        // stream of nothing is an archive of no members; a stream
+        // whose first block is no header (a compressed file that
+        // holds one file) is said to be no tar, where the tar
+        // reader said "failed to read entire block".
+        let mut head = Vec::with_capacity(512);
+        (&mut reader).take(512).read_to_end(&mut head)?;
+        if !head.is_empty() && !tar_block(&head, true) {
+            return Err(ArchiveError::NotATar);
+        }
+        let reader = std::io::Cursor::new(head).chain(reader);
         let mut ar = tar::Archive::new(reader);
         let mut b = TreeBuilder::new();
         let mut contents = Vec::new();
         let mut records = Vec::new();
+        let mut raw = HashMap::new();
         let mut total: u64 = 0;
         for entry in ar.entries()? {
             let mut e = entry?;
@@ -1001,6 +1271,10 @@ impl ArchiveAdapter {
             e.read_to_end(&mut buf)?;
             let idx = contents.len();
             let size = buf.len() as i64;
+            // an archive inside the archive opens from its bytes
+            if archive_member(&name) {
+                raw.insert(idx, buf.clone());
+            }
             // A member that does not decode under the rule has no
             // text (an image, a binary): the leaf stays a leaf.
             match decoding.decode(&name, &buf) {
@@ -1023,6 +1297,7 @@ impl ArchiveAdapter {
             source: Source::Tar,
             decoding,
             records: RefCell::new(records),
+            raw,
         })
     }
 
@@ -1082,10 +1357,22 @@ impl ArchiveAdapter {
         if let Some(c) = &self.contents.borrow()[entry] {
             return Some(c.clone());
         }
-        let Source::Zip(zip) = &self.source else {
-            return None;
+        let buf = match &self.source {
+            Source::Zip(zip) => self.read_member(&mut zip.borrow_mut(), entry)?,
+            Source::ZipBytes(zip) => self.read_member(&mut zip.borrow_mut(), entry)?,
+            Source::Tar => return None,
         };
-        let mut zip = zip.borrow_mut();
+        let d = self.decoding.decode(&self.zip_names[entry], &buf).ok()?;
+        self.records.borrow_mut()[entry] = Some((d.encoding, d.replaced));
+        self.contents.borrow_mut()[entry] = Some(d.text.clone());
+        Some(d.text)
+    }
+
+    fn read_member<R: Read + std::io::Seek>(
+        &self,
+        zip: &mut zip::ZipArchive<R>,
+        entry: usize,
+    ) -> Option<Vec<u8>> {
         let mut e = zip.by_index(self.zip_indices[entry]).ok()?;
         // A member past the bound is refused, not read: the query
         // errors instead of the process filling memory.
@@ -1099,12 +1386,7 @@ impl ArchiveAdapter {
         }
         let mut buf = Vec::new();
         e.read_to_end(&mut buf).ok()?;
-        drop(e);
-        drop(zip);
-        let d = self.decoding.decode(&self.zip_names[entry], &buf).ok()?;
-        self.records.borrow_mut()[entry] = Some((d.encoding, d.replaced));
-        self.contents.borrow_mut()[entry] = Some(d.text.clone());
-        Some(d.text)
+        Some(buf)
     }
 }
 

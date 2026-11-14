@@ -99,9 +99,9 @@ pub use syntax::parser::{Defs, parse_scope_path, parse_value_expr};
 /// mount. `None` before the tool sets it — a library embedder
 /// that never pins gets the old wall-clock behavior.
 pub use value::ambient::{
-    SentenceBonds, fetched, fetched_opt, invocation_instant, now_secs, record_refusal,
-    retract_diagnostics, sentence_bonds, set_invocation_instant, set_sentence_bonds,
-    take_refusal_diagnostic,
+    SentenceBonds, fetched, fetched_opt, invocation_instant, now_secs, raise_at_mount,
+    record_refusal, retract_diagnostics, sentence_bonds, set_invocation_instant,
+    set_sentence_bonds, take_at_mount, take_refusal_diagnostic,
 };
 pub use value::{
     ColumnType, Foreign, ForeignValue, NodeRef, Table, TableBuilder, Typing, Value,

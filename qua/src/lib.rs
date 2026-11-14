@@ -2021,6 +2021,20 @@ fn python_environment(
 
 #[cfg(feature = "adapters")]
 fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
+    // The offline switch (`QUARB_OFFLINE`), before anything is
+    // opened or priced: the opener holds every mount to it, and the
+    // doors this function opens itself (the relational stores, for
+    // pushdown; the web level) are held to it here.
+    for p in &cli.paths {
+        if let Some(s) = p.to_str() {
+            quarb_open::offline::gate(s)?;
+        }
+        if let Some((_, target)) = split_alias(p)
+            && let Some(s) = target.to_str()
+        {
+            quarb_open::offline::gate(s)?;
+        }
+    }
     // The source boundary of this invocation's one target.
     let ctx = &SourceCtx::default();
     // `--expand` shows the query whole; otherwise the output command
@@ -3676,8 +3690,11 @@ impl OutputCtx {
         let level = self.session.borrow().diagnostics;
         // the tool's own notes around the run come first: the
         // planner's account, the locale in force
-        let shown: Vec<quarb::Diagnostic> = take_notes()
+        // and before them what the mounts raised (a sheet a workbook
+        // could not read), told with the first run reported
+        let shown: Vec<quarb::Diagnostic> = quarb::take_at_mount()
             .into_iter()
+            .chain(take_notes())
             .chain(diagnostics.iter().cloned())
             .filter(|d| d.severity.shown_at(level))
             .collect();
@@ -3703,8 +3720,13 @@ impl OutputCtx {
         }
     }
 
-    /// The notes the tool raised with no run to report them under.
+    /// The notes the tool raised with no run to report them under,
+    /// and what the mounts raised that no run of the engine told (a
+    /// plan the source answered opens none).
     fn flush_notes(&self) {
+        for d in quarb::take_at_mount() {
+            note(d);
+        }
         if NOTES.with(|n| n.borrow().is_empty()) {
             return;
         }

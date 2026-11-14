@@ -33,6 +33,37 @@ fn zip_tree_and_content() {
     assert_eq!(values(&a, "/top.txt:::size"), ["3_B"]);
 }
 
+/// A zip held in memory reads as the file does: the form a host has
+/// that was handed the archive's bytes.
+#[test]
+fn zip_from_bytes() {
+    let mut buf = std::io::Cursor::new(Vec::new());
+    {
+        let mut z = zip::ZipWriter::new(&mut buf);
+        let o = zip::write::SimpleFileOptions::default();
+        use std::io::Write as _;
+        z.start_file("data/a.txt", o).unwrap();
+        z.write_all(b"alpha").unwrap();
+        z.start_file("top.txt", o).unwrap();
+        z.write_all(b"top").unwrap();
+        z.finish().unwrap();
+    }
+    let bytes = buf.into_inner();
+    for a in [
+        ArchiveAdapter::from_zip_bytes(&bytes).unwrap(),
+        // told by its first bytes
+        ArchiveAdapter::from_bytes(&bytes).unwrap(),
+    ] {
+        assert_eq!(values(&a, "//*<file> @| count"), ["2"]);
+        assert_eq!(values(&a, "/data/a.txt::"), ["alpha"]);
+        // read once, then from what was kept
+        assert_eq!(values(&a, "/data/a.txt::"), ["alpha"]);
+        assert_eq!(values(&a, "/top.txt::"), ["top"]);
+    }
+    // no zip and no tar
+    assert!(ArchiveAdapter::from_zip_bytes(b"not an archive").is_err());
+}
+
 /// A tarball held in memory reads like one on disk.
 #[test]
 fn tar_from_bytes() {

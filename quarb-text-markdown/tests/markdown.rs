@@ -231,3 +231,120 @@ fn headings_bear_pandoc_identifiers() {
         ["1. Intro: A/B test", "Notes", "Notes", "2024", "Custom"]
     );
 }
+
+/// The values a query answers on `model`.
+fn on(model: &TextModel, query: &str) -> Vec<String> {
+    match quarb::run(query, model).unwrap() {
+        quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect(),
+        quarb::QueryResult::Nodes(ns) => ns
+            .iter()
+            .map(|n| quarb::AstAdapter::name(model, *n).unwrap_or_default())
+            .collect(),
+    }
+}
+
+/// A YAML header (a note's front matter) is what the document
+/// declares about itself, as an HTML head is (approved 2026-11-13):
+/// the curated core as properties of the document node, every key
+/// under its own name with its YAML type, the tags as traits; and
+/// no part of the text. It read as a rule and a heading.
+#[test]
+fn a_yaml_header_is_the_documents_declared_identity() {
+    let m = quarb_text_markdown::parse(
+        "---\n\
+         title: The Iliad\n\
+         author: Homer\n\
+         description: The wrath of Achilles, in twenty-four books.\n\
+         tags: [epic, greek]\n\
+         category: poetry\n\
+         date: 2026-03-01\n\
+         updated: 2026-03-18T21:40:00Z\n\
+         books: 24\n\
+         aliases:\n  - Ilias\n  - Song of Ilium\n\
+         edition:\n  editor: Monro and Allen\n  year: 1920\n\
+         draft: false\n\
+         ---\n\n\
+         # Book I\n\nSing, goddess, the wrath of Achilles.\n",
+    );
+    // the curated core
+    assert_eq!(on(&m, "^::title"), ["The Iliad"]);
+    assert_eq!(on(&m, "^::author"), ["Homer"]);
+    assert_eq!(
+        on(&m, "^::description"),
+        ["The wrath of Achilles, in twenty-four books."]
+    );
+    assert_eq!(on(&m, "^ | %(::tags)"), [r#"%(tags = @("epic"; "greek"))"#]);
+    assert_eq!(on(&m, "^::category"), ["poetry"]);
+    assert_eq!(on(&m, "^::published"), ["2026-03-01"]);
+    assert_eq!(on(&m, "^::modified"), ["2026-03-18T21:40:00Z"]);
+    // instants, so a date compares on the timeline
+    assert_eq!(
+        on(&m, "^ | [::published > 2026-02-01] | ::title"),
+        ["The Iliad"]
+    );
+    assert_eq!(on(&m, "^ | [::published > 2026-04-01] | ::title"), [""; 0]);
+    // the tags and the category as traits
+    assert_eq!(
+        on(&m, "^ | %(:traits)"),
+        [r#"%(traits = @("document"; "tag:epic"; "tag:greek"; "category:poetry"))"#]
+    );
+    // the lossless layer: every key, its type kept
+    assert_eq!(on(&m, "^:::title"), ["The Iliad"]);
+    assert_eq!(on(&m, "^ | :::books + 1"), ["25"]);
+    assert_eq!(
+        on(&m, "^ | %(:::aliases)"),
+        [r#"%(aliases = @("Ilias"; "Song of Ilium"))"#]
+    );
+    assert_eq!(
+        on(&m, "^ | :::edition"),
+        [r#"%(editor = "Monro and Allen"; year = 1920)"#]
+    );
+    assert_eq!(on(&m, "^ | :::draft"), ["false"]);
+    // the date as the author wrote it, a text
+    assert_eq!(on(&m, "^:::date"), ["2026-03-01"]);
+    // no part of the text
+    assert_eq!(on(&m, "//section::lemma"), ["Book I"]);
+    assert_eq!(on(&m, "/* | :name"), ["section"]);
+    assert_eq!(
+        on(&m, "//paragraph::"),
+        ["Sing, goddess, the wrath of Achilles."]
+    );
+}
+
+/// The conventions the curated core reads, and what it leaves to
+/// the lossless layer.
+#[test]
+fn a_headers_curated_core_reads_the_shared_conventions() {
+    // tags as one text split at commas; keywords too; several
+    // authors joined; one category out of `categories`
+    let m = quarb_text_markdown::parse(
+        "---\ntags: epic, travel\nkeywords: [sea, Epic]\nauthor: [Homer, Butler]\n\
+         categories: [poetry]\ncreated: 2026-03-09\nlastmod: 2026-03-10\n---\nText.\n",
+    );
+    assert_eq!(
+        on(&m, "^ | %(::tags)"),
+        [r#"%(tags = @("epic"; "travel"; "sea"))"#]
+    );
+    assert_eq!(on(&m, "^::author"), ["Homer, Butler"]);
+    assert_eq!(on(&m, "^::category"), ["poetry"]);
+    assert_eq!(on(&m, "^::published"), ["2026-03-09"]);
+    assert_eq!(on(&m, "^::modified"), ["2026-03-10"]);
+    // Jekyll's `published: false` is no date; several categories
+    // are no one category; a title of another type is no title
+    let m = quarb_text_markdown::parse(
+        "---\npublished: false\ncategories: [poetry, war]\ntitle: [a, b]\ndate: next week\n---\nText.\n",
+    );
+    assert_eq!(
+        on(&m, "^ | %(::published; ::category; ::title)"),
+        ["%(published = null; category = null; title = null)"]
+    );
+    assert_eq!(on(&m, "^ | :::published"), ["false"]);
+    assert_eq!(
+        on(&m, "^ | %(:::categories)"),
+        [r#"%(categories = @("poetry"; "war"))"#]
+    );
+    // no header: nothing declared, and a rule is a rule
+    let m = quarb_text_markdown::parse("---\n\nA paragraph.\n\n---\n\nAnother.\n");
+    assert_eq!(on(&m, "^ | %(::title)"), ["%(title = null)"]);
+    assert_eq!(on(&m, "//paragraph::"), ["A paragraph.", "Another."]);
+}
