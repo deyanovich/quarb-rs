@@ -32,11 +32,11 @@ fn refused(q: &str) -> String {
 fn the_cursor_is_a_record_of_the_topic_and_the_position() {
     assert_eq!(
         all("/a/* | _"),
-        "%(topic = null; position = /a/0) | %(topic = null; position = /a/1)"
+        "%(topic = null; position = /a/1) | %(topic = null; position = /a/2)"
     );
     assert_eq!(
         all("/a/*::k | _"),
-        "%(topic = 1; position = /a/0) | %(topic = 2; position = /a/1)"
+        "%(topic = 1; position = /a/1) | %(topic = 2; position = /a/2)"
     );
     assert_eq!(all("/a/*::k | _ | type"), "record | record");
     // the fields read as the sigils do
@@ -63,12 +63,12 @@ fn the_context_table_is_the_cursors_plural() {
         // (a table column of references is a `node` column: the
         // cells stay references and print as the path, as the
         // `node` column of `@| nodes` does)
-        "#(@(topic; position);\n  %(1; /a/0);\n  %(2; /a/1))"
+        "#(@(topic; position);\n  %(1; /a/1);\n  %(2; /a/2))"
     );
     assert_eq!(all("/a/*::k | #_:topic @| first"), "@(1; 2)");
     assert_eq!(all("/a/*::k | @_ @| first"), "@(1; 2)");
-    assert_eq!(all("/a/* | #_:position @| first"), "@(/a/0; /a/1)");
-    assert_eq!(all("/a/* | @@_ @| first"), "@(/a/0; /a/1)");
+    assert_eq!(all("/a/* | #_:position @| first"), "@(/a/1; /a/2)");
+    assert_eq!(all("/a/* | @@_ @| first"), "@(/a/1; /a/2)");
 }
 
 #[test]
@@ -108,9 +108,9 @@ fn a_reduction_leaves_a_thread_with_no_position() {
     );
     assert_eq!(all("/a/* @| count | $$__ | type"), "null");
     // selecting and keyed aggregates keep their threads' positions
-    assert_eq!(all("/a/* @| first | $$_"), "/a/0");
-    assert_eq!(all("/a/* @| sort_by(::k) @| last | $$_"), "/a/1");
-    assert_eq!(all("/a/* @| unique | $$_"), "/a/0 | /a/1");
+    assert_eq!(all("/a/* @| first | $$_"), "/a/1");
+    assert_eq!(all("/a/* @| sort_by(::k) @| last | $$_"), "/a/2");
+    assert_eq!(all("/a/* @| unique | $$_"), "/a/1 | /a/2");
 }
 
 #[test]
@@ -133,11 +133,11 @@ fn the_capsa_counts_back_and_names_the_penultimate() {
     // spaced, the minus is subtraction
     assert_eq!(all(&format!("{q}$. - 2")), "98 | 198");
     // the node face: the marks counted back
-    let m = "/a/0 | .p | /name | .q | \\ | .r | ";
-    assert_eq!(all(&format!("{m}$$.-1:name")), "0");
+    let m = "/a/1 | .p | /name | .q | \\ | .r | ";
+    assert_eq!(all(&format!("{m}$$.-1:name")), "1");
     assert_eq!(all(&format!("{m}$$.-2:name")), "name");
     assert_eq!(all(&format!("{m}$$..:name")), "name");
-    assert_eq!(all(&format!("{m}((.-3)):name")), "0");
+    assert_eq!(all(&format!("{m}((.-3)):name")), "1");
     assert_eq!(all(&format!("{m}((..)):name")), "name");
     // a malformed capsa read refuses with the forms
     for bad in ["$.+1", "$.x.y", "$.-0", "$.-x"] {
@@ -168,7 +168,7 @@ fn the_full_views_and_the_matrices_take_the_star_and_the_dot() {
     assert_eq!(all(&format!("{q}#.*:2 @| first")), "@(\"x\"; \"y\")");
     assert_eq!(
         all("/a/* | .A | .k(::k) | ##. @| first"),
-        "#(@(A);\n  %(/a/0);\n  %(/a/1))"
+        "#(@(A);\n  %(/a/1);\n  %(/a/2))"
     );
     for bad in ["#*", "##*"] {
         let e = refused(&format!("{q}{bad} @| first"));

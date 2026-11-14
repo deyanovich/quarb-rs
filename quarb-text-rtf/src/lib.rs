@@ -344,7 +344,15 @@ fn lower(bytes: &[u8]) -> Result<(Vec<Block>, HeadMeta), RtfError> {
         note_counter: 0,
         frames: Vec::new(),
         quote_open: false,
-        head: HeadMeta::default(),
+        head: HeadMeta {
+            // the plain names this reader answered under until 0.63
+            renamed: vec![
+                ("description", "doccomm"),
+                ("created", "creatim"),
+                ("modified", "revtim"),
+            ],
+            ..HeadMeta::default()
+        },
         rows: Vec::new(),
         row: Vec::new(),
         row_header: false,
@@ -1303,17 +1311,25 @@ impl Lower {
                     // The next token names the field; its text is
                     // the group's.
                     if let Some(Tok::Word(w, _)) = self.toks.get(self.pos) {
-                        let key = match w.as_str() {
-                            "title" => "title",
-                            "author" => "author",
-                            "subject" => "subject",
-                            "keywords" => "keywords",
-                            "doccomm" => "description",
-                            "creatim" => "created",
-                            "revtim" => "modified",
-                            _ => "",
-                        };
-                        if key.is_empty() {
+                        // the info group's destinations, each under
+                        // its own control word: the record is
+                        // verbatim (ruling 2026-11-14)
+                        let known = matches!(
+                            w.as_str(),
+                            "title"
+                                | "author"
+                                | "subject"
+                                | "keywords"
+                                | "doccomm"
+                                | "category"
+                                | "manager"
+                                | "company"
+                                | "operator"
+                                | "comment"
+                                | "creatim"
+                                | "revtim"
+                        );
+                        if !known {
                             self.skip_group();
                             depth -= 1;
                             continue;
@@ -1330,17 +1346,25 @@ impl Lower {
                         if value.is_empty() {
                             continue;
                         }
-                        self.head.declare(key, &value);
-                        match key {
+                        self.head.declare(&w, &value);
+                        // the curated core, by the control words
+                        match w.as_str() {
                             "title" => self.head.title = Some(value),
                             "author" => self.head.author = Some(value),
-                            "description" => self.head.description = Some(value),
-                            "subject" => self.head.category = Some(value),
+                            "doccomm" => self.head.description = Some(value),
+                            "category" => self.head.category = Some(value),
+                            "subject" => {
+                                if self.head.category.is_none() {
+                                    self.head.category = Some(value);
+                                }
+                            }
                             "keywords" => {
                                 for t in value.split([',', ';']) {
                                     self.head.tag(t);
                                 }
                             }
+                            "creatim" => self.head.published = HeadMeta::instant(&value),
+                            "revtim" => self.head.modified = HeadMeta::instant(&value),
                             _ => {}
                         }
                     }

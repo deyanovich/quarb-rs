@@ -77,7 +77,7 @@ fn a_folder_of_notes_answers_by_what_each_declares() {
             "{reading}"
         );
         assert_eq!(
-            lines(&["/* | :::books @| sum", &target]),
+            lines(&["/*::head:books @| sum", &target]),
             ["48"],
             "{reading}"
         );

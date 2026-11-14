@@ -211,9 +211,9 @@ fn collapse_gathers_a_list_valued_regula_whole() {
 #[test]
 fn a_nested_paths_predicate_reads_the_node_not_the_row() {
     let d = fixture("row-reach");
-    // one book is named "0" (its position in the array)
+    // one book is named "1" (its position in the array)
     assert_eq!(
-        ok(&d, &["^/books/*[:name = \"0\"] @| count", "books.json"]),
+        ok(&d, &["^/books/*[:name = \"1\"] @| count", "books.json"]),
         "1"
     );
     // a table with a column `name`: the nested count is still 1
@@ -222,7 +222,7 @@ fn a_nested_paths_predicate_reads_the_node_not_the_row() {
             &d,
             &[
                 "/books/* | %(title = ::t; name = ::author) @| # \
-                 | map((^/books/*[:name = \"0\"] @| count); --to=:n) | $_:n",
+                 | map((^/books/*[:name = \"1\"] @| count); --to=:n) | $_:n",
                 "books.json"
             ]
         ),
@@ -234,7 +234,7 @@ fn a_nested_paths_predicate_reads_the_node_not_the_row() {
             &d,
             &[
                 "/books/* | %(title = ::t) @| # \
-                 | map((^/books/*[:name = \"0\"] @| count); --to=:n) | $_:n",
+                 | map((^/books/*[:name = \"1\"] @| count); --to=:n) | $_:n",
                 "books.json"
             ]
         ),
@@ -538,7 +538,7 @@ fn a_hop_operands_position_counts_per_source_node() {
     let q = |query: &str| ok(&d, &["--model", "air.model", query, "air.json"]);
     assert_eq!(
         q("/airports/* @| edges(->*[1]) | #(:source; :target) @| csv"),
-        "source,target\n/airports/0,/airports/1\n/airports/1,/airports/0\n/airports/2,/airports/0"
+        "source,target\n/airports/1,/airports/2\n/airports/2,/airports/1\n/airports/3,/airports/1"
     );
     assert_eq!(q("/airports/* @| edges(->*[..2]) | dim"), "@(5; 6)");
     assert_eq!(q("/airports/*->*[1] @| count"), "3");
@@ -555,7 +555,7 @@ fn a_hop_operands_position_counts_per_source_node() {
 #[test]
 fn an_expression_command_evaluates_its_operand_once() {
     let d = fixture("once");
-    let (success, out, err) = qua(&d, &["/books/0 | (::t | sqrt)", "books.json"]);
+    let (success, out, err) = qua(&d, &["/books/1 | (::t | sqrt)", "books.json"]);
     assert!(success, "{err}");
     assert_eq!(out, "null");
     assert!(err.contains("1 value is of another kind"), "{err}");
@@ -1023,7 +1023,7 @@ fn a_held_quarq_applies_on_the_capsa_before_its_push() {
     // ... and one that does not walk returns to where it applied
     assert_eq!(
         q("/books/*[1] | .f(q(::t | upper)) | /tags/* | &$.f# | %(v = $_; at = $$_)"),
-        "%(v = \"ILIAD\"; at = /books/0/tags/0)\n%(v = \"ILIAD\"; at = /books/0/tags/1)"
+        "%(v = \"ILIAD\"; at = /books/1/tags/1)\n%(v = \"ILIAD\"; at = /books/1/tags/2)"
     );
     // a push that stood on no node photographs no position (the root
     // was read off it)
@@ -2340,11 +2340,11 @@ fn five_rows_of_the_pipeline_review() {
     // read one held as the bare sigil does (both refused "the regula
     // holds a projector"): `!` on the applying cursor, `#` on the
     // node the push stood at
-    assert_eq!(on(r"/books/1 | .f(q(::title)) | \ | /0 | &$.f"), "Iliad");
-    assert_eq!(on(r"/books/1 | .f(q(::title)) | \ | /0 | &$.f!"), "Iliad");
-    assert_eq!(on(r"/books/1 | .f(q(::title)) | \ | /0 | &$.f#"), "Odyssey");
+    assert_eq!(on(r"/books/2 | .f(q(::title)) | \ | /1 | &$.f"), "Iliad");
+    assert_eq!(on(r"/books/2 | .f(q(::title)) | \ | /1 | &$.f!"), "Iliad");
+    assert_eq!(on(r"/books/2 | .f(q(::title)) | \ | /1 | &$.f#"), "Odyssey");
     assert_eq!(
-        on(r"/books/1 | .f(q(%(::title; ::price))) | \ | /0 | &$.f#"),
+        on(r"/books/2 | .f(q(%(::title; ::price))) | \ | /1 | &$.f#"),
         r#"%(title = "Odyssey"; price = 15)"#
     );
     let e = refused(&d, &["/books/*[1] | .f(5) | &$.f!", "two.json"]);
@@ -2387,7 +2387,7 @@ fn five_rows_of_the_pipeline_review() {
         "^ | .m | /books/*[2] | .r(%(a = ::title)) | $.r:a",
     ] {
         let out = ok(&d, &["--kaiv", q, "two.json"]);
-        assert!(out.contains("#books-1"), "{q}: {out}");
+        assert!(out.contains("#books-2"), "{q}: {out}");
     }
 }
 

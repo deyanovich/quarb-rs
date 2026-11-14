@@ -254,6 +254,30 @@ fn head_from_meta() {
     assert_eq!(values(&m, "^::author"), ["Jane Austen"]);
     assert_eq!(values(&m, "^::description"), ["A novel."]);
     assert_eq!(values(&m, "^::tags"), ["regency, manners"]);
+    // the record is verbatim (ruling 2026-11-14): every entry of
+    // `office:meta` under the name the file writes, a name written
+    // more than once a list; the language is the curated `::lang`
+    assert_eq!(
+        values(&m, "::head"),
+        [concat!(
+            r#"%("dc:title" = "Pride and Prejudice"; "meta:initial-creator" = "Jane Austen"; "#,
+            r#""dc:description" = "A novel."; "dc:subject" = "Novels"; "#,
+            r#""meta:keyword" = @("regency"; "manners"); "dc:language" = "en-GB")"#
+        )]
+    );
+    assert_eq!(values(&m, "::lang"), ["en-GB"]);
+    // the plain names of 0.63 are told where they went
+    let head = m.head_meta();
+    assert_eq!(head.retired("title").as_deref(), Some(r#""dc:title""#));
+    assert_eq!(
+        head.retired("author").as_deref(),
+        Some(r#""meta:initial-creator""#)
+    );
+    assert_eq!(
+        head.retired("keywords").as_deref(),
+        Some(r#""meta:keyword""#)
+    );
+    assert_eq!(head.retired("created"), None);
 }
 
 /// An OpenOffice.org 1.0 document (`.sxw`): the same reading under

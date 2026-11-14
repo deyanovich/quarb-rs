@@ -686,9 +686,9 @@ impl Parser {
             self.pos += 1;
             let n = start.ok_or_else(|| JqError::Syntax(0, "empty [] index".into()))?;
             if n >= 0 {
-                // Array elements are named by index in the JSON
-                // adapter, so a plain name hop addresses them.
-                write!(out, "/{n}").unwrap();
+                // An array's items are named by their position from
+                // one, so jq's `.[0]` is the name hop `/1`.
+                write!(out, "/{}", n + 1).unwrap();
             } else {
                 write!(out, "/*[{n}]").unwrap();
             }
@@ -938,17 +938,17 @@ mod tests {
         assert_eq!(tn("."), "^");
         assert_eq!(t(".users"), "/users::");
         assert_eq!(tn(".users"), "/users");
-        assert_eq!(t(".users[0].name"), "/users/0/name::");
+        assert_eq!(t(".users[0].name"), "/users/1/name::");
         assert_eq!(t(".a.b.c"), "/a/b/c::");
         assert_eq!(t(".a | .b"), "/a/b::");
         assert_eq!(t(".users[]"), "/users/*::");
         assert_eq!(t(".[]"), "/*::");
-        assert_eq!(t(".[2]"), "/2::");
+        assert_eq!(t(".[2]"), "/3::");
         assert_eq!(t(".[-1]"), "/*[-1]::");
         assert_eq!(t(".users[-2]"), "/users/*[-2]::");
         assert_eq!(t(r#"."weird key""#), "/'weird key'::");
         assert_eq!(t(r#".["k"]"#), "/k::");
-        assert_eq!(t(".users[0].name?"), "/users/0/name::");
+        assert_eq!(t(".users[0].name?"), "/users/1/name::");
     }
 
     #[test]
@@ -989,7 +989,7 @@ mod tests {
     #[test]
     fn functions() {
         assert_eq!(t(".users | length"), "/users:::length");
-        assert_eq!(t(".users[0] | keys"), "/users/0/*:name @| sort");
+        assert_eq!(t(".users[0] | keys"), "/users/1/*:name @| sort");
         assert_eq!(t(".nums | add"), "/nums/*:: @| sum");
         assert_eq!(t(".nums | min"), "/nums/*:: @| min");
         assert_eq!(t(".nums | unique"), "/nums/*:: @| unique @| sort");

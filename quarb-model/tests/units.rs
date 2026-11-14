@@ -72,12 +72,12 @@ fn every_listed_spelling_reads() {
     let dir = fixture("reads", "units mery.model;\n", MERY);
     let a = shop(&dir).unwrap();
     // conversion through the imported factor
-    assert_eq!(values(&a, "/грузы/0::вес | convert(kg)"), ["32.7609928_kg"]);
+    assert_eq!(values(&a, "/грузы/1::вес | convert(kg)"), ["32.7609928_kg"]);
     // (three versts of three times five hundred arshins: the float
     // product carries noise, so compare the magnitude)
-    assert!((mag(&a, "/грузы/0::путь | convert(km)") - 3.2004).abs() < 1e-9);
+    assert!((mag(&a, "/грузы/1::путь | convert(km)") - 3.2004).abs() < 1e-9);
     // twenty pounds are half a pood
-    assert!((mag(&a, "/грузы/1::вес | convert(kg)") - 8.1902482).abs() < 1e-9);
+    assert!((mag(&a, "/грузы/2::вес | convert(kg)") - 8.1902482).abs() < 1e-9);
     // the inflected forms are the same unit
     // (text against text compares as text; the lifted side reads
     // through the table)
@@ -89,21 +89,21 @@ fn every_listed_spelling_reads() {
         values(&a, "/грузы/*[(::вес | quantity) >= '1 пуд']::что"),
         ["мука", "сено"]
     );
-    assert!((mag(&a, "/грузы/0 | ::вес + 1пуд") - 3.0).abs() < 1e-9);
+    assert!((mag(&a, "/грузы/1 | ::вес + 1пуд") - 3.0).abs() < 1e-9);
     assert!((mag(&a, "/грузы/* | ::вес | quantity @| sum") - 3.5).abs() < 1e-9);
     // the declared unit is a conversion's operand; a name the
     // library does not list is refused there, the nearest declared
     // spelling named (spec: The conversion)
-    assert_eq!(values(&a, "/грузы/0::вес | convert(пуда)"), ["2_пуда"]);
-    assert!((mag(&a, "/грузы/1::вес | convert(пуд)") - 0.5).abs() < 1e-9);
-    let e = quarb::run("/грузы/0::вес | convert(пудъ)", &a)
+    assert_eq!(values(&a, "/грузы/1::вес | convert(пуда)"), ["2_пуда"]);
+    assert!((mag(&a, "/грузы/2::вес | convert(пуд)") - 0.5).abs() < 1e-9);
+    let e = quarb::run("/грузы/1::вес | convert(пудъ)", &a)
         .unwrap_err()
         .to_string();
     assert!(
         e.contains("convert(пудъ): no unit 'пудъ' (the nearest: пуд"),
         "{e}"
     );
-    let e = quarb::run("/грузы/0::вес | convert(золотник)", &a)
+    let e = quarb::run("/грузы/1::вес | convert(золотник)", &a)
         .unwrap_err()
         .to_string();
     assert!(e.contains("no unit 'золотник'"), "{e}");
@@ -138,7 +138,7 @@ fn a_typed_column_reads_the_declared_units() {
 fn without_the_import_the_text_is_text() {
     let dir = fixture("plain", "", MERY);
     let a = shop(&dir).unwrap();
-    assert_eq!(values(&a, "/грузы/0::вес | convert(kg)"), [""]);
+    assert_eq!(values(&a, "/грузы/1::вес | convert(kg)"), [""]);
 }
 
 #[test]
@@ -185,7 +185,7 @@ fn declarations_stand_in_the_model_and_name_opaque_units() {
         "",
     );
     let a = shop(&dir).unwrap();
-    assert_eq!(values(&a, "/грузы/0::вес | convert(kg)"), ["32.7609928_kg"]);
+    assert_eq!(values(&a, "/грузы/1::вес | convert(kg)"), ["32.7609928_kg"]);
     // a currency symbol and its word are the currency
     assert_eq!(values(&a, "= '12 €' | dimension"), ["EUR"]);
     assert_eq!(values(&a, "= (('12 €' | quantity) = 12_EUR)"), ["true"]);

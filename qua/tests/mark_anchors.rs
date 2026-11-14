@@ -39,14 +39,14 @@ fn a_mark_anchor_stands_bare_and_takes_a_glued_arrow() {
     let dir = fixture();
     // bare, the anchor is the marked node: the thread returns to it
     assert_eq!(
-        ok(&dir, &["/rows/3 .e | /.. | $$.e", "log.json"]),
-        "/rows/3"
+        ok(&dir, &["/rows/4 .e | /.. | $$.e", "log.json"]),
+        "/rows/4"
     );
-    assert_eq!(ok(&dir, &["/rows/3 .e | $$.e::id", "log.json"]), "4");
-    assert_eq!(ok(&dir, &["/rows/3 .e | $$.e/..", "log.json"]), "/rows");
+    assert_eq!(ok(&dir, &["/rows/4 .e | $$.e::id", "log.json"]), "4");
+    assert_eq!(ok(&dir, &["/rows/4 .e | $$.e/..", "log.json"]), "/rows");
     // an arrow glued to the anchor is an arrow, not part of the name
-    assert_eq!(ok(&dir, &["/rows/3 .e | $$.e->next", "log.json"]), "");
-    assert_eq!(ok(&dir, &["/rows/3 .e | $$.e-->::id", "log.json"]), "");
+    assert_eq!(ok(&dir, &["/rows/4 .e | $$.e->next", "log.json"]), "");
+    assert_eq!(ok(&dir, &["/rows/4 .e | $$.e-->::id", "log.json"]), "");
     // a hyphen inside the name still belongs to it
-    assert_eq!(ok(&dir, &["/rows/3 .e-x | $$.e-x::id", "log.json"]), "4");
+    assert_eq!(ok(&dir, &["/rows/4 .e-x | $$.e-x::id", "log.json"]), "4");
 }

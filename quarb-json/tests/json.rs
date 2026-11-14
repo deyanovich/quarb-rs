@@ -51,7 +51,7 @@ fn value_expressions() {
     // a missing operand path is null, and null propagates
     assert_eq!(vals("/items/* | /price:: * /qty::"), vec!["12", "20", ""]);
     // div is always a float; idiv truncates
-    assert_eq!(vals("/items/1 | /price:: idiv /qty::"), vec!["5"]);
+    assert_eq!(vals("/items/2 | /price:: idiv /qty::"), vec!["5"]);
     // a computed column, aggregated
     assert_eq!(
         vals("/items/* | .total(/price:: * /qty::) | $.total @| sum"),
@@ -61,9 +61,9 @@ fn value_expressions() {
 
 #[test]
 fn navigate_by_key_and_index() {
-    assert_eq!(values("/users/0/name::"), vec!["Alice"]);
+    assert_eq!(values("/users/1/name::"), vec!["Alice"]);
     assert_eq!(values("/count::"), vec!["2"]);
-    assert_eq!(nodes("/users/1"), vec!["/users/1"]);
+    assert_eq!(nodes("/users/2"), vec!["/users/2"]);
 }
 
 #[test]
@@ -78,20 +78,20 @@ fn type_traits() {
     // string-valued nodes named "name"
     assert_eq!(
         nodes("//name<string>"),
-        vec!["/users/0/name", "/users/1/name"]
+        vec!["/users/1/name", "/users/2/name"]
     );
     // the array
     assert_eq!(nodes("/*<array>"), vec!["/users"]);
     // boolean values
     assert_eq!(
         nodes("//*<boolean>"),
-        vec!["/users/0/admin", "/users/1/admin"]
+        vec!["/users/1/admin", "/users/2/admin"]
     );
     // `scalar` umbrellas the primitive types, null included; a
     // container is never one.
     assert_eq!(nodes("//*<scalar>"), nodes("//*<!object><!array>"));
     assert_eq!(nodes("/*<scalar>"), vec!["/count"]);
-    assert_eq!(nodes("/users/0/*<scalar>"), nodes("/users/0/*"));
+    assert_eq!(nodes("/users/1/*<scalar>"), nodes("/users/1/*"));
 }
 
 /// JSONL: every non-empty line one value, the document their
@@ -170,7 +170,7 @@ fn resolve_json_ref() {
 #[test]
 fn metadata_and_aggregation() {
     assert_eq!(values("/users:::length"), vec!["2"]);
-    assert_eq!(values("/users/0/name:::type"), vec!["string"]);
+    assert_eq!(values("/users/1/name:::type"), vec!["string"]);
     // total age across users
     assert_eq!(values("/users/*/age:::type"), vec!["number", "number"]);
     assert_eq!(values("/users/*/age:: @| sum"), vec!["47"]);
@@ -312,7 +312,7 @@ fn property_reading() {
     assert_eq!(
         run("*//*"),
         [
-            "/", "/server", "/users", "/users/0", "/users/1", "/mixed", "/mixed/1", "/ref"
+            "/", "/server", "/users", "/users/1", "/users/2", "/mixed", "/mixed/2", "/ref"
         ]
     );
     // A scalar is not a node: no `port`, no `<string>`.

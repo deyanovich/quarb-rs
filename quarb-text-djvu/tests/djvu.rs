@@ -218,9 +218,15 @@ fn sections_pages_zones_and_geometry() {
     );
     // the declared identity
     assert_eq!(
-        values(&m, "^ | %(::title; ::author; ::year)"),
+        values(&m, "^ | %(::title; ::author; year = ::head:year)"),
         ["%(title = \"Евгений Онегин\"; author = \"Пушкин\"; year = \"1837\")"]
     );
+    // an entry is a field of the record, not a property of its own
+    // (it answered as `::year` until 0.63)
+    assert_eq!(values(&m, "::year"), [""]);
+    // and as one record, `::head` (ruling 2026-11-14)
+    assert_eq!(values(&m, "::head:year"), ["1837"]);
+    assert_eq!(values(&m, "::head:title"), ["Евгений Онегин"]);
 }
 
 #[test]

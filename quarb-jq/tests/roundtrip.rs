@@ -38,9 +38,9 @@ fn navigation() {
     assert_eq!(values(".users[-1].name"), vec!["Cy"]);
     assert_eq!(values(".site.title"), vec!["quarb"]);
     assert_eq!(values(".users[0].tags[1]"), vec!["dev"]);
-    assert_eq!(nodes(".users[1]"), vec!["/users/1"]);
-    assert_eq!(nodes(".users[0:2]"), vec!["/users/0", "/users/1"]);
-    assert_eq!(nodes(".users[-2:]"), vec!["/users/1", "/users/2"]);
+    assert_eq!(nodes(".users[1]"), vec!["/users/2"]);
+    assert_eq!(nodes(".users[0:2]"), vec!["/users/1", "/users/2"]);
+    assert_eq!(nodes(".users[-2:]"), vec!["/users/2", "/users/3"]);
 }
 
 #[test]
@@ -61,7 +61,7 @@ fn select_filters() {
         values(r#".users[] | select(has("email")) | .name"#),
         vec!["Ada", "Cy"]
     );
-    assert_eq!(nodes(".users[] | select(.age < 18)"), vec!["/users/1"]);
+    assert_eq!(nodes(".users[] | select(.age < 18)"), vec!["/users/2"]);
 }
 
 #[test]

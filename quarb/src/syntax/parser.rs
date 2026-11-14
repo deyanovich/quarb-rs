@@ -1617,12 +1617,17 @@ impl Parser<'_> {
         let mut pipeline = Vec::new();
         let mut correlations = Vec::new();
         let mut join_at = 0usize;
+        // the fields each branch reads after its projection
+        // (`::head:year`), in step with `branches`
+        let mut chains: Vec<Vec<(String, bool)>> = Vec::new();
         self.union_element(
             &mut branches,
             &mut pipeline,
             &mut correlations,
             &mut join_at,
+            &mut chains,
         )?;
+        chains.resize(branches.len(), Vec::new());
         // `||` or its word (`.or.`, the family's spellings): the
         // rounding follows the glyph, not the position.
         while matches!(self.peek(), Some(Token::PipePipe)) || self.peek_word(OR_WORDS) {
@@ -1638,7 +1643,28 @@ impl Parser<'_> {
                 &mut pipeline,
                 &mut correlations,
                 &mut join_at,
+                &mut chains,
             )?;
+            chains.resize(branches.len(), Vec::new());
+        }
+        // `::head:year`, `/notes/iliad.md::head:year` — a field of
+        // what a branch projects, after the projection (ruling
+        // 2026-11-14): read as over the pipe (`| :year` on the
+        // projected value), so a record's field ends a path and,
+        // the root assumed, heads an expression. The rule is per
+        // branch; the branches of a union share one pipeline, so
+        // this build reads the fields where every branch carries
+        // the same ones, and refuses the rest.
+        if let Some(fields) = chains.iter().find(|c| !c.is_empty()).cloned() {
+            if chains.iter().any(|c| *c != fields) {
+                return Err(QuarbError::parse(format!(
+                    "the branches of a union read different fields after their \
+                     projections (':{}' on one of them): read the field over the \
+                     pipe ('… | :{0}'), or write two queries",
+                    fields[0].0
+                )));
+            }
+            pipeline.splice(0..0, fields.into_iter().map(field_of_topic));
         }
 
         // Pipeline over the whole union. The entering mode is
@@ -1672,6 +1698,7 @@ impl Parser<'_> {
         pipeline: &mut Vec<Command>,
         correlations: &mut Vec<Query>,
         join_at: &mut usize,
+        chains: &mut Vec<Vec<(String, bool)>>,
     ) -> Result<()> {
         // The expression head: a query may open with `= expr`
         // instead of navigation — `= 2 + 2`, `= 1900-01-01 |
@@ -1928,6 +1955,22 @@ impl Parser<'_> {
                 }));
                 return Ok(());
             }
+            // the fields read after the branch's projection
+            // (`/x::head:year`): gathered here, read by the query
+            // (see `parse_query`)
+            let mut fields: Vec<(String, bool)> = Vec::new();
+            if b.projection.is_some() {
+                while matches!(self.peek(), Some(Token::Field))
+                    && matches!(self.toks.get(self.pos + 1), Some(Token::Name { .. }))
+                {
+                    self.pos += 1;
+                    if let Some(Token::Name { text, quoted, .. }) = self.bump() {
+                        fields.push((text.clone(), *quoted));
+                    }
+                }
+            }
+            chains.resize(branches.len(), Vec::new());
+            chains.push(fields);
             branches.push(b);
         }
         Ok(())
@@ -2024,7 +2067,22 @@ impl Parser<'_> {
                     let command = self.pipe_item(mode)?;
                     let command = self.quantified_push(command)?;
                     mode = command_mode_out(&command, mode);
+                    // `| /x::head:year` — a navigation that projects,
+                    // then the fields of what it projects, as at the
+                    // head of a query
+                    let projects = matches!(&command, Command::Nav(b) if b.projection.is_some());
                     pipeline.push(command);
+                    while projects
+                        && matches!(self.peek(), Some(Token::Field))
+                        && matches!(self.toks.get(self.pos + 1), Some(Token::Name { .. }))
+                    {
+                        self.pos += 1;
+                        if let Some(Token::Name { text, quoted, .. }) = self.bump() {
+                            let command = field_of_topic((text.clone(), *quoted));
+                            mode = command_mode_out(&command, mode);
+                            pipeline.push(command);
+                        }
+                    }
                 }
                 // `$| command` — the map pipe.
                 Some(Token::Dollar) if matches!(self.toks.get(self.pos + 1), Some(Token::Pipe)) => {
@@ -9685,8 +9743,8 @@ impl Parser<'_> {
                 }
                 Some(Token::Field) => {
                     self.pos += 1;
-                    let name = match self.bump() {
-                        Some(Token::Name { text, .. }) => text.clone(),
+                    let (name, quoted) = match self.bump() {
+                        Some(Token::Name { text, quoted, .. }) => (text.clone(), *quoted),
                         _ => return Err(QuarbError::parse("expected a field name after ':'")),
                     };
                     // On a bare node path the single colon is the
@@ -9700,8 +9758,10 @@ impl Parser<'_> {
                         continue;
                     }
                     // `:%provenance` / `:@origin` on a value: its
-                    // provenance in the record or the list shape.
-                    if name.starts_with(['%', '@']) {
+                    // provenance in the record or the list shape. A
+                    // quoted name is a field so named (`:"@type"`, a
+                    // JSON-LD block's).
+                    if !quoted && name.starts_with(['%', '@']) {
                         o = Operand::ValueMeta {
                             base: Box::new(o),
                             key: name,
@@ -15995,13 +16055,16 @@ fn validate_correlation_refs(q: &Query) -> Result<()> {
     for (i, entry) in q.correlations.iter().enumerate() {
         let k = i + 1;
         for b in &entry.branches {
-            let last = b.steps.len().saturating_sub(1);
+            // the final step: the marks after it aside (a joined
+            // expression's mark stands after its brackets, ruling
+            // 2026-11-14)
+            let last = b.final_elem();
             for (j, elem) in b.steps.iter().enumerate() {
                 let m = max_ctx_elem(elem);
                 if m == 0 && !elem_mentions_outer(elem) {
                     continue;
                 }
-                if j != last || !matches!(elem, PathElem::Step(_)) {
+                if Some(j) != last || !matches!(elem, PathElem::Step(_)) {
                     return Err(QuarbError::parse(
                         "join conditions belong in the joined \
                          expression's final step's brackets",
@@ -16018,7 +16081,7 @@ fn validate_correlation_refs(q: &Query) -> Result<()> {
             }
             // A positional predicate after a correlated one would
             // select before the join takes effect — ambiguous.
-            if let Some(PathElem::Step(s)) = b.steps.last() {
+            if let Some(PathElem::Step(s)) = last.map(|j| &b.steps[j]) {
                 let mut seen_corr = false;
                 for p in &s.predicates {
                     match p {
@@ -16051,6 +16114,213 @@ fn validate_correlation_refs(q: &Query) -> Result<()> {
                      before the join and cannot reference a joined node ('$$k'); join \
                      conditions belong in its final step's brackets",
                 ));
+            }
+        }
+        // A condition is lifted out of its step and tested on the
+        // node the join binds. Where the expression's own pipeline
+        // navigates, that node is what the pipeline leaves: the
+        // condition written on `/albums/*` was tested on the artist
+        // the pipeline went to (2026-11-14: refused; a pipeline that
+        // only filters, sorts or marks stays).
+        let conditioned = entry.branches.iter().any(|b| {
+            matches!(
+                b.final_elem().map(|j| &b.steps[j]),
+                Some(PathElem::Step(s)) if s.predicates.iter().any(|p| matches!(
+                    p,
+                    Predicate::Expr(e) if max_ctx_pred_expr(e) > 0 || pred_mentions_outer(e)
+                ))
+            )
+        });
+        if conditioned && entry.pipeline.iter().any(navigates) {
+            return Err(QuarbError::parse(format!(
+                "joined expression #{k} carries a condition and navigates in its own \
+                 pipeline: the condition would be tested on the node the pipeline leaves, \
+                 not on the step it is written on; join the node the pipeline goes to as \
+                 an expression of its own ('<=> /a/*[…] .a <=> /b/*[::id = $$.a::b_id]'), \
+                 or navigate after the join"
+            )));
+        }
+    }
+    validate_join_marks(q)
+}
+
+/// The read of a field of the topic, as a command: what a field
+/// written after a projection in path position stands for
+/// (`/x::head:year` is `/x::head | :year`). `:%provenance` and
+/// `:@origin` are the value's provenance, as after any value; a
+/// quoted name is a field so named.
+fn field_of_topic((name, quoted): (String, bool)) -> Command {
+    let base = Box::new(Operand::Topic);
+    Command::Expr(if !quoted && name.starts_with(['%', '@']) {
+        Operand::ValueMeta { base, key: name }
+    } else {
+        Operand::Field {
+            base,
+            name,
+            bare: false,
+        }
+    })
+}
+
+/// Whether a pipeline command moves the thread to other nodes.
+fn navigates(c: &Command) -> bool {
+    match c {
+        Command::Nav(_) => true,
+        Command::Map(inner) => navigates(inner),
+        Command::Repeat { command, .. } => navigates(command),
+        _ => false,
+    }
+}
+
+/// The names of a joined expression's marks (ruling 2026-11-14: `D
+/// <=> J[cond] .al` files the node the join binds as `.al`, read
+/// back as `$$.al`), held to three rules the run could only answer
+/// with a null:
+///
+/// - the name is new: one the driver filed before the join, or an
+///   earlier joined expression's mark, is refused. Under `<=>?` a
+///   thread with no witness files no mark, and an older regula of
+///   the name would show through on those threads alone;
+/// - a condition reads the driver and the expressions joined before
+///   it: its own expression's mark (the candidate is the bare path
+///   there, or `$$_`) and a later one's are refused, as `$$k` is;
+/// - a mark inside a joined expression that is not its mark (one
+///   mid-path) is that expression's own, read by its own pipeline:
+///   a read of the name from the driver's pipeline, a condition or
+///   another joined expression is refused, where it answered null.
+fn validate_join_marks(q: &Query) -> Result<()> {
+    use visit::Visitor;
+    if q.correlations.is_empty() {
+        return Ok(());
+    }
+    let names_of = |walk: &dyn Fn(&mut PushNames)| {
+        let mut v = PushNames {
+            mark_names: MarkNames::of(q),
+            ..PushNames::default()
+        };
+        walk(&mut v);
+        v
+    };
+    let shown = |n: &str| crate::syntax::ast::display_name(n);
+    let marks: Vec<Vec<String>> = q
+        .correlations
+        .iter()
+        .map(|e| e.join_marks().into_iter().flatten().collect())
+        .collect();
+    let at = q.join_at.min(q.pipeline.len());
+    let before = names_of(&|v| {
+        q.branches.iter().for_each(|b| v.branch(b));
+        q.pipeline[..at].iter().for_each(|c| v.command(c));
+    });
+    let mut filed = before.pushed;
+    for (i, names) in marks.iter().enumerate() {
+        for n in names {
+            if filed.contains(n) {
+                return Err(QuarbError::parse(format!(
+                    "the mark '.{0}' of joined expression #{1} is already filed before it: \
+                     a joined node's mark takes a name of its own",
+                    shown(n),
+                    i + 1
+                )));
+            }
+            filed.push(n.clone());
+        }
+    }
+    // what each condition reads: the final step of each branch
+    let conditions: Vec<PushNames> = q
+        .correlations
+        .iter()
+        .map(|entry| {
+            names_of(&|v| {
+                for b in &entry.branches {
+                    if let Some(j) = b.final_elem() {
+                        v.elem(&b.steps[j]);
+                    }
+                }
+            })
+        })
+        .collect();
+    let reads = |v: &PushNames| -> Vec<String> {
+        v.recalled.iter().chain(&v.mark_reads).cloned().collect()
+    };
+    for (i, cond) in conditions.iter().enumerate() {
+        for n in reads(cond) {
+            if marks[i].contains(&n) {
+                return Err(QuarbError::parse(format!(
+                    "the condition of joined expression #{0} reads its own mark '.{1}': the \
+                     candidate is the bare path there, or '$$_'; '$$.{1}' reads the bound \
+                     node after the join",
+                    i + 1,
+                    shown(&n)
+                )));
+            }
+            if let Some(later) = marks[i + 1..].iter().position(|m| m.contains(&n)) {
+                return Err(QuarbError::parse(format!(
+                    "the condition of joined expression #{0} reads '.{1}', the mark of \
+                     joined expression #{2}; a condition reads the driver and the \
+                     expressions joined before it",
+                    i + 1,
+                    shown(&n),
+                    i + 2 + later
+                )));
+            }
+        }
+    }
+    // a joined expression's inner marks and pushes are its own
+    let whole = names_of(&|v| {
+        q.branches.iter().for_each(|b| v.branch(b));
+        q.pipeline.iter().for_each(|c| v.command(c));
+    });
+    let inner: Vec<PushNames> = q
+        .correlations
+        .iter()
+        .map(|entry| {
+            names_of(&|v| {
+                entry.branches.iter().for_each(|b| v.branch(b));
+                entry.pipeline.iter().for_each(|c| v.command(c));
+            })
+        })
+        .collect();
+    if whole.dynamic || inner.iter().any(|v| v.dynamic) {
+        return Ok(());
+    }
+    let visible = |n: &String| whole.pushed.contains(n) || marks.iter().any(|m| m.contains(n));
+    let own_to = |n: &String, except: Option<usize>| {
+        inner
+            .iter()
+            .enumerate()
+            .position(|(j, v)| Some(j) != except && v.pushed.contains(n))
+    };
+    let refuse = |n: &String, j: usize| {
+        QuarbError::parse(format!(
+            "'.{0}' is filed inside joined expression #{1} and is that expression's own: \
+             nothing outside it reads it; the mark of the joined node is the one that ends \
+             the expression ('<=> /path/*[…] .{0}')",
+            shown(n),
+            j + 1
+        ))
+    };
+    // the driver's pipeline and the conditions run on the driver's
+    // thread
+    for n in reads(&whole)
+        .iter()
+        .chain(conditions.iter().flat_map(reads).collect::<Vec<_>>().iter())
+    {
+        if !visible(n)
+            && let Some(j) = own_to(n, None)
+        {
+            return Err(refuse(n, j));
+        }
+    }
+    // a joined expression's own pipeline reads its own
+    for (i, entry) in q.correlations.iter().enumerate() {
+        let own = names_of(&|v| entry.pipeline.iter().for_each(|c| v.command(c)));
+        for n in reads(&own) {
+            if !visible(&n)
+                && !inner[i].pushed.contains(&n)
+                && let Some(j) = own_to(&n, Some(i))
+            {
+                return Err(refuse(&n, j));
             }
         }
     }

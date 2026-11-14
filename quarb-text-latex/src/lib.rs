@@ -53,11 +53,21 @@
 //!   one file, one reading (a multi-file document reads file by
 //!   file, or through its built PDF's outline).
 
-use quarb_text::{Block, Container, NoteFamily, TextModel};
+use quarb_text::{Block, Container, HeadMeta, NoteFamily, TextModel};
 
-/// Parse LaTeX source into the text-level model.
+/// Parse LaTeX source into the text-level model. What the source
+/// declares about itself (`\title`, `\author`, `\date`) is the
+/// document node's `::head`, and no part of the text.
 pub fn parse(source: &str) -> TextModel {
-    TextModel::build(blocks(source))
+    let (blocks, head) = Lower::new(source).run();
+    let mut model = TextModel::build(blocks);
+    model.set_head_meta(head);
+    model
+}
+
+/// What the source declares about itself, read alone.
+pub fn head(source: &str) -> HeadMeta {
+    Lower::new(source).run().1
 }
 
 const SECTIONING: &[(&str, u8)] = &[
@@ -91,8 +101,6 @@ const DROP: &[&str] = &[
     "setlength",
     "definecolor",
     "hypersetup",
-    "author",
-    "date",
 ];
 
 /// Environments whose entire content is out of the prose.
@@ -107,7 +115,7 @@ const SKIP_ENVS: &[&str] = &[
 
 /// Lower LaTeX source into the block event stream.
 pub fn blocks(source: &str) -> Vec<Block> {
-    Lower::new(source).run()
+    Lower::new(source).run().0
 }
 
 /// How many bytes the UTF-8 character starting with `lead` takes
@@ -125,6 +133,8 @@ struct Lower<'a> {
     src: &'a [u8],
     pos: usize,
     out: Vec<Block>,
+    /// What the source declares: `\title`, `\author`, `\date`.
+    head: HeadMeta,
     /// The open flow paragraph, accumulating prose.
     para: String,
     /// Callouts and index marks for the open paragraph, in order.
@@ -172,6 +182,7 @@ impl<'a> Lower<'a> {
             src: source.as_bytes(),
             pos: 0,
             out: Vec::new(),
+            head: HeadMeta::default(),
             para: String::new(),
             inline: Vec::new(),
             notes: Vec::new(),
@@ -185,7 +196,7 @@ impl<'a> Lower<'a> {
         }
     }
 
-    fn run(mut self) -> Vec<Block> {
+    fn run(mut self) -> (Vec<Block>, HeadMeta) {
         while self.pos < self.src.len() {
             match self.src[self.pos] {
                 b'%' => self.skip_comment(),
@@ -265,7 +276,7 @@ impl<'a> Lower<'a> {
             self.out.push(Block::Paragraph { text });
             self.out.push(Block::Close { hypograph: None });
         }
-        self.out
+        (self.out, self.head)
     }
 
     fn eat(&mut self, b: u8) -> bool {
@@ -517,15 +528,24 @@ impl<'a> Lower<'a> {
                     self.para.push_str("...");
                 }
             }
-            "title" => {
-                // The document title is the level-0 fact LaTeX
-                // declares; the text level has no document lemma,
-                // so it reads as front-matter prose.
+            "title" | "author" | "date" => {
+                // What the source declares about itself (ruling
+                // 2026-11-14): the document node's `::head`, each
+                // under the command's name, and no part of the
+                // text. The title read as a paragraph of front
+                // matter; the author and the date were dropped.
+                while self.optional().is_some() {}
                 if let Some(t) = self.braced() {
-                    self.flush_para();
-                    self.out.push(Block::Paragraph {
-                        text: strip_inline(&t),
-                    });
+                    let text = quarb_text::normalize_ws(&strip_inline(&t));
+                    // `\date{}` and `\date{\today}` declare no date
+                    if !text.is_empty() && !t.contains("\\today") {
+                        self.head.declare(&name, &text);
+                        match name.as_str() {
+                            "title" => self.head.title = Some(text),
+                            "author" => self.head.author = Some(text),
+                            _ => self.head.published = HeadMeta::instant(&text),
+                        }
+                    }
                 }
             }
             _ if DROP.contains(&name.as_str()) => {

@@ -70,10 +70,11 @@ pub fn base_href(document: &Html) -> Option<String> {
 ///
 /// - every `<meta name=… content=…>` / `<meta property=… content=…>`
 ///   verbatim, plus `title`, the root's `lang`, and the canonical
-///   link (the lossless layer, `:::name`);
-/// - a schema.org JSON-LD block's top-level scalars and one level
-///   of nesting, as `schema:<key>` (`:::schema:@type`,
-///   `:::schema:author.name`);
+///   link: the fields of the record `::head` (`::head:description`,
+///   `::head:"og:type"`; a name declared more than once a list);
+/// - a JSON-LD block as it is written, one nested record under the
+///   field `ld` (`::head:ld:author:name`, `::head:ld:"@type"`);
+///   several blocks, the list of them;
 /// - the curated core: tags from `keywords` (comma-split),
 ///   `article:tag`, `rel="tag"` links, and JSON-LD `keywords`;
 ///   the category from `article:section` else JSON-LD
@@ -85,7 +86,11 @@ pub fn base_href(document: &Html) -> Option<String> {
 pub fn head_meta(document: &Html) -> HeadMeta {
     use scraper::Selector;
     let sel = |s: &str| Selector::parse(s).expect("static selector");
-    let mut h = HeadMeta::default();
+    let mut h = HeadMeta {
+        // a page has a head, whatever stands in it
+        present: true,
+        ..HeadMeta::default()
+    };
     if let Some(t) = document.select(&sel("head > title")).next() {
         let t = quarb_text::normalize_ws(&t.text().collect::<String>());
         if !t.is_empty() {
@@ -95,6 +100,7 @@ pub fn head_meta(document: &Html) -> HeadMeta {
     }
     if let Some(lang) = document.root_element().value().attr("lang") {
         h.declare("lang", lang);
+        h.lang = Some(quarb_text::normalize_ws(lang)).filter(|l| !l.is_empty());
     }
     if let Some(c) = document
         .select(&sel(r#"link[rel="canonical"]"#))
@@ -119,7 +125,8 @@ pub fn head_meta(document: &Html) -> HeadMeta {
             h.declare("rel:tag", &t);
         }
     }
-    // JSON-LD: the top level and one level down, as schema:<key>.
+    // JSON-LD: the block as written, a nested record under `ld`;
+    // the curated core reads its top level and one level down.
     let mut ld: Vec<serde_json::Value> = Vec::new();
     for script in document.select(&sel(r#"script[type="application/ld+json"]"#)) {
         let text = script.text().collect::<String>();
@@ -131,6 +138,8 @@ pub fn head_meta(document: &Html) -> HeadMeta {
             other => ld.push(other),
         }
     }
+    // what the blocks say, flat, for the curated core alone
+    let mut said = HeadMeta::default();
     for item in &ld {
         let Some(obj) = item.as_object() else {
             continue;
@@ -139,14 +148,31 @@ pub fn head_meta(document: &Html) -> HeadMeta {
             if k == "@context" {
                 continue;
             }
-            declare_ld(&mut h, &format!("schema:{k}"), v);
+            declare_ld(&mut said, &format!("schema:{k}"), v);
         }
+    }
+    // the record's order is the head's: the declarations as they
+    // stand, the block after them
+    let record = match ld.len() {
+        0 => None,
+        1 => Some(ld_value(&ld[0])),
+        _ => Some(quarb::Value::list(ld.iter().map(ld_value).collect())),
+    };
+    if let Some(block) = record {
+        let names: Vec<String> = h.declared.iter().map(|(k, _)| k.clone()).collect();
+        for name in names {
+            if let Some(v) = h.declared_value(&name) {
+                h.typed.push((name, v));
+            }
+        }
+        h.typed.push(("ld".to_string(), block));
     }
     // The curated core.
     let first = |h: &HeadMeta, names: &[&str]| -> Option<String> {
         names.iter().find_map(|n| {
             h.declared
                 .iter()
+                .chain(said.declared.iter())
                 .find(|(k, _)| k.eq_ignore_ascii_case(n))
                 .and_then(|(_, vs)| vs.first().cloned())
         })
@@ -154,6 +180,7 @@ pub fn head_meta(document: &Html) -> HeadMeta {
     let all = |h: &HeadMeta, name: &str| -> Vec<String> {
         h.declared
             .iter()
+            .chain(said.declared.iter())
             .filter(|(k, _)| k.eq_ignore_ascii_case(name))
             .flat_map(|(_, vs)| vs.iter().cloned())
             .collect()
@@ -199,6 +226,25 @@ pub fn head_meta(document: &Html) -> HeadMeta {
         h.title = first(&h, &["og:title", "schema:headline", "schema:name"]);
     }
     h
+}
+
+/// A JSON-LD value as a value of the record: an object a record
+/// with its members as written, an array a list.
+fn ld_value(v: &serde_json::Value) -> quarb::Value {
+    use quarb::Value;
+    match v {
+        serde_json::Value::Null => Value::Null,
+        serde_json::Value::Bool(b) => Value::Bool(*b),
+        serde_json::Value::Number(n) => match n.as_i64() {
+            Some(i) => Value::Int(i),
+            None => n.as_f64().map_or(Value::Null, Value::Float),
+        },
+        serde_json::Value::String(s) => Value::Str(s.clone()),
+        serde_json::Value::Array(items) => Value::list(items.iter().map(ld_value).collect()),
+        serde_json::Value::Object(obj) => {
+            Value::record(obj.iter().map(|(k, v)| (k.clone(), ld_value(v))).collect())
+        }
+    }
 }
 
 /// Flatten a JSON-LD value one level: scalars and arrays of

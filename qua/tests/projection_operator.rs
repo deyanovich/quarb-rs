@@ -69,10 +69,11 @@ fn the_shape_after_the_colon_reads_on_the_value() {
             "#(@(index; name);\n  %(2; \"Emma\"))"
         ]
     );
-    // (a JSON array names its items by position)
+    // (a JSON array names its items by position, from one: the
+    // name and the index agree)
     assert_eq!(
         one("/rows/*:%(:name; :index) @| #"),
-        "#(@(name; index);\n  %(0; 1);\n  %(1; 2))"
+        "#(@(name; index);\n  %(1; 1);\n  %(2; 2))"
     );
 }
 

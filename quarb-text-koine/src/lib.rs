@@ -196,7 +196,19 @@ pub fn parse_xml_as(text: &str, kind: &str) -> Result<TextModel, KoineError> {
         "proiel" => atrep::epimerismos::proiel_to_document(text)?,
         other => return Err(KoineError::UnknownFormat(other.to_string())),
     };
-    import(doc)
+    import_from(doc, false, has_header(kind))
+}
+
+/// The XML vocabularies that keep what the document declares in a
+/// header element of its own, apart from the body: TEI's
+/// `teiHeader`, FictionBook's `description`, DocBook's root `info`,
+/// JATS's `front`. The importer hoists that header to the top of
+/// the document as title, author and abstract lines; here they are
+/// the document's `::head` and no part of its text (ruling
+/// 2026-11-14). A native `.atd` / `.atk` writes those lines in its
+/// own text and keeps them.
+fn has_header(kind: &str) -> bool {
+    matches!(kind, "tei" | "fb2" | "docbook" | "jats")
 }
 
 /// Which XML vocabulary a document declares itself to be — from
@@ -285,21 +297,64 @@ fn import(doc: atrep::Document) -> Result<TextModel, KoineError> {
     import_with(doc, false)
 }
 
-fn import_with(mut doc: atrep::Document, lit: bool) -> Result<TextModel, KoineError> {
+fn import_with(doc: atrep::Document, lit: bool) -> Result<TextModel, KoineError> {
+    import_from(doc, lit, false)
+}
+
+/// [`import_with`]; with `header`, the hoisted header the importer
+/// wrote at the top leaves the text once it is read into the head.
+fn import_from(mut doc: atrep::Document, lit: bool, header: bool) -> Result<TextModel, KoineError> {
     let dial = dialektos::resolve(Path::new("."), &doc.dialect_id)?;
     kanonizo::tasso(&mut doc, &dial, Path::new("."))?;
     let head = head_meta(&doc, &dial);
+    if header {
+        let hoisted = hoisted_header(&doc, &dial);
+        let mut at = 0;
+        doc.blocks.retain(|_| {
+            at += 1;
+            !hoisted.contains(&(at - 1))
+        });
+    }
     let mut model = finish_model(blocks_with(&doc, &dial, lit));
     model.set_head_meta(head);
     Ok(model)
 }
 
+/// The blocks of the hoisted header, by index: the title, author,
+/// abstract and languages lines standing before the first block of
+/// the text itself (an ordinary paragraph, a section, a verse).
+fn hoisted_header(doc: &atrep::Document, dial: &Dialektos) -> Vec<usize> {
+    let mut out = Vec::new();
+    for (i, block) in doc.blocks.iter().enumerate() {
+        match block {
+            ABlock::Paragraph(inlines) => match inlines.as_slice() {
+                [Inline::Endo { symbol, .. }]
+                    if matches!(
+                        sim_name(dial, symbol).as_str(),
+                        "title" | "author" | "abstract" | "languages"
+                    ) =>
+                {
+                    out.push(i)
+                }
+                _ => break,
+            },
+            ABlock::Para { symbol, .. } if sim_name(dial, symbol) == "abstract" => out.push(i),
+            ABlock::Para { .. } | ABlock::Stichoi { .. } => break,
+            _ => {}
+        }
+    }
+    out
+}
+
 /// The document's declared identity, as the html reading declares
-/// its head: the hoisted header an importer writes at the top
-/// (`=` title, `=:` author, `="` abstract — a FictionBook's
-/// description, a TEI title statement) becomes `:::title`,
-/// `:::author`, `:::description` on the document node. The
-/// paragraphs themselves stay in the text as they are.
+/// its head: the hoisted header at the top (`=` title, `=:` author,
+/// `="` abstract — a FictionBook's description, a TEI title
+/// statement) is the record `::head` on the document node
+/// (`::head:title`, `::head:author`, `::head:abstract`), and the
+/// curated `::title`, `::author`, `::description`. In a native
+/// document those lines are lines of its text and stay there; an
+/// import from a vocabulary with a header element drops them from
+/// the text ([`has_header`]).
 fn head_meta(doc: &atrep::Document, dial: &Dialektos) -> quarb_text::HeadMeta {
     let mut head = quarb_text::HeadMeta::default();
     for block in &doc.blocks {
@@ -319,7 +374,7 @@ fn head_meta(doc: &atrep::Document, dial: &Dialektos) -> quarb_text::HeadMeta {
                     })
                     .collect::<Vec<_>>()
                     .join(" ");
-                head.declare("description", &text);
+                head.declare("abstract", &text);
                 if head.description.is_none() && !text.trim().is_empty() {
                     head.description = Some(quarb_text::normalize_ws(&text));
                 }
@@ -353,13 +408,13 @@ fn head_meta(doc: &atrep::Document, dial: &Dialektos) -> quarb_text::HeadMeta {
                 }
             }
             "abstract" => {
-                head.declare("description", &text);
+                head.declare("abstract", &text);
                 if head.description.is_none() {
                     head.description = Some(quarb_text::normalize_ws(&text));
                 }
             }
             // The dictionary vocabulary: the languages line, the
-            // index language first — `:::languages`.
+            // index language first — `::head:languages`.
             "languages" => {
                 for code in text.split(|c: char| c.is_whitespace() || c == ',') {
                     if !code.is_empty() {
@@ -490,7 +545,7 @@ pub fn parse_lit_xml_as_with(
     if let Some(s) = scheme {
         atrep::endo::usfm_apply_scheme(&mut doc, s);
     }
-    let mut model = import_with(doc, true)?;
+    let mut model = import_from(doc, true, has_header(kind))?;
     if let Some(s) = scheme {
         model.set_cite_scheme(s);
     }

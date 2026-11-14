@@ -69,27 +69,27 @@ fn pattern_literals_match() {
 fn strict_hole_refuses() {
     let a = doc();
     // the refusal surfaces as run()'s Refused error
-    let e = quarb::run(r#"= "${/items/1::missing:?}""#, &a).unwrap_err();
+    let e = quarb::run(r#"= "${/items/2::missing:?}""#, &a).unwrap_err();
     assert!(e.to_string().contains("is null"), "{e}");
-    let e = quarb::run(r#"= "${/items/1::missing:?no gz name}""#, &a).unwrap_err();
+    let e = quarb::run(r#"= "${/items/2::missing:?no gz name}""#, &a).unwrap_err();
     assert!(e.to_string().contains("no gz name"), "{e}");
     // a present value splices with no refusal
-    assert_eq!(values(r#"= "got ${/items/0::name:?}""#), ["got app-web"]);
+    assert_eq!(values(r#"= "got ${/items/1::name:?}""#), ["got app-web"]);
 }
 
 #[test]
 fn default_hole_coalesces() {
     assert_eq!(
-        values(r#"= "got ${/items/0::missing:-"n/a"}""#),
+        values(r#"= "got ${/items/1::missing:-"n/a"}""#),
         ["got n/a"]
     );
     // the fallback is a full value expression
     assert_eq!(
-        values(r#"= "got ${/items/0::missing:-/items/1::name}""#),
+        values(r#"= "got ${/items/1::missing:-/items/2::name}""#),
         ["got data.gz"]
     );
     assert_eq!(
-        values(r#"= "got ${/items/0::name:-"n/a"}""#),
+        values(r#"= "got ${/items/1::name:-"n/a"}""#),
         ["got app-web"]
     );
 }
@@ -97,11 +97,11 @@ fn default_hole_coalesces() {
 #[test]
 fn pipe_tails_in_holes() {
     assert_eq!(
-        values(r#"= "got ${/items/0::name | upper}""#),
+        values(r#"= "got ${/items/1::name | upper}""#),
         ["got APP-WEB"]
     );
     assert_eq!(
-        values(r#"= "got ${/items/0::name | s/app/svc/ | upper}""#),
+        values(r#"= "got ${/items/1::name | s/app/svc/ | upper}""#),
         ["got SVC-WEB"]
     );
 }
@@ -117,21 +117,21 @@ fn pipe_tails_in_holes() {
 fn record_sigil_builds_and_enriches() {
     // constructor == rec, explicit and auto-named fields
     assert_eq!(
-        values(r#"/items/0 | %(n = ::name; ::name)"#),
+        values(r#"/items/1 | %(n = ::name; ::name)"#),
         ["%(n = \"app-web\"; name = \"app-web\")"]
     );
     assert_eq!(
-        values(r#"/items/0 | %(n = ::name)"#),
-        values(r#"/items/0 | %(n = (::name))"#)
+        values(r#"/items/1 | %(n = ::name)"#),
+        values(r#"/items/1 | %(n = (::name))"#)
     );
     // enrichment: register fields first, args after
     assert_eq!(
-        values(r#"/items/0 | .n(::name) | %%(upper = (::name | upper))"#),
+        values(r#"/items/1 | .n(::name) | %%(upper = (::name | upper))"#),
         ["%(n = \"app-web\"; upper = \"APP-WEB\")"]
     );
     // an arg overrides the register field sharing its name
     assert_eq!(
-        values(r#"/items/0 | .n(::name) | %%(n = "won")"#),
+        values(r#"/items/1 | .n(::name) | %%(n = "won")"#),
         ["%(n = \"won\")"]
     );
 }

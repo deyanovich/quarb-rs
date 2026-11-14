@@ -51,7 +51,7 @@ fn a_declared_trait_is_decided_at_the_node() {
     // The algebra, and the listing.
     assert_eq!(values(&a, "//*<titled && !long> @| count"), ["2"]);
     assert_eq!(
-        values(&a, "/items/0 | :traits"),
+        values(&a, "/items/1 | :traits"),
         ["object, long, titled"].map(|s| s.to_string())
     );
     // Undefined stays silent.

@@ -489,7 +489,7 @@ impl<A: AstAdapter> Drawer<'_, A> {
     /// relative to the line above's (ruling 2026-11-04) — `…` when
     /// unchanged; on a hop's landing `…` is the position above joined
     /// with the hop's literal part and the line prints what the
-    /// wildcards matched (`(…/0; ∅)` for `/members/*`, `(…/0/members/0;
+    /// wildcards matched (`(…/1; ∅)` for `/members/*`, `(…/1/members/1;
     /// ∅)` for `/teams/*/members/*`); the whole name path otherwise (a
     /// parent or ancestor hop, a mark jump, the first line of a
     /// paragraph); `∅` for no position.

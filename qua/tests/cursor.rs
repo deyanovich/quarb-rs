@@ -55,17 +55,17 @@ fn the_position_is_a_reference() {
     let d = fixture();
     assert_eq!(
         ok(&d, "/a/* | %(me = $$_; k = $$_::k)"),
-        "%(me = /a/0; k = 1)\n%(me = /a/1; k = 2)"
+        "%(me = /a/1; k = 1)\n%(me = /a/2; k = 2)"
     );
     assert_eq!(ok(&d, "/a/* | $$_ | type"), "node\nnode");
-    assert_eq!(ok(&d, "/a/* | %(me = ((_)))"), "%(me = /a/0)\n%(me = /a/1)");
+    assert_eq!(ok(&d, "/a/* | %(me = ((_)))"), "%(me = /a/1)\n%(me = /a/2)");
     // In a predicate it is the candidate.
     assert_eq!(ok(&d, "/a/*[$$_::k = 2]::k"), "2");
     assert_eq!(ok(&d, "/a/*[$$_ = $$_]::k"), "1\n2");
     // Exports are the locator text.
     assert_eq!(
         ok(&d, "/a/* | %(me = $$_) | json"),
-        "{\"me\": \"/a/0\"}\n{\"me\": \"/a/1\"}"
+        "{\"me\": \"/a/1\"}\n{\"me\": \"/a/2\"}"
     );
 }
 
@@ -180,15 +180,15 @@ fn marks_are_regulae() {
     let q = "/a/*[::k = 1] | .A | /b/* | .B | .v(::v) | ";
     assert_eq!(
         ok(&d, &format!("{q}@@.")),
-        "@(/a/0; /a/0/b/0)\n@(/a/0; /a/0/b/1)"
+        "@(/a/1; /a/1/b/1)\n@(/a/1; /a/1/b/2)"
     );
     assert_eq!(
         ok(&d, &format!("{q}%%.")),
-        "%(A = /a/0; B = /a/0/b/0)\n%(A = /a/0; B = /a/0/b/1)"
+        "%(A = /a/1; B = /a/1/b/1)\n%(A = /a/1; B = /a/1/b/2)"
     );
     assert_eq!(
         ok(&d, &format!("{q}%%.*")),
-        "%(A = /a/0; B = /a/0/b/0)\n%(A = /a/0; B = /a/0/b/1)"
+        "%(A = /a/1; B = /a/1/b/1)\n%(A = /a/1; B = /a/1/b/2)"
     );
     assert_eq!(ok(&d, &format!("{q}@.")), "@(10)\n@(20)");
     assert_eq!(ok(&d, &format!("{q}%.")), "%(v = 10)\n%(v = 20)");
@@ -200,7 +200,7 @@ fn marks_are_regulae() {
     assert_eq!(ok(&d, &format!("{q}$$.2::v")), "10\n20");
     // A name reads whatever was filed under it last: a reference
     // prints as its locator, is of type node, and `-->` resolves it.
-    assert_eq!(ok(&d, "/a/*[::k = 1] | .A | /b/* | $.A"), "/a/0\n/a/0");
+    assert_eq!(ok(&d, "/a/*[::k = 1] | .A | /b/* | $.A"), "/a/1\n/a/1");
     assert_eq!(
         ok(&d, "/a/*[::k = 1] | .A | /b/* | $.A | type"),
         "node\nnode"

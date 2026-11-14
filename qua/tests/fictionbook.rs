@@ -86,16 +86,24 @@ fn every_door_reads_fictionbook() {
     assert_eq!(qua(&dir, &["//strophe @| count", "koine:onegin.fb2"]), "2");
     assert_eq!(
         qua(&dir, &["//sentence @| count", "corpus:onegin.fb2"]),
-        // the eight of the prose, and the title and the chapter
-        // heading: headings are sentences
-        "10"
+        // the prose and the chapter heading (headings are
+        // sentences); the description's title and author are what
+        // the book declares, not its text (ruling 2026-11-14): they
+        // were two sentences more
+        "8"
     );
-    // the literary reading keeps the emphasis and the identity
+    // the literary reading keeps the emphasis; the identity is the
+    // document node's, in every reading
     assert_eq!(qua(&dir, &["//emphasis::", "lit:onegin.fb2"]), "начинается");
-    assert_eq!(
-        qua(&dir, &["//author::", "lit:onegin.fb2"]),
-        "Александр Пушкин"
-    );
+    assert_eq!(qua(&dir, &["//author @| count", "lit:onegin.fb2"]), "0");
+    for reading in ["text", "corpus", "lit", "koine"] {
+        assert_eq!(
+            qua(&dir, &["::head:author", &format!("{reading}:onegin.fb2")]),
+            "Александр Пушкин",
+            "{reading}"
+        );
+    }
+    assert_eq!(qua(&dir, &["::title", "text:onegin.fb2"]), "Евгений Онегин");
     // an .xml declaring the FictionBook namespace reads the same
     assert_eq!(qua(&dir, &["//stichos @| count", "text:onegin.xml"]), "4");
     assert_eq!(qua(&dir, &["//stichos @| count", "koine:onegin.xml"]), "4");

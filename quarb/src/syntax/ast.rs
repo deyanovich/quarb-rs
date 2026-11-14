@@ -158,6 +158,66 @@ pub struct Branch {
     pub anchor: Anchor,
 }
 
+impl Branch {
+    /// The marks standing after the branch's last element that is
+    /// not a mark (`/albums/*[…] .al`): how many there are.
+    pub(crate) fn trailing_marks(&self) -> usize {
+        let n = self
+            .steps
+            .iter()
+            .rev()
+            .take_while(|e| matches!(e, PathElem::Mark(_)))
+            .count();
+        // a branch of marks alone has no step for them to follow
+        if n == self.steps.len() { 0 } else { n }
+    }
+
+    /// The index of the branch's final element, the marks after it
+    /// aside: where a joined expression's condition stands.
+    pub(crate) fn final_elem(&self) -> Option<usize> {
+        (self.steps.len() - self.trailing_marks()).checked_sub(1)
+    }
+}
+
+impl Query {
+    /// On a joined expression: the marks its witness is filed under
+    /// (ruling 2026-11-14), the marks that END the expression, in
+    /// the order written. With no pipeline of its own they are the
+    /// path marks after the final step of its last branch (`D <=>
+    /// J[cond] .al`); with one, the dots that close that pipeline
+    /// (`D <=> J[cond] | /artist-> | .al <=> …`), since the witness
+    /// is then what the pipeline leaves. The node the join binds is
+    /// filed under them on the driver's thread, read back as
+    /// `$$.al`. Every other mark inside the expression is its own.
+    pub(crate) fn join_marks(&self) -> Vec<Option<String>> {
+        if !self.pipeline.is_empty() {
+            let n = self
+                .pipeline
+                .iter()
+                .rev()
+                .take_while(|c| matches!(c, Command::Push(_)))
+                .count();
+            return self.pipeline[self.pipeline.len() - n..]
+                .iter()
+                .filter_map(|c| match c {
+                    Command::Push(name) => Some(name.clone()),
+                    _ => None,
+                })
+                .collect();
+        }
+        let Some(b) = self.branches.last() else {
+            return Vec::new();
+        };
+        b.steps[b.steps.len() - b.trailing_marks()..]
+            .iter()
+            .filter_map(|e| match e {
+                PathElem::Mark(name) => Some(name.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
 /// A pipeline command.
 ///
 /// The execution unit here is the *capsa* — a node with a register

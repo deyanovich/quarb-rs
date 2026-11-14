@@ -53,6 +53,8 @@ pub fn export(quarb: &str) -> Result<Translation, SqlError> {
         in_on: false,
         aggregate: false,
         keyed_hops: false,
+        from_marks: Vec::new(),
+        join_marks: Vec::new(),
     };
     let query = ex.query()?;
     Ok(Translation {
@@ -225,6 +227,8 @@ pub fn pushdown_explained(quarb: &str, dialect: Option<Dialect>) -> Result<Pushd
         in_on: false,
         aggregate: false,
         keyed_hops: false,
+        from_marks: Vec::new(),
+        join_marks: Vec::new(),
     };
     let sql = ex.query()?;
     let order_table = if ex.aggregate {
@@ -545,6 +549,8 @@ fn partial_pushdown_with(
         in_on: false,
         aggregate: false,
         keyed_hops,
+        from_marks: Vec::new(),
+        join_marks: Vec::new(),
     };
     ex.partial()
 }
@@ -593,6 +599,12 @@ struct Exporter {
     /// the table's listing only), so crosslinks and resolutions are
     /// safe beside the prefilter.
     keyed_hops: bool,
+    /// The names the driver's rows are marked under (`/tracks/* .t`)
+    /// and the names the joined expression files its witness under
+    /// (`<=> /albums/*[…] .al`): `$$.t::col` is the FROM table's
+    /// column, `$$.al::col` the joined table's.
+    from_marks: Vec<String>,
+    join_marks: Vec<String>,
 }
 
 impl Exporter {
@@ -1001,6 +1013,15 @@ impl Exporter {
             // joined table, whose `$$` equalities form the ON.
             let (ltable, lpreds) = self.table_branch(branches[0])?;
             let (rtable, rpreds) = self.table_branch(self.kids(*corr, "branch")[0])?;
+            self.from_marks = self.row_marks(branches[0])?;
+            self.join_marks = self.row_marks(self.kids(*corr, "branch")[0])?;
+            // a joined expression with a pipeline of its own binds
+            // what that pipeline leaves: not a row of its table
+            if self.kid(*corr, "pipeline").is_some() {
+                return Err(SqlError::Unsupported(
+                    "a joined expression with a pipeline of its own".into(),
+                ));
+            }
             // The SQL renderings of the two table names (validated
             // or quoted); the raw names stay in the plan metadata,
             // which the driver matches against its catalog.
@@ -1072,6 +1093,7 @@ impl Exporter {
             self.pipeline(q, &mut sel, Some((&lsql, &rsql)))?;
         } else {
             let (table, preds) = self.table_branch(branches[0])?;
+            self.from_marks = self.row_marks(branches[0])?;
             sel.from = self.sql_ident(&table, "table name")?;
             self.from_table = table;
             for p in preds {
@@ -1123,6 +1145,57 @@ impl Exporter {
             return Err(SqlError::Unsupported("a predicate on the table hop".into()));
         }
         Ok((self.prop_s(t, "matcher"), self.kids(rows, "predicate")))
+    }
+
+    /// The names a `/table/*` branch marks its rows under: the marks
+    /// standing after the row step. A mark anywhere else names a
+    /// node SQL has no row for (the table) and is not translated.
+    fn row_marks(&self, b: NodeId) -> Result<Vec<String>, SqlError> {
+        let kids = self.arbor.children(b);
+        let rows = self.kids(b, "step").get(1).copied();
+        let after = rows
+            .and_then(|r| kids.iter().position(|k| *k == r))
+            .unwrap_or(kids.len());
+        let mut names = Vec::new();
+        for (i, k) in kids.iter().enumerate() {
+            if self.kind(*k) != "mark" {
+                continue;
+            }
+            if i < after {
+                return Err(SqlError::Unsupported(
+                    "a mark before the rows (SQL sees tables and rows)".into(),
+                ));
+            }
+            // (a mark with no name is read by position alone, and
+            // a read by position is not translated)
+            if let Some(Value::Str(n)) = self.prop(*k, "name") {
+                names.push(n);
+            }
+        }
+        Ok(names)
+    }
+
+    /// A path operand read through the capsa's node side (`$$.al`,
+    /// `$$.2`, `((@))`): the mark's name where the anchor is one
+    /// mark by name, and whether it is any mark anchor at all.
+    fn mark_anchor(&self, o: NodeId) -> (Option<String>, bool) {
+        let named = match self.prop(o, "mark") {
+            Some(Value::Str(n)) => Some(n),
+            _ => None,
+        };
+        let any = named.is_some()
+            || [
+                "mark-index",
+                "mark-top",
+                "mark-back",
+                "marks-all",
+                "marks-name",
+                "edge-end",
+                "node-id",
+            ]
+            .iter()
+            .any(|k| self.prop(o, k).is_some());
+        (named, any)
     }
 
     /// One row predicate as a WHERE condition (qualify columns with
@@ -1528,6 +1601,44 @@ impl Exporter {
                     .ok_or_else(|| SqlError::Unsupported("an empty path operand".into()))?;
                 let col = self.projection_col(p)?;
                 let col = self.sql_ident(&col, "column name")?;
+                // a read through a mark: the row the mark names
+                let (named, any) = self.mark_anchor(o);
+                if any {
+                    let Some(name) = named else {
+                        return Err(SqlError::Unsupported(
+                            "a mark read by position, or of several marks".into(),
+                        ));
+                    };
+                    if self.join_marks.contains(&name) {
+                        // `$$.al::col`: the witness, as `$$1::col`
+                        if self.in_on {
+                            return Err(SqlError::Unsupported(
+                                "the joined expression's own mark inside its ON".into(),
+                            ));
+                        }
+                        let Some(join) = self.join_sql.clone() else {
+                            return Err(SqlError::Unsupported(
+                                "a join mark outside a correlation join".into(),
+                            ));
+                        };
+                        return Ok(format!("{join}.{col}"));
+                    }
+                    if self.from_marks.contains(&name) {
+                        // `$$.t::col`: the driver's row, as `$$0::col`
+                        // in the ON
+                        return Ok(if self.join_sql.is_some() {
+                            format!("{}.{col}", self.from_sql.clone())
+                        } else {
+                            match qual {
+                                Some(q) => format!("{q}.{col}"),
+                                None => col,
+                            }
+                        });
+                    }
+                    return Err(SqlError::Unsupported(format!(
+                        "a read of the mark '.{name}' (not a row of the query's tables)"
+                    )));
+                }
                 Ok(match qual {
                     Some(q) => format!("{q}.{col}"),
                     None => col,
@@ -1814,9 +1925,12 @@ impl Exporter {
         Ok(())
     }
 
-    /// `$$0`: a context operand of index 0 (the driver).
+    /// `$$0`: a context operand of index 0 (the driver), or a read
+    /// of the driver's row through its mark (`$$.t::col`).
     fn is_driver(&self, n: NodeId) -> bool {
-        self.kind(n) == "context" && matches!(self.prop(n, "index"), Some(Value::Int(0)))
+        (self.kind(n) == "context" && matches!(self.prop(n, "index"), Some(Value::Int(0))))
+            || (self.kind(n) == "path"
+                && matches!(self.mark_anchor(n).0, Some(name) if self.from_marks.contains(&name)))
     }
 
     fn subtree_has_driver(&self, n: NodeId) -> bool {

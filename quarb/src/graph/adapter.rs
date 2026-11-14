@@ -14,6 +14,24 @@
 
 use crate::value::Value;
 
+/// The name of the item at zero-based `index` of a list: its
+/// position counted from one, as every position in Quarb is (ruling
+/// 2026-11-14: `/shelves/1` is the first shelf, and `:name` agrees
+/// with `:index`). Every adapter that names the items of a list by
+/// their position names them through this; a name the source itself
+/// writes (an object's key, a kaiv namepath's segment) is not one.
+pub fn item_name(index: usize) -> String {
+    (index + 1).to_string()
+}
+
+/// The zero-based index a list item's name stands for, when the name
+/// is a position as [`item_name`] writes it (`"1"` the first; `"0"`,
+/// `"01"` and `"+1"` name nothing).
+pub fn item_index(name: &str) -> Option<usize> {
+    let n: usize = name.parse().ok()?;
+    (n > 0 && n.to_string() == name).then(|| n - 1)
+}
+
 /// An opaque handle to a node in an arbor.
 ///
 /// The engine treats a `NodeId` as an opaque token: it is minted and

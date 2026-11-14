@@ -102,7 +102,7 @@ fn a_locale_without_rules_warns_and_falls_back() {
             "--diagnostics=info",
             "--locale",
             "de",
-            "/rows/0::n",
+            "/rows/1::n",
             "rows.json",
         ],
     );
@@ -111,7 +111,7 @@ fn a_locale_without_rules_warns_and_falls_back() {
         err.contains("info LOCALE (--locale): locale: de (from --locale)"),
         "{err}"
     );
-    let (out, err) = qua(&dir, &["--locale", "xx", "/rows/0::n", "rows.json"]);
+    let (out, err) = qua(&dir, &["--locale", "xx", "/rows/1::n", "rows.json"]);
     assert_eq!(out, "1.5");
     assert!(
         err.contains("warning LOCALE_UNKNOWN (--locale): locale: xx (from --locale) has no rendering rules; canonical"),
@@ -124,7 +124,7 @@ fn a_locale_without_rules_warns_and_falls_back() {
             "--diagnostics=error",
             "--locale",
             "xx",
-            "/rows/0::n",
+            "/rows/1::n",
             "rows.json",
         ],
     );

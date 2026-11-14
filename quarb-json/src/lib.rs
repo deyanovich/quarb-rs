@@ -99,6 +99,11 @@ impl Kind {
     }
 }
 
+/// A list item's name: its one-based position ([`quarb::item_name`]).
+fn item_name(index: u32) -> String {
+    quarb::item_name(index as usize)
+}
+
 /// A node's name: an object key, interned once per document, or
 /// an array position. Fifty thousand records share one `book_id`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -689,12 +694,26 @@ impl JsonAdapter {
     }
 
     /// The text of a node's name: the key from the table, or the
-    /// array position.
+    /// array position, counted from one as every position in Quarb
+    /// is (ruling 2026-11-14: `/shelves/1` is the first shelf, and
+    /// `:name` agrees with `:index`).
     fn name_text(&self, name: Name) -> String {
         match name {
             Name::Key(k) => self.keys[k as usize].clone(),
-            Name::Index(i) => i.to_string(),
+            Name::Index(i) => item_name(i),
         }
+    }
+
+    /// The token a JSON Pointer names the node by (RFC 6901): the
+    /// key, or the array index counted from ZERO. A pointer is the
+    /// document's notation, written by other tools; it is read as
+    /// its standard reads it and lands on the node Quarb names one
+    /// higher (`#/users/0` is `/users/1`).
+    fn pointer_token(&self, node: NodeId) -> Option<String> {
+        self.nodes[node.0 as usize].name.map(|n| match n {
+            Name::Key(k) => self.keys[k as usize].clone(),
+            Name::Index(i) => i.to_string(),
+        })
     }
 
     /// The table's key for `name`, when the document has it.
@@ -733,7 +752,7 @@ impl JsonAdapter {
             cur = self
                 .children(cur)
                 .into_iter()
-                .find(|&c| self.name(c).as_deref() == Some(token.as_str()))?;
+                .find(|&c| self.pointer_token(c).as_deref() == Some(token.as_str()))?;
         }
         Some(cur)
     }
@@ -761,7 +780,10 @@ impl JsonAdapter {
         }
     }
 
-    /// A JSON Pointer path to `node` (`/users/0/name`), for rendering.
+    /// The path to `node` as Quarb names it (`/users/1/name`), for
+    /// rendering: what a printed reference and a provenance stamp
+    /// show, and what pastes back into a query. Not a JSON Pointer:
+    /// an array item is named from one.
     pub fn pointer(&self, node: NodeId) -> String {
         let mut parts = Vec::new();
         let mut cur = Some(node);
@@ -971,7 +993,7 @@ impl AstAdapter for JsonAdapter {
     }
 
     /// Property reading: an object's scalar fields, an array's
-    /// scalar elements under their index — what the serializers
+    /// scalar elements under their one-based name — what the serializers
     /// merge with the children. The node reading has none: every
     /// value is a child there.
     fn properties(&self, node: NodeId) -> Vec<(String, Value)> {
@@ -988,7 +1010,7 @@ impl AstAdapter for JsonAdapter {
             Kind::Array => n
                 .items
                 .iter()
-                .map(|(i, v)| (i.to_string(), v.clone()))
+                .map(|(i, v)| (item_name(*i as u32), v.clone()))
                 .collect(),
             _ => Vec::new(),
         }
@@ -1279,21 +1301,17 @@ impl JsonLines {
         Some(out)
     }
 
-    /// The line's own node in its arbor: the root's first child.
-    fn line_node(a: &JsonAdapter) -> Option<NodeId> {
-        a.children(a.root()).first().copied()
-    }
-
-    /// The JSON Pointer of a node (`/i/key/0`), the line's index its
-    /// first segment.
+    /// The path of a node as Quarb names it (`/3/key/1`), the line's
+    /// name its first segment.
     pub fn pointer(&self, node: NodeId) -> String {
         let Some((i, local)) = Self::unpack(node) else {
             return "/".to_string();
         };
         self.with_line(i, |a| {
+            // the line's own arbor names the line its first item
             let p = a.pointer(local);
-            let rest = p.strip_prefix("/0").unwrap_or("");
-            format!("/{i}{rest}")
+            let rest = p.strip_prefix("/1").unwrap_or("");
+            format!("/{}{rest}", item_name(i))
         })
         .unwrap_or_else(|| "/".to_string())
     }
@@ -1381,7 +1399,7 @@ impl AstAdapter for JsonLines {
     fn name(&self, node: NodeId) -> Option<String> {
         let (i, local) = Self::unpack(node)?;
         if local.0 == 1 {
-            return Some(i.to_string());
+            return Some(item_name(i));
         }
         self.with_line(i, |a| a.name(local)).flatten()
     }
@@ -1676,13 +1694,13 @@ impl JsonArray {
                 let inner = self
                     .with_element(i, |a| a.pointer(local))
                     .unwrap_or_default();
-                // the element arbor's pointer opens with its index
+                // the element arbor's path opens with its name
                 let inner = inner.trim_start_matches('/');
                 let inner = inner
                     .split_once('/')
                     .map(|(_, rest)| format!("/{rest}"))
                     .unwrap_or_default();
-                format!("{base}/{i}{inner}")
+                format!("{base}/{}{inner}", item_name(i))
             }
         }
     }
@@ -1902,7 +1920,7 @@ impl AstAdapter for JsonArray {
 
     fn name(&self, node: NodeId) -> Option<String> {
         match Self::unpack(node) {
-            Some((i, local)) if local.0 == 1 => Some(i.to_string()),
+            Some((i, local)) if local.0 == 1 => Some(item_name(i)),
             Some((i, local)) => self.with_element(i, |a| a.name(local)).flatten(),
             None => self.prefix.name(node),
         }
@@ -2110,8 +2128,10 @@ mod lines_tests {
             .into_iter()
             .find(|c| s.name(*c).as_deref() == Some("link"))
             .unwrap();
+        // the reference is the document's (RFC 6901, from zero);
+        // the node it lands on is named from one
         let target = s.resolve(link, "$ref", None).unwrap();
-        assert_eq!(s.pointer(target), "/0/home");
+        assert_eq!(s.pointer(target), "/1/home");
         assert_eq!(s.property(target, "city"), Some(Value::Str("X".into())));
     }
 }
@@ -2215,7 +2235,7 @@ mod array_tests {
         assert_eq!(s.n_elements(), 5);
         let w = JsonAdapter::parse(ROOT).unwrap();
         walk(&s, s.root(), &w, w.root(), 0);
-        assert_eq!(s.pointer(s.children(s.root())[0]), "/0");
+        assert_eq!(s.pointer(s.children(s.root())[0]), "/1");
     }
 
     #[test]

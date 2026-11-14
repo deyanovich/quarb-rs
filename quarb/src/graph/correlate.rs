@@ -659,6 +659,10 @@ pub(crate) fn eval_query_caps_outer(
     // expression materializes as a context, its correlated final-
     // step predicates (the ON clause) lifted out for the gate below.
     let mut on_preds: Vec<Vec<PredExpr>> = Vec::new();
+    // the marks each joined expression files its witness under
+    // (ruling 2026-11-14)
+    let marks: Vec<Vec<Option<String>>> =
+        query.correlations.iter().map(Query::join_marks).collect();
     for corr in &query.correlations {
         let (nav, on) = split_on(corr);
         let ctx = match eval_query(&nav, adapter, start, &Correlation::default()) {
@@ -741,8 +745,10 @@ pub(crate) fn eval_query_caps_outer(
         outer,
     );
     if !query.correlations.is_empty() {
-        let read = witnesses_read(&query.pipeline[at..], &on_preds);
-        caps = correlate_gate(adapter, caps, &trace, first_new, &on_preds, outer, &read);
+        let read = witnesses_read(&query.pipeline[at..], &on_preds, &marks);
+        caps = correlate_gate(
+            adapter, caps, &trace, first_new, &on_preds, &marks, outer, &read,
+        );
     }
     caps = apply_commands(
         &query.pipeline[at..],
@@ -765,33 +771,82 @@ pub(crate) fn eval_query_caps_outer(
 /// the join filtering: it asks whether a witness was bound, the
 /// anti-join's question, and its answer is the same whichever
 /// candidate was (lang's finding on the candidate, 2026-11-11). A
-/// property of the slot tested for null is a read.
-fn witnesses_read(tail: &[Command], on_preds: &[Vec<PredExpr>]) -> Vec<bool> {
-    struct Reads(Vec<bool>);
-    impl crate::syntax::ast::visit::Visitor for Reads {
+/// property of the slot tested for null is a read. A witness filed
+/// as a mark is read by the mark's name too (`$$.al`), and by any
+/// read of the node side by position or whole.
+fn witnesses_read(
+    tail: &[Command],
+    on_preds: &[Vec<PredExpr>],
+    marks: &[Vec<Option<String>>],
+) -> Vec<WitnessRead> {
+    struct Reads<'a>(Vec<WitnessRead>, &'a [Vec<Option<String>>]);
+    impl Reads<'_> {
+        /// A read of the mark `name`: of the joined expression that
+        /// files its witness under it.
+        fn named(&mut self, name: &str) {
+            for (slot, names) in self.0.iter_mut().zip(self.1) {
+                if *slot == WitnessRead::No && names.iter().any(|n| n.as_deref() == Some(name)) {
+                    *slot = WitnessRead::Mark;
+                }
+            }
+        }
+        /// A read of the node side by position or whole (`$$.2`,
+        /// `@@.`, `%%.`, `((@))`): of every witness filed as a mark.
+        fn any(&mut self) {
+            for (slot, names) in self.0.iter_mut().zip(self.1) {
+                if *slot == WitnessRead::No && !names.is_empty() {
+                    *slot = WitnessRead::Mark;
+                }
+            }
+        }
+    }
+    impl crate::syntax::ast::visit::Visitor for Reads<'_> {
         fn pred(&mut self, e: &PredExpr) {
-            if let PredExpr::Truthy(Operand::Ctx {
-                index: Some(_),
-                steps,
-                projection: None,
-            }) = e
-                && steps.is_empty()
-            {
-                return;
+            match e {
+                PredExpr::Truthy(Operand::Ctx {
+                    index: Some(_),
+                    steps,
+                    projection: None,
+                }) if steps.is_empty() => return,
+                // the same question asked of the mark: `[$$.al]`,
+                // `[!$$.al]`
+                PredExpr::Truthy(Operand::Rel {
+                    anchor: Anchor::Mark(_),
+                    steps,
+                    projection: None,
+                }) if steps.is_empty() => return,
+                _ => {}
             }
             crate::syntax::ast::visit::walk_pred(self, e);
         }
         fn operand(&mut self, o: &Operand) {
-            if let Operand::Ctx { index: Some(k), .. } = o
-                && let Some(slot) = k.checked_sub(1).and_then(|i| self.0.get_mut(i))
-            {
-                *slot = true;
+            match o {
+                Operand::Ctx { index: Some(k), .. } => {
+                    if let Some(slot) = k.checked_sub(1).and_then(|i| self.0.get_mut(i)) {
+                        *slot = WitnessRead::Slot;
+                    }
+                }
+                Operand::Recall(RegRef::Named(name)) => self.named(name),
+                Operand::Recall(
+                    RegRef::NodeWhole | RegRef::NodeRecord | RegRef::NodeFullRecord,
+                ) => self.any(),
+                _ => {}
             }
             crate::syntax::ast::visit::walk_operand(self, o);
         }
+        fn anchor(&mut self, a: &Anchor) {
+            match a {
+                Anchor::Mark(name) | Anchor::MarksNamed(name) => self.named(name),
+                Anchor::MarkIndex(_) | Anchor::MarkTop | Anchor::MarkBack(_) | Anchor::MarksAll => {
+                    self.any()
+                }
+                _ => {}
+            }
+            crate::syntax::ast::visit::walk_anchor(self, a);
+        }
     }
     use crate::syntax::ast::visit::Visitor;
-    let mut v = Reads(vec![false; on_preds.len()]);
+    let mut v = Reads(vec![WitnessRead::No; on_preds.len()], marks);
     for command in tail {
         v.command(command);
     }
@@ -803,6 +858,38 @@ fn witnesses_read(tail: &[Command], on_preds: &[Vec<PredExpr>]) -> Vec<bool> {
     v.0
 }
 
+/// How the query reads a joined expression's witness after it
+/// binds: not at all, by its number (`$$k`), or as the mark the
+/// expression files it under (`$$.al`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum WitnessRead {
+    No,
+    Slot,
+    Mark,
+}
+
+/// The register with a joined expression's witness filed under its
+/// marks: what the conditions joined after it read, and what the
+/// thread carries once the join has bound.
+fn with_marks(
+    adapter: &impl AstAdapter,
+    register: &mut Vec<Reg>,
+    witness: Option<NodeId>,
+    names: &[Option<String>],
+) {
+    // no witness, no mark (`<=>?`): the name then reads as any name
+    // the thread never filed
+    if let Some(node) = witness {
+        for name in names {
+            register.push(crate::graph::navigate::mark_reg(
+                adapter,
+                node,
+                name.clone(),
+            ));
+        }
+    }
+}
+
 /// Split a joined expression into its plain navigation and its ON
 /// clause: the final-step predicates that mention `$*k` or `$$…`
 /// are lifted out, to be evaluated per driving capsa by
@@ -811,7 +898,9 @@ pub(crate) fn split_on(entry: &Query) -> (Query, Vec<PredExpr>) {
     let mut nav = entry.clone();
     let mut on = Vec::new();
     for b in &mut nav.branches {
-        if let Some(PathElem::Step(s)) = b.steps.last_mut() {
+        // the final step, the expression's marks after it aside
+        let last = b.final_elem();
+        if let Some(PathElem::Step(s)) = last.map(|j| &mut b.steps[j]) {
             s.predicates.retain_mut(|p| match p {
                 Predicate::Expr(e)
                     if crate::syntax::parser::max_ctx_pred_expr(e) > 0
@@ -855,8 +944,9 @@ pub(crate) fn correlate_gate(
     trace: &Trace,
     first_new: usize,
     on_preds: &[Vec<PredExpr>],
+    marks: &[Vec<Option<String>>],
     outer: Option<&Scope<'_, GraphExt>>,
-    read: &[bool],
+    read: &[WitnessRead],
 ) -> Vec<Capsa> {
     // per entry: the drivers for which a plain `<=>` chose among
     // several candidates
@@ -894,6 +984,7 @@ pub(crate) fn correlate_gate(
                 adapter,
                 &driver,
                 on_preds,
+                marks,
                 trace,
                 first_new,
                 &mut bound,
@@ -905,13 +996,30 @@ pub(crate) fn correlate_gate(
             if let Some(first) = tuples.first() {
                 for (i, on) in on_preds.iter().enumerate() {
                     let ctx_idx = first_new + i;
-                    if !read.get(i).copied().unwrap_or(false)
+                    if read.get(i).copied().unwrap_or(WitnessRead::No) == WitnessRead::No
                         || trace.every.get(ctx_idx).copied().unwrap_or(false)
                     {
                         continue;
                     }
                     let Some(kept) = first[ctx_idx] else { continue };
                     let before = &first[..ctx_idx];
+                    // the condition reads the expressions joined
+                    // before it under their marks
+                    let mut marked = Vec::new();
+                    if marks[..i].iter().any(|m| !m.is_empty()) {
+                        marked = driver.register.to_vec();
+                        for (j, names) in marks[..i].iter().enumerate() {
+                            with_marks(adapter, &mut marked, first[first_new + j], names);
+                        }
+                    }
+                    let driver = if marked.is_empty() {
+                        driver
+                    } else {
+                        Scope {
+                            register: &marked,
+                            ..driver
+                        }
+                    };
                     let another = join_candidates(adapter, &driver, on, trace, ctx_idx, before)
                         .into_iter()
                         .filter(|cand| *cand != kept)
@@ -956,21 +1064,35 @@ pub(crate) fn correlate_gate(
             } else {
                 c.as_ref().expect("one capsa per tuple").clone()
             };
+            // each witness under its expression's marks, after the
+            // marks the driver made before the join, the joined
+            // expressions in their order
+            for (i, names) in marks.iter().enumerate() {
+                with_marks(adapter, &mut thread.register, tuple[first_new + i], names);
+            }
             thread.ext.bindings = tuple;
             out.push(thread);
         }
     }
     for (i, n) in chosen.into_iter().enumerate() {
         if n > 0 {
+            // the witness as the query reads it: by its number, or
+            // by the mark it is filed under
+            let named = marks[i].iter().flatten().next();
+            let witness = match (read.get(i), named) {
+                (Some(WitnessRead::Mark), Some(name)) => {
+                    format!("$$.{}", crate::syntax::ast::display_name(name))
+                }
+                _ => format!("$${}", i + 1),
+            };
             crate::value::ambient::record_warning_once(
                 crate::diagnostic::SEVERAL_WITNESSES,
-                &format!("$${}", i + 1),
+                &witness,
                 format!(
                     "'<=>' bound the first of several candidates for {n} driver{}, and the \
-                     query reads the witness ($${}): the answer depends on the joined \
+                     query reads the witness ({witness}): the answer depends on the joined \
                      expression's order; '<=>*' binds every candidate",
                     if n == 1 { "" } else { "s" },
-                    i + 1
                 ),
             );
         }
@@ -980,7 +1102,9 @@ pub(crate) fn correlate_gate(
 
 /// The candidates of joined context `ctx_idx` worth testing for
 /// one driver. Where the ON holds an equality between a property of
-/// the candidate and a value of the driver (`::id = _::author_id`),
+/// the candidate and a value of the driver or of an expression
+/// joined before (`::id = $$0::author_id`, `::id = $$.t::album_id`,
+/// `::id = $$1::artist_id`),
 /// the context is indexed once by that property's equality key and
 /// only the nodes under the driver's key are returned — with the
 /// nodes whose value has no key, which must be tested every time —
@@ -1011,9 +1135,32 @@ pub(crate) fn join_candidates(
                     } if steps.is_empty() => Some(p.as_str()),
                     _ => None,
                 };
-                match (own(l), r, own(r), l) {
-                    (Some(p), Operand::Driver(_), _, _) => Some((p, l, r)),
-                    (_, _, Some(p), Operand::Driver(_)) => Some((p, r, l)),
+                // the other side reads the driver or an expression
+                // joined before, never the candidate: `$$0::k`, a
+                // mark of the thread (`$$.t::k`, `$$.2::k`: the
+                // driver's, or an earlier joined expression's), an
+                // earlier witness by its number (`$$1::k`)
+                let across = |o: &Operand| match o {
+                    Operand::Driver(_) => true,
+                    Operand::Rel {
+                        steps,
+                        anchor:
+                            Anchor::Mark(_)
+                            | Anchor::MarkIndex(_)
+                            | Anchor::MarkTop
+                            | Anchor::MarkBack(_),
+                        ..
+                    } => steps.is_empty(),
+                    Operand::Ctx {
+                        index: Some(k),
+                        steps,
+                        ..
+                    } => *k > 0 && steps.is_empty(),
+                    _ => false,
+                };
+                match (own(l), across(r), own(r), across(l)) {
+                    (Some(p), true, _, _) => Some((p, l, r)),
+                    (_, _, Some(p), true) => Some((p, r, l)),
                     _ => None,
                 }
             }
@@ -1104,6 +1251,7 @@ pub(crate) fn bind_entries(
     adapter: &impl AstAdapter,
     driver: &Scope<'_, GraphExt>,
     on_preds: &[Vec<PredExpr>],
+    marks: &[Vec<Option<String>>],
     trace: &Trace,
     first_new: usize,
     bound: &mut Vec<Option<NodeId>>,
@@ -1137,7 +1285,23 @@ pub(crate) fn bind_entries(
         let ok = on_preds[i]
             .iter()
             .all(|e| eval_join_condition_at(adapter, cand, e, trace, bound, scope))
-            && bind_entries(adapter, driver, on_preds, trace, first_new, bound, tuples);
+            && if marks[i].is_empty() {
+                bind_entries(
+                    adapter, driver, on_preds, marks, trace, first_new, bound, tuples,
+                )
+            } else {
+                // the candidate under its marks, for the conditions
+                // joined after it (`[::id = $$.al::artist_id]`)
+                let mut register = driver.register.to_vec();
+                with_marks(adapter, &mut register, Some(cand), &marks[i]);
+                let marked = Scope {
+                    register: &register,
+                    ..*driver
+                };
+                bind_entries(
+                    adapter, &marked, on_preds, marks, trace, first_new, bound, tuples,
+                )
+            };
         bound.pop();
         if ok {
             found = true;
@@ -1148,7 +1312,9 @@ pub(crate) fn bind_entries(
     }
     if !found && trace.outer.get(ctx_idx).copied().unwrap_or(false) {
         bound.push(None);
-        found = bind_entries(adapter, driver, on_preds, trace, first_new, bound, tuples);
+        found = bind_entries(
+            adapter, driver, on_preds, marks, trace, first_new, bound, tuples,
+        );
         bound.pop();
     }
     found

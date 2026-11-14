@@ -178,13 +178,26 @@ fn docinfo_is_the_declared_identity() {
     let a = quarb_text_ofd::parse(&sawyer(false)).unwrap();
     assert_eq!(values("^::title", &a), ["The Adventures of Tom Sawyer"]);
     assert_eq!(values("^::author", &a), ["Mark Twain"]);
-    assert_eq!(values("^::keywords", &a), ["boys; Mississippi"]);
-    assert_eq!(values("^::created", &a), ["1876-06-01"]);
-    assert_eq!(values("^::edition", &a), ["first"]);
-    assert_eq!(values("^::doc-id", &a), ["1"]);
+    assert_eq!(
+        values("^ | %(::tags)", &a),
+        [r#"%(tags = @("boys"; "Mississippi"))"#]
+    );
+    assert_eq!(values("^::published", &a), ["1876-06-01"]);
     let root = a.root();
     assert_eq!(root, NodeId(0));
-    assert!(a.properties(root).iter().any(|(k, _)| k == "creator"));
+    assert!(a.properties(root).iter().any(|(k, _)| k == "title"));
+    // every entry is a field of the record `::head`, under the name
+    // the file writes (ruling 2026-11-14): `DocInfo`'s element
+    // names, the keywords together, a custom entry under its own
+    assert_eq!(values("::head:Title", &a), ["The Adventures of Tom Sawyer"]);
+    assert_eq!(values("::head:Keywords", &a), ["boys; Mississippi"]);
+    assert_eq!(values("::head:CreationDate", &a), ["1876-06-01"]);
+    assert_eq!(values("::head:edition", &a), ["first"]);
+    assert_eq!(values("::head:DocID", &a), ["1"]);
+    assert!(values("::head", &a)[0].contains("Creator = "));
+    // no entry answers directly as a property any more
+    assert_eq!(values("^::edition", &a), [""]);
+    assert_eq!(values("^::Subject", &a), [""]);
 }
 
 #[test]

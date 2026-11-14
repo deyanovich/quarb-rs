@@ -396,28 +396,54 @@ fn head_declarations_land_on_the_document() {
         m.property(root, "published"),
         Some(Value::Instant { .. })
     ));
-    // The lossless layer: every declaration under its own name.
+    // The lossless layer: `::head`, the record of every declaration
+    // under its own name (ruling 2026-11-14); a JSON-LD block is one
+    // nested record under `ld`, as it is written.
+    let Some(Value::Record(head)) = m.property(root, "head") else {
+        panic!("a page's head is a record");
+    };
+    let field = |name: &str| head.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+    assert_eq!(field("og:type"), Some(Value::Str("article".into())));
     assert_eq!(
-        m.metadata(root, "og:type"),
-        Some(Value::Str("article".into()))
-    );
-    assert_eq!(
-        m.metadata(root, "article:section"),
+        field("article:section"),
         Some(Value::Str("Data Model".into()))
     );
+    assert_eq!(field("lang"), Some(Value::Str("en".into())));
     assert_eq!(
-        m.metadata(root, "schema:@type"),
-        Some(Value::Str("TechArticle".into()))
-    );
-    assert_eq!(
-        m.metadata(root, "schema:author.name"),
-        Some(Value::Str("The Quarb Project".into()))
-    );
-    assert_eq!(m.metadata(root, "lang"), Some(Value::Str("en".into())));
-    assert_eq!(
-        m.metadata(root, "canonical"),
+        field("canonical"),
         Some(Value::Str("https://quarb.org/capsa.html".into()))
     );
+    assert_eq!(field("schema:@type"), None, "no flattened JSON-LD names");
+    let Some(Value::Record(block)) = field("ld") else {
+        panic!("the JSON-LD block is a record");
+    };
+    let of = |r: &[(String, Value)], name: &str| {
+        r.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+    };
+    assert_eq!(of(&block, "@type"), Some(Value::Str("TechArticle".into())));
+    let Some(Value::Record(author)) = of(&block, "author") else {
+        panic!("the block's author is a record");
+    };
+    assert_eq!(
+        of(&author, "name"),
+        Some(Value::Str("The Quarb Project".into()))
+    );
+    // three colons are the reader's own facts: a declared name
+    // asked for there answers nothing, and for one release is told
+    // where it went, a flattened JSON-LD name as the path into the
+    // block
+    assert_eq!(m.metadata(root, "og:type"), None);
+    let head = m.head_meta();
+    assert_eq!(head.retired("og:type").as_deref(), Some(r#""og:type""#));
+    assert_eq!(
+        head.retired("schema:author.name").as_deref(),
+        Some("ld:author:name")
+    );
+    assert_eq!(
+        head.retired("schema:@type").as_deref(),
+        Some(r#"ld:"@type""#)
+    );
+    assert_eq!(head.retired("nothing-declared"), None);
     // Sections are untouched: no page traits leak onto them.
     let section = m.children(root)[0];
     assert!(!m.traits(section).contains(&"tag:capsa".to_string()));
@@ -448,10 +474,14 @@ fn head_declarations_answer_queries() {
     };
     assert_eq!(vals("::category"), vec!["Data Model"]);
     // A declared name with a colon is quoted, like an XML
-    // namespaced attribute: `:::"og:type"`.
-    assert_eq!(vals(":::\"og:type\""), vec!["article"]);
-    assert_eq!(vals("(()):::\"article:section\""), vec!["Data Model"]);
-    assert_eq!(vals(":::\"schema:@type\""), vec!["TechArticle"]);
+    // namespaced attribute: `::head:"og:type"`. The field heads the
+    // expression, the root assumed.
+    assert_eq!(vals("::head:\"og:type\""), vec!["article"]);
+    assert_eq!(vals("^::head:\"article:section\""), vec!["Data Model"]);
+    assert_eq!(vals("::head:ld:\"@type\""), vec!["TechArticle"]);
+    assert_eq!(vals("::head:ld:author:name"), vec!["The Quarb Project"]);
+    // the retired spelling answers null
+    assert_eq!(vals(":::\"og:type\""), vec![""]);
 }
 
 /// Links into a document: the canonical URL is the base, a

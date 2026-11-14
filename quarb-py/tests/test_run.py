@@ -35,7 +35,7 @@ def test_json_values():
 
 def test_json_nodes_render_as_pointers():
     got = quarb.run("/books/*", BOOKS_JSON, "json")
-    assert got == ["/books/0", "/books/1"]
+    assert got == ["/books/1", "/books/2"]
 
 
 def test_csv_locale_sort():
@@ -172,7 +172,7 @@ def test_document_records_rejects_scalars():
 
 def test_document_nodes_and_values_discipline():
     doc = quarb.loads(BOOKS_JSON, "json")
-    assert doc.nodes("/books/*") == ["/books/0", "/books/1"]
+    assert doc.nodes("/books/*") == ["/books/1", "/books/2"]
     with pytest.raises(TypeError, match="values"):
         doc.nodes("/books/*/title::")
 

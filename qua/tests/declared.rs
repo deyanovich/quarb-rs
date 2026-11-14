@@ -62,10 +62,16 @@ fn a_model_document_container_is_a_corpus() {
     )
     .unwrap();
     let q = |query: &str| ok(&dir, &["--model", "blog.model", query, "posts.json"], "");
-    assert_eq!(q("/blog/post:::title"), "Ithaca\nTroy");
-    assert_eq!(q("/blog/post[:::title = \"Troy\"]:::author"), "Homer");
+    assert_eq!(q("/blog/post::head:title"), "Ithaca\nTroy");
+    assert_eq!(
+        q("/blog/post[::head:title = \"Troy\"]::head:author"),
+        "Homer"
+    );
     assert_eq!(q("/blog/post//sentence @| count"), "3");
-    assert_eq!(q("/blog/post[:::title = \"Troy\"]//token @| count"), "9");
+    assert_eq!(
+        q("/blog/post[::head:title = \"Troy\"]//token @| count"),
+        "9"
+    );
     assert_eq!(q("/blog/post<document> @| count"), "2");
 }
 

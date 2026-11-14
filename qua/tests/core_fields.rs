@@ -37,8 +37,9 @@ fn refuse(q: &str) -> String {
 fn the_inspection_fields_list_the_three_ladders_as_projections() {
     assert_eq!(rows("/a:props"), ["@(::title; ::year)"]);
     assert_eq!(rows("/a:properties"), ["@(::title; ::year)"]);
-    // a JSON array names its items by position, as `::` reads them
-    assert_eq!(rows("/b:props"), ["@(::0; ::1)"]);
+    // a JSON array names its items by position, from one, as `::`
+    // reads them
+    assert_eq!(rows("/b:props"), ["@(::1; ::2)"]);
     // the adapter's `:::` keys the node answers
     let meta = rows("/a:meta");
     assert!(meta[0].contains(":::type"), "{meta:?}");

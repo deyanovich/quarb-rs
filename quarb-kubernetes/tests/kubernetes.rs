@@ -62,9 +62,35 @@ fn mock_cluster() {
 
     // The object's JSON descends as tree.
     assert_eq!(
-        v("/namespaces/default/pods/web-1/spec/containers/0/image::"),
+        v("/namespaces/default/pods/web-1/spec/containers/1/image::"),
         ["nginx:alpine"]
     );
+
+    // The record of a node is what it answers as properties: an
+    // object's identity and its labels, a map's flat entries. It
+    // listed the children (`metadata`, `spec`, `status`) with nulls
+    // under them, and a map's entries as nulls.
+    let pod = v("/namespaces/default/pods/web-1 | %");
+    assert!(
+        pod[0].starts_with(r#"%(name = "web-1"; namespace = "default"; kind = "Pod"; "#),
+        "{pod:?}"
+    );
+    assert!(pod[0].contains(r#"phase = "Running""#), "{pod:?}");
+    assert!(pod[0].contains(r#"app = "web""#), "{pod:?}");
+    assert!(!pod[0].contains("null"), "{pod:?}");
+    assert!(!pod[0].contains("metadata"), "{pod:?}");
+    // a flat entry of a map is a property too, as a JSON object's
+    assert_eq!(
+        v("/namespaces/default/pods/web-1/metadata::name"),
+        ["web-1"]
+    );
+    assert_eq!(
+        v("/namespaces/default/pods/web-1/spec/containers/1 | %(::image)"),
+        [r#"%(image = "nginx:alpine")"#]
+    );
+    // a listing has no properties, and the serializers are untouched
+    assert_eq!(v("/namespaces/default/pods | %"), ["%()"]);
+    assert!(v("/namespaces/default/pods/web-1 | json")[0].starts_with(r#"{"metadata": {"#));
 
     // Owner chain: Pod ~> ReplicaSet ~> Deployment, the targets
     // arriving by single GET.

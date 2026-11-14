@@ -11,7 +11,7 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-quarb-json = { path = "../quarb-json", version = "0.63.0" }
+quarb-json = { path = "../quarb-json", version = "0.64.0" }
 # file order for a table's keys, as JSON and YAML keep it: without
 # the feature the crate's tables are sorted maps
 toml = { version = "1", features = ["preserve_order"] }

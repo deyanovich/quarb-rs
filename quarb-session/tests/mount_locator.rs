@@ -23,5 +23,5 @@ fn a_mounted_node_renders_with_its_source_locator() {
     assert_eq!(lines, ["/books/row[1]", "/books/row[3]"]);
     let cells = ex.run("/notes/k/*").unwrap();
     let lines: Vec<String> = cells.iter().map(|c| c.display()).collect();
-    assert_eq!(lines, ["/notes/k/0", "/notes/k/1"]);
+    assert_eq!(lines, ["/notes/k/1", "/notes/k/2"]);
 }

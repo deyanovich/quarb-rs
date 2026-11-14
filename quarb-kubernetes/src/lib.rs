@@ -7,7 +7,7 @@
 //! `-A`) — while each namespace object holds its own scoped
 //! listings (`/namespaces/prod/pods`), the way a Firestore
 //! document holds subcollections. Objects descend as their JSON:
-//! `/namespaces/prod/pods/web-1/spec/containers/0/image`.
+//! `/namespaces/prod/pods/web-1/spec/containers/1/image`.
 //! RFC 3339 timestamp strings decode as instants, so
 //! `[::created > 2026-01-01]` is a calendar comparison.
 //!
@@ -153,6 +153,23 @@ enum Field {
     Scalar(Value),
     Map(Vec<(String, Field)>),
     Array(Vec<Field>),
+}
+
+/// A field's value where it is flat: a scalar, or a list of
+/// scalars as one list. A map, or a list holding one, is none.
+fn flat(f: &Field) -> Option<Value> {
+    match f {
+        Field::Scalar(v) => Some(v.clone()),
+        Field::Array(items) if !items.is_empty() => items
+            .iter()
+            .map(|i| match i {
+                Field::Scalar(v) => Some(v.clone()),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(Value::list),
+        _ => None,
+    }
 }
 
 fn decode(v: &Json) -> Field {
@@ -489,7 +506,7 @@ impl KubernetesAdapter {
                 .map(|(i, v)| {
                     self.push_node(
                         Kind::Field { value: v.clone() },
-                        Some(i.to_string()),
+                        Some(quarb::item_name(i)),
                         Some(parent),
                     )
                 })
@@ -628,6 +645,19 @@ impl AstAdapter for KubernetesAdapter {
     fn property(&self, node: NodeId, name: &str) -> Option<Value> {
         let key = match &self.nodes.borrow()[node.0 as usize].kind {
             Kind::Object { key } => key.clone(),
+            // Dual exposure, as a JSON object's: a scalar entry of a
+            // map answers as a property too (`/metadata::name`
+            // beside `/metadata/name::`), and a list of scalars as
+            // one list-valued property. An entry that holds a map
+            // answers to navigation alone.
+            Kind::Field {
+                value: Field::Map(entries),
+            } => {
+                return entries
+                    .iter()
+                    .find(|(k, _)| k == name)
+                    .and_then(|(_, f)| flat(f));
+            }
             _ => return None,
         };
         let info = self.object(&key)?;
@@ -649,6 +679,54 @@ impl AstAdapter for KubernetesAdapter {
                 .find(|(k, _)| k == other)
                 .map(|(_, v)| Value::Str(v.clone())),
         }
+    }
+
+    /// The names of the properties a node answers: an object's
+    /// identity (`name`, `namespace`, `kind`, `uid`, `created`,
+    /// `phase`, `node`, `owner`, where it has them) and its labels;
+    /// a map's flat entries. A node's children are not its
+    /// properties here: `| %` listed `metadata`, `spec`, `status`
+    /// with nulls under them, and a map's entries as nulls. The
+    /// serializers are untouched (they go by `properties`).
+    fn property_names(&self, node: NodeId) -> Vec<String> {
+        let kind = match &self.nodes.borrow()[node.0 as usize].kind {
+            Kind::Object { key } => Ok(key.clone()),
+            Kind::Field {
+                value: Field::Map(entries),
+            } => Err(entries
+                .iter()
+                .filter(|(_, f)| flat(f).is_some())
+                .map(|(k, _)| k.clone())
+                .collect::<Vec<_>>()),
+            _ => Err(Vec::new()),
+        };
+        let key = match kind {
+            Ok(key) => key,
+            Err(names) => return names,
+        };
+        let Some(info) = self.object(&key) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = [
+            "name",
+            "namespace",
+            "kind",
+            "uid",
+            "created",
+            "phase",
+            "node",
+            "owner",
+        ]
+        .iter()
+        .filter(|n| self.property(node, n).is_some())
+        .map(|n| n.to_string())
+        .collect();
+        for (label, _) in &info.labels {
+            if !names.contains(label) {
+                names.push(label.clone());
+            }
+        }
+        names
     }
 
     /// A scalar field node projects to its value.

@@ -184,6 +184,14 @@ pub const UNREADABLE_SHEET: &str = "UNREADABLE_SHEET";
 /// Quiet where the join only filters, and under `<=>*`, which binds
 /// every candidate (ruling 2026-11-11).
 pub const SEVERAL_WITNESSES: &str = "SEVERAL_WITNESSES";
+/// Warning: `:::name` on a document node asked for something the
+/// document declares (a header's key, a page's `meta`), which three
+/// colons read until 0.63 and read no longer (ruling 2026-11-14:
+/// what a document declares is the record `::head`; three colons
+/// are the adapter's own facts). The answer is null and the message
+/// names the spelling that reads it (`::head:name`). Kept for one
+/// release.
+pub const RETIRED_KEY: &str = "RETIRED_KEY";
 /// Info: two indexes met and the labels of a side were cast to the
 /// type they agreed on (a declared index won, two undeclared were
 /// upcast to their common type, an integer met a float).

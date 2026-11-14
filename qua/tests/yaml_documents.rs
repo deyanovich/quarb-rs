@@ -65,7 +65,7 @@ fn several_documents_are_a_list_in_file_order() {
         lines(&[r#"/*[::kind = "Deployment"]/spec::replicas"#, f]),
         ["3"]
     );
-    assert_eq!(lines(&["/1/spec/ports/0::port", f]), ["80"]);
+    assert_eq!(lines(&["/2/spec/ports/1::port", f]), ["80"]);
     assert_eq!(
         lines(&[r#"//*[::kind = "ConfigMap"]/data::keeper"#, f]),
         ["Callimachus"]
@@ -82,7 +82,7 @@ fn several_documents_are_a_list_in_file_order() {
     let g = g.to_str().unwrap();
     assert_eq!(lines(&["^ | :::length", g]), ["3"]);
     assert_eq!(lines(&["/* | ::", g]).len(), 3);
-    assert_eq!(lines(&["/2::b", g]), ["2"]);
+    assert_eq!(lines(&["/3::b", g]), ["2"]);
     // one document is the document, a separator before it or not
     for text in [
         "kind: ConfigMap\nmetadata:\n  name: shelf\n",

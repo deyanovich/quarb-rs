@@ -71,8 +71,8 @@ fn what_a_value_points_at() {
         };
         let nothing: Vec<String> = Vec::new();
         // a named property: a JSON Pointer, plain or as a fragment
-        assert_eq!(at("/post::author-->"), ["/users/0"]);
-        assert_eq!(at("/post::plain-->"), ["/users/1"]);
+        assert_eq!(at("/post::author-->"), ["/users/1"]);
+        assert_eq!(at("/post::plain-->"), ["/users/2"]);
         assert_eq!(at("/post::whole-->"), ["/"]);
         // …and nothing else
         assert_eq!(at("/post::kind-->"), nothing, "a bare word is text");
@@ -110,7 +110,7 @@ fn what_a_value_points_at() {
         assert_eq!(a.external_ref(r("/post"), "far", None), None);
         // under "any property" each value is read the same way: the
         // pointer counts, the bare word does not
-        assert_eq!(at("/users/0<--(/post::*)"), ["/post"]);
+        assert_eq!(at("/users/1<--(/post::*)"), ["/post"]);
         assert_eq!(at("/users<--(/post::*)"), nothing);
     }
 }

@@ -155,3 +155,50 @@ fn a_self_referential_outline_terminates() {
     assert_eq!(values(&model, "//section @| count"), ["1"]);
     assert_eq!(values(&model, "//section::lemma"), ["Loop"]);
 }
+
+/// The information dictionary is what the file declares about
+/// itself (ruling 2026-11-14): the record `::head` on the document
+/// node, each entry under the key the file writes, and the curated
+/// core read by those keys. A file with no dictionary declares
+/// nothing.
+#[test]
+fn the_information_dictionary_is_the_head() {
+    let c1 = stream("BT /F1 12 Tf 1 0 0 1 72 700 Tm (Emus advanced.) Tj ET");
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R \
+         /Resources << /Font << /F1 5 0 R >> >> >>"
+            .to_string(),
+        c1,
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        "<< /Title (The Emu War) /Author (W. Meredith) /Subject (A campaign of 1932) \
+         /Keywords (emus, wheat; guns) /CreationDate (D:19321102093000+08'00') \
+         /ModDate (D:1932) /Producer (a typewriter) >>"
+            .to_string(),
+    ];
+    let bodies: Vec<&str> = objects.iter().map(String::as_str).collect();
+    let mut bytes = pdf(&bodies);
+    // the same file with the dictionary named in its trailer
+    let text = String::from_utf8(bytes.clone()).unwrap();
+    bytes = text
+        .replace("/Root 1 0 R >>", "/Root 1 0 R /Info 6 0 R >>")
+        .into_bytes();
+    let m = parse(&bytes).unwrap();
+    assert_eq!(values(&m, "::head:Title"), ["The Emu War"]);
+    assert_eq!(values(&m, "::head:Producer"), ["a typewriter"]);
+    assert_eq!(
+        values(&m, "^ | %(::title; ::author; ::description; ::tags)"),
+        [concat!(
+            r#"%(title = "The Emu War"; author = "W. Meredith"; "#,
+            r#"description = "A campaign of 1932"; tags = @("emus"; "wheat"; "guns"))"#
+        )]
+    );
+    assert_eq!(values(&m, "::published"), ["1932-11-02T09:30:00+08:00"]);
+    assert_eq!(values(&m, "::modified"), ["1932-01-01T00:00:00Z"]);
+    assert_eq!(values(&m, "^ | (::head | keys | count)"), ["7"]);
+    // no dictionary: nothing declared
+    let bare = parse(&pdf(&bodies[..5])).unwrap();
+    assert_eq!(values(&bare, "::head"), [""]);
+    assert_eq!(values(&bare, "::title"), [""]);
+}

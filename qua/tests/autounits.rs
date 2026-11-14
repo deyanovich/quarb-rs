@@ -314,7 +314,7 @@ fn a_database_and_a_document_read_alike() {
     );
     assert_eq!(
         ok(&d, &["/legs/*/distance", js]),
-        "/legs/0/distance\n/legs/1/distance"
+        "/legs/1/distance\n/legs/2/distance"
     );
     assert_eq!(ok(&d, &["/legs/*/distance_km", js]), "");
     assert_eq!(ok(&d, &["//distance | ::", js]), "1235_km\n820_km");

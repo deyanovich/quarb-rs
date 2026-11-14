@@ -42,13 +42,13 @@ fn every_step_is_a_level_and_a_fold_a_paragraph() {
         "\
 root  (/; ∅)
 └─ /books/*
-   ├─ (…/0; ∅)
+   ├─ (…/1; ∅)
    │  └─ ::year  (…; 1813)
    │     └─ [$_ > 1800]  (…; 1813)
    │        └─ .y  (…; 1813)
-   ├─ (…/1; ∅)
+   ├─ (…/2; ∅)
    │  └─ ::year  (…; 1603)
-   └─ (…/2; ∅)
+   └─ (…/3; ∅)
       └─ ::year  (…; 1876)
          └─ [$_ > 1800]  (…; 1876)
             └─ .y  (…; 1876)
@@ -67,16 +67,16 @@ fn hops_within_a_branch_and_an_exhausted_thread() {
         "\
 root  (/; ∅)
 └─ /books/*
-   ├─ (…/0; ∅)
-   │  └─ .b  (…; ∅)
-   │     └─ /tags/*
-   │        ├─ (…/0; ∅)
-   │        └─ (…/1; ∅)
    ├─ (…/1; ∅)
    │  └─ .b  (…; ∅)
    │     └─ /tags/*
-   │        └─ (…/0; ∅)
-   └─ (…/2; ∅)
+   │        ├─ (…/1; ∅)
+   │        └─ (…/2; ∅)
+   ├─ (…/2; ∅)
+   │  └─ .b  (…; ∅)
+   │     └─ /tags/*
+   │        └─ (…/1; ∅)
+   └─ (…/3; ∅)
       └─ .b  (…; ∅)"
     );
 }
@@ -90,11 +90,11 @@ fn a_reduction_is_a_paragraph_with_one_answer() {
         "\
 root  (/; ∅)
 └─ /books/*
-   ├─ (…/0; ∅)
-   │  └─ ::year  (…; 1813)
    ├─ (…/1; ∅)
+   │  └─ ::year  (…; 1813)
+   ├─ (…/2; ∅)
    │  └─ ::year  (…; 1603)
-   └─ (…/2; ∅)
+   └─ (…/3; ∅)
       └─ ::year  (…; 1876)
 @| sum
 └─ (∅; 5292)
@@ -108,16 +108,16 @@ root  (/; ∅)
 #[test]
 fn alike_threads_merge_at_a_hop() {
     assert_eq!(
-        text("/books/0/tags/* | \\ @| threads"),
+        text("/books/1/tags/* | \\ @| threads"),
         "\
 root  (/; ∅)
-└─ /books/0/tags/*
-   ├─ (…/0; ∅)
+└─ /books/1/tags/*
+   ├─ (…/1; ∅)
    │  └─ \\
-   │     └─ (/books/0/tags; ∅)  (2 merged)
-   └─ (…/1; ∅)
+   │     └─ (/books/1/tags; ∅)  (2 merged)
+   └─ (…/2; ∅)
       └─ \\
-         └─ (/books/0/tags; ∅)  ⤴ merged"
+         └─ (/books/1/tags; ∅)  ⤴ merged"
     );
 }
 
@@ -129,15 +129,15 @@ fn depth_and_capsa_options() {
         "\
 root  (/; ∅)
 └─ /books/*
-   ├─ (…/0; ∅)
    ├─ (…/1; ∅)
-   └─ (…/2; ∅)"
+   ├─ (…/2; ∅)
+   └─ (…/3; ∅)"
     );
     assert_eq!(
-        text("/books/0 | .t(::title) | ::year @| threads(-c)"),
+        text("/books/1 | .t(::title) | ::year @| threads(-c)"),
         "\
 root  (/; ∅)
-└─ /books/0
+└─ /books/1
    └─ (…; ∅)
       └─ .t(::title)  (…; ∅)
          └─ ::year  (…; 1813)  [.t = \"Pride and Prejudice\"]"

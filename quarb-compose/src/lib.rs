@@ -1356,8 +1356,8 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
         match self.split(node) {
             Some((g, inner)) => self.grafts.borrow()[g].inner.adapter().metadata(inner, key),
             // Like properties: what the outer cannot answer, the
-            // grafted document's root may (`:::"og:type"` on the
-            // file that holds the page).
+            // grafted document's root may (`:::level`, a reader's
+            // own key, on the file that holds the document).
             None => self.outer.metadata(node, key).or_else(|| {
                 let g = self.graft_at(node)?;
                 if matches!(key, "encoding" | "replaced") {

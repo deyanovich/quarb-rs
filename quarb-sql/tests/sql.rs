@@ -676,3 +676,70 @@ fn a_plan_records_the_column_types_it_assumes() {
     let plan = quarb_sql::pushdown("/books/*[::pages = ::leaves] | ::title", None).unwrap();
     assert!(plan.column_types.is_empty());
 }
+
+/// A joined expression's mark (ruling 2026-11-14) and the driver's
+/// are rows of the two tables: `$$.al::col` is the joined table's
+/// column, `$$.t::col` the FROM table's, in the ON and after it.
+#[test]
+fn pushdown_reads_the_marks_of_a_join() {
+    let pushdown = |q: &str| quarb_sql::pushdown(q, None);
+    let named = pushdown(
+        "/tracks/* .t <=> /albums/*[::id = $$.t::album_id] .al \
+         | %(t = $$.t::title; al = $$.al::title)",
+    )
+    .expect("the named join pushes down");
+    assert_eq!(
+        named.sql,
+        "SELECT tracks.title AS t, albums.title AS al FROM tracks JOIN albums \
+         ON albums.id = tracks.album_id"
+    );
+    // the same plan as the numbered spelling, obligation included
+    let numbered =
+        pushdown("/tracks/* <=> /albums/*[::id = $$0::album_id] | %(t = ::title; al = $$1::title)")
+            .unwrap();
+    assert_eq!(named.sql, numbered.sql);
+    assert_eq!(named.join_left, numbered.join_left);
+    assert_eq!(
+        named.join_left,
+        Some(("albums".to_string(), vec!["id".to_string()]))
+    );
+    // the outer join and the every-witness join take the names too
+    let p = pushdown(
+        "/tracks/* .t <=>? /albums/*[::id = $$.t::album_id] .al \
+         | %(t = $$.t::title; al = $$.al::title)",
+    )
+    .unwrap();
+    assert!(
+        p.sql
+            .contains(" LEFT JOIN albums ON albums.id = tracks.album_id"),
+        "{}",
+        p.sql
+    );
+    let p = pushdown(
+        "/albums/* .al <=>* /tracks/*[::album_id = $$.al::id] .t \
+         | %(al = $$.al::title; t = $$.t::title)",
+    )
+    .unwrap();
+    assert_eq!(
+        p.sql,
+        "SELECT albums.title AS al, tracks.title AS t FROM albums JOIN tracks \
+         ON tracks.album_id = albums.id"
+    );
+    // a mark read the translation has no row for stays on the scan:
+    // by position, of a mark on the table, of a mark with no name
+    for q in [
+        "/tracks/* .t <=> /albums/*[::id = $$.t::album_id] .al | %(n = $$.2::title)",
+        "/tracks/* .t <=> /albums/*[::id = $$.t::album_id] . | %(n = $$.::title)",
+        "/tracks .x /* | %(x = $$.x:name; t = ::title)",
+        "/tracks/* .t <=> /albums .x /*[::id = $$.t::album_id] | %(t = ::title)",
+    ] {
+        assert!(pushdown(q).is_none(), "{q}");
+    }
+    // a driver's mark alone still pushes
+    assert_eq!(
+        pushdown("/tracks/* .t | %(x = $$.t::title; y = ::secs)")
+            .unwrap()
+            .sql,
+        "SELECT title AS x, secs AS y FROM tracks"
+    );
+}

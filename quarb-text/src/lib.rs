@@ -1212,9 +1212,10 @@ pub fn normalize_ws(s: &str) -> String {
 /// vocabulary its format provides — HTML's `<head>` (the `meta`
 /// name/property pairs, `title`, the `lang` attribute, the
 /// canonical link, `rel="tag"` links) and a schema.org JSON-LD
-/// block. Two layers: every declaration lands verbatim under
-/// `:::name` (`:::description`, `:::og:type`,
-/// `:::article:section`, `:::schema:@type`), so nothing a page
+/// block. Two layers: every declaration is a field of the record
+/// `::head` under the name it was declared with
+/// (`::head:description`, `::head:"og:type"`,
+/// `::head:"article:section"`, `::head:ld`), so nothing a page
 /// says is lost; and the standard vocabularies feed a curated
 /// core — the tags (`keywords`, `article:tag`, `rel=tag`, JSON-LD
 /// `keywords`) become traits on the document and `::tags`, the
@@ -1233,9 +1234,24 @@ pub struct HeadMeta {
     /// number a number, a list a list, a mapping a record. Answered
     /// before `declared` under the same name.
     pub typed: Vec<(String, Value)>,
+    /// The document has a place where it declares things (a YAML
+    /// header, a `<head>`), whether or not anything stands in it:
+    /// `::head` is then a record, the empty one where nothing is
+    /// declared. Without such a place, and with no declaration,
+    /// `::head` is null.
+    pub present: bool,
     pub title: Option<String>,
     pub description: Option<String>,
     pub author: Option<String>,
+    /// The document's declared language, as written (`en`,
+    /// `ru-RU`): the curated `::lang`, read by each reader from the
+    /// name its format has for it (ruling 2026-11-14).
+    pub lang: Option<String>,
+    /// The names a reader answered its declarations under until
+    /// 0.63, each with the name the file writes, which the record
+    /// carries now (`title` → `dc:title` in a Word file): what
+    /// `:::title` is told for one release (RETIRED_KEY).
+    pub renamed: Vec<(&'static str, &'static str)>,
     /// The one classification (a section of the site, a category).
     pub category: Option<String>,
     /// The tags, as written, first appearance wins.
@@ -1273,7 +1289,7 @@ impl HeadMeta {
     /// note-taking conventions share:
     ///
     /// - `title`, `description`, `author` (a list of authors joined
-    ///   with commas), each a text;
+    ///   with commas), each a text; `lang`, also `language`;
     /// - `tags`, also `keywords`: a list, or one text split at
     ///   commas; each tag is a trait of the document too;
     /// - `category`, or `categories` when it holds exactly one;
@@ -1314,6 +1330,7 @@ impl HeadMeta {
         let mut h = HeadMeta::default();
         let get = |name: &str| entries.iter().find(|(k, _)| k == name).map(|(_, v)| v);
         h.title = get("title").and_then(text);
+        h.lang = get("lang").or_else(|| get("language")).and_then(text);
         h.description = get("description").and_then(text);
         h.author = get("author").and_then(|v| match v {
             Value::List(_) => {
@@ -1340,7 +1357,81 @@ impl HeadMeta {
             .iter()
             .find_map(|k| get(k).and_then(instant));
         h.typed = entries;
+        h.present = true;
         h
+    }
+
+    /// `::head` on the document node (ruling 2026-11-14): the record
+    /// of everything the document declares about itself, each field
+    /// under the name it was declared with and with the value its
+    /// format gives it (a YAML header's types; a page's texts, a
+    /// name declared more than once a list). The curated core
+    /// (`::title`, `::tags`, …) reads the same declarations by the
+    /// conventions; this is all of them, as written. Null where the
+    /// document has no place for declarations and declares nothing.
+    pub fn record(&self) -> Option<Value> {
+        if !self.present && self.declared.is_empty() && self.typed.is_empty() {
+            return None;
+        }
+        let mut fields: Vec<(String, Value)> = self.typed.clone();
+        for (name, _) in &self.declared {
+            if !fields.iter().any(|(k, _)| k == name)
+                && let Some(v) = self.declared_value(name)
+            {
+                fields.push((name.clone(), v));
+            }
+        }
+        Some(Value::record(fields))
+    }
+
+    /// The field chain under `::head` that holds what `:::key` read
+    /// until 0.63, as it is written in a query, or none where the
+    /// document never declared it: the same name; the name the file
+    /// writes where the reader answered under a plain one
+    /// ([`HeadMeta::renamed`]); a flattened JSON-LD name
+    /// (`schema:author.name`) as the path into the block
+    /// (`ld:author:name`).
+    pub fn retired(&self, key: &str) -> Option<String> {
+        let spelled = |name: &str| {
+            if !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-'))
+            {
+                name.to_string()
+            } else {
+                format!("\"{name}\"")
+            }
+        };
+        if self.declared_value(key).is_some() {
+            return Some(spelled(key));
+        }
+        if let Some((_, now)) = self
+            .renamed
+            .iter()
+            .find(|(was, now)| *was == key && self.declared_value(now).is_some())
+        {
+            return Some(spelled(now));
+        }
+        let path = key.strip_prefix("schema:")?;
+        self.declared_value("ld")?;
+        Some(
+            std::iter::once("ld".to_string())
+                .chain(path.split('.').map(spelled))
+                .collect::<Vec<_>>()
+                .join(":"),
+        )
+    }
+
+    /// A text that reads as an ISO date or timestamp, as the
+    /// instant the curated `published` and `modified` are.
+    pub fn instant(text: &str) -> Option<Value> {
+        quarb::temporal::parse_iso(text.trim()).map(|(secs, nanos, offset_min)| Value::Instant {
+            secs,
+            nanos,
+            offset_min,
+            calendar: Default::default(),
+        })
     }
 
     /// A declaration's value: as declared where the source has
@@ -4245,6 +4336,9 @@ impl AstAdapter for TextModel {
             let h = &self.head;
             match name {
                 "title" | "lemma" => return h.title.clone().map(Value::Str),
+                // the document's declared language; where it
+                // declares none, the node's own `lang` reads on
+                "lang" if h.lang.is_some() => return h.lang.clone().map(Value::Str),
                 "description" => return h.description.clone().map(Value::Str),
                 "author" => return h.author.clone().map(Value::Str),
                 "category" => return h.category.clone().map(Value::Str),
@@ -4254,6 +4348,8 @@ impl AstAdapter for TextModel {
                 }
                 "published" => return h.published.clone(),
                 "modified" => return h.modified.clone(),
+                // everything the document declares, as declared
+                "head" => return h.record(),
                 _ => {}
             }
         }
@@ -4663,12 +4759,22 @@ impl AstAdapter for TextModel {
             return self.v_metadata(v, key);
         }
         let n = &self.nodes[node.0 as usize];
-        // The lossless layer: on the document node, every
-        // declaration under the name it was declared with.
+        // What the document declares is the record `::head` (ruling
+        // 2026-11-14); three colons are the adapter's own facts. A
+        // declared name asked for here read the declaration until
+        // 0.63: for one release it says where the declaration went.
         if n.kind == Kind::Document
-            && let Some(v) = self.head.declared_value(key)
+            && let Some(field) = self.head.retired(key)
         {
-            return Some(v);
+            quarb::record_warning(
+                quarb::diagnostic::RETIRED_KEY,
+                &format!(":::{key}"),
+                format!(
+                    "':::{key}' no longer reads what the document declares: the \
+                     declarations are the record '::head', and this one is \
+                     '::head:{field}'"
+                ),
+            );
         }
         match key {
             "level" => n.level.map(|l| Value::Int(l as i64)),

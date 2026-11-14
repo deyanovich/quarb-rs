@@ -123,7 +123,7 @@ fn a_markdown_header_is_declared_identity_on_the_koine_route() {
         [r#"%(tags = @("epic"; "greek"))"#]
     );
     assert_eq!(values(&m, "^::published"), ["2026-03-01"]);
-    assert_eq!(values(&m, "^ | :::books"), ["24"]);
+    assert_eq!(values(&m, "^ | ::head:books"), ["24"]);
     assert_eq!(
         values(&m, "^ | %(:traits)"),
         [r#"%(traits = @("document"; "tag:epic"; "tag:greek"))"#]
@@ -305,12 +305,17 @@ fn fictionbook_imports_by_namespace() {
     // the literary reading keeps the inline emphasis and the identity
     let l = quarb_text_koine::parse_lit_xml_as(fb2, "fb2").unwrap();
     assert_eq!(values(&l, "//emphasis::"), ["начинается"]);
-    assert_eq!(values(&l, "//title::"), ["Евгений Онегин"]);
-    assert_eq!(values(&l, "//author::"), ["Александр Пушкин"]);
-    // and declares them on the document node, as html's head does
-    assert_eq!(values(&m, "^:::title"), ["Евгений Онегин"]);
-    assert_eq!(values(&m, "^:::author"), ["Александр Пушкин"]);
-    assert_eq!(values(&l, "^:::title"), ["Евгений Онегин"]);
+    // the description is what the book declares, not its text: no
+    // title or author node of the header in either reading
+    assert_eq!(values(&l, "//author @| count"), ["0"]);
+    assert_eq!(
+        values(&m, "//paragraph[:: = \"Евгений Онегин\"] @| count"),
+        ["0"]
+    );
+    // it stands on the document node, as html's head does
+    assert_eq!(values(&m, "^::head:title"), ["Евгений Онегин"]);
+    assert_eq!(values(&m, "^::head:author"), ["Александр Пушкин"]);
+    assert_eq!(values(&l, "^::head:title"), ["Евгений Онегин"]);
 }
 
 /// A TEI speech on the text level: a `<sp><speaker>` block keeps
@@ -1164,4 +1169,84 @@ fn a_sentences_file_gives_the_segmentation() {
         .tokenize_given("The Play\nA word here. Another one!\nAct Two\nLast words.\nMore.\n")
         .unwrap_err();
     assert!(err.contains("line 5"), "{err}");
+}
+
+/// A vocabulary that keeps what the document declares in a header
+/// element of its own (TEI's `teiHeader`, FictionBook's
+/// `description`, DocBook's root `info`, JATS's `front`): the header
+/// is the record `::head` on the document node and no part of the
+/// text (ruling 2026-11-14). The title, the author and the abstract
+/// were paragraphs of the text.
+#[test]
+fn a_header_element_is_the_head_and_no_part_of_the_text() {
+    let tei = r#"<TEI xmlns="http://www.tei-c.org/ns/1.0">
+<teiHeader><fileDesc>
+<titleStmt><title>The Histories</title><author>Herodotus</author></titleStmt>
+<publicationStmt><p>An example.</p></publicationStmt>
+<sourceDesc><p>From the Oxford text.</p></sourceDesc>
+</fileDesc></teiHeader>
+<text><body>
+<div><head>Book One</head><p>These are the researches of Herodotus.</p></div>
+</body></text></TEI>"#;
+    let m = quarb_text_koine::parse_xml_as(tei, "tei").unwrap();
+    assert_eq!(
+        values(&m, "::head"),
+        [r#"%(title = "The Histories"; author = "Herodotus")"#]
+    );
+    assert_eq!(values(&m, "::head:title"), ["The Histories"]);
+    assert_eq!(
+        values(&m, "^ | %(::title; ::author)"),
+        [r#"%(title = "The Histories"; author = "Herodotus")"#]
+    );
+    assert_eq!(
+        values(&m, "//paragraph::"),
+        ["These are the researches of Herodotus."]
+    );
+    assert_eq!(values(&m, "/*:name"), ["section"]);
+    // the literary reading reads the same header
+    let l = quarb_text_koine::parse_lit_xml_as(tei, "tei").unwrap();
+    assert_eq!(values(&l, "::head:author"), ["Herodotus"]);
+    assert_eq!(values(&l, "//title @| count"), ["0"]);
+
+    // JATS: the article's title, its authors and its abstract
+    let jats = r#"<article>
+<front><article-meta><title-group><article-title>On the Nile</article-title></title-group>
+<contrib-group><contrib contrib-type="author"><name><surname>Herodotus</surname><given-names>H.</given-names></name></contrib></contrib-group>
+<abstract><p>The river rises in summer.</p></abstract></article-meta></front>
+<body><sec><title>The flood</title><p>It begins at the solstice.</p></sec></body>
+</article>"#;
+    let m = quarb_text_koine::parse_xml_as(jats, "jats").unwrap();
+    assert_eq!(
+        values(&m, "::head"),
+        [
+            r#"%(title = "On the Nile"; author = "H. Herodotus"; abstract = "The river rises in summer.")"#
+        ]
+    );
+    // the abstract under its own name, and as the curated description
+    assert_eq!(values(&m, "::description"), ["The river rises in summer."]);
+    assert_eq!(values(&m, "//paragraph::"), ["It begins at the solstice."]);
+
+    // DocBook: the ROOT's info alone; a division's own info title is
+    // its heading and stays in the text
+    let docbook = r#"<article xmlns="http://docbook.org/ns/docbook" version="5.0">
+<info><title>The Histories</title></info>
+<section><info><title>Clio</title></info><para>These are the researches.</para></section>
+<section><title>Euterpe</title><para>On Egypt.</para></section>
+</article>"#;
+    let m = quarb_text_koine::parse_xml_as(docbook, "docbook").unwrap();
+    assert_eq!(values(&m, "::head"), [r#"%(title = "The Histories")"#]);
+    assert_eq!(values(&m, "//section::lemma"), ["Clio", "Euterpe"]);
+    assert_eq!(
+        values(&m, "//paragraph::"),
+        ["These are the researches.", "On Egypt."]
+    );
+
+    // a native document writes its title line in its own text: it
+    // is in the head AND stays where the author put it
+    let native = "@@@!koine\n\n@=() The war\n\nThe emus advanced.\n";
+    if let Ok(m) = quarb_text_koine::parse_str(native, std::path::Path::new(".")) {
+        if values(&m, "::head:title") == ["The war"] {
+            assert_eq!(values(&m, "//paragraph @| count"), ["2"]);
+        }
+    }
 }

@@ -653,7 +653,9 @@ impl Doc {
                 spec.path
                     .file_stem()
                     .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| format!("doc{i}"))
+                    // a mount no name can be had for is named by its place
+                    // among the inputs, from one (ruling 2026-11-14)
+                    .unwrap_or_else(|| format!("doc{}", i + 1))
             });
             if mounts.iter().any(|m| m.name == name) {
                 bail!(

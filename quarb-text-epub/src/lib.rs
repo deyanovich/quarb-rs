@@ -25,7 +25,7 @@ use std::io::Read;
 
 use quarb::source::SourceDecoding;
 
-use quarb_text::{Block, TextModel};
+use quarb_text::{Block, HeadMeta, TextModel};
 use quick_xml::Reader;
 use quick_xml::events::Event;
 
@@ -55,7 +55,16 @@ pub fn parse_with_decoding(
     bytes: &[u8],
     decoding: &SourceDecoding,
 ) -> Result<TextModel, EpubError> {
-    Ok(TextModel::build(blocks_with_decoding(bytes, decoding)?))
+    let (blocks, head) = read(bytes, decoding)?;
+    let mut model = TextModel::build(blocks);
+    model.set_head_meta(head);
+    Ok(model)
+}
+
+/// What the package declares about the book: its `<metadata>`, read
+/// alone (the document node's `::head`).
+pub fn head(bytes: &[u8]) -> Result<HeadMeta, EpubError> {
+    Ok(read(bytes, &SourceDecoding::default())?.1)
 }
 
 /// Lower `.epub` bytes into the block event stream: the spine's
@@ -69,6 +78,11 @@ pub fn blocks_with_decoding(
     bytes: &[u8],
     decoding: &SourceDecoding,
 ) -> Result<Vec<Block>, EpubError> {
+    Ok(read(bytes, decoding)?.0)
+}
+
+/// The spine's chapters as blocks, and the package's metadata.
+fn read(bytes: &[u8], decoding: &SourceDecoding) -> Result<(Vec<Block>, HeadMeta), EpubError> {
     let mut zip = Members::new(zip::ZipArchive::new(std::io::Cursor::new(bytes))?, decoding);
     let container = zip
         .get("META-INF/container.xml")?
@@ -92,7 +106,90 @@ pub fn blocks_with_decoding(
             out.extend(scoped(quarb_text_html::blocks(&xhtml), &href));
         }
     }
-    Ok(out)
+    Ok((out, package_head(&opf)))
+}
+
+/// The package's `<metadata>` as the document's declared identity
+/// (ruling 2026-11-14: `::head` in every text-level format). Every
+/// entry stands under the name the package writes: a Dublin Core
+/// element under its qualified name (`dc:title`, `dc:creator`,
+/// `dc:language`, `dc:identifier`, `dc:publisher`, `dc:date`,
+/// `dc:subject`, `dc:description`), an EPUB 3 `<meta property=…>`
+/// under its property (`dcterms:modified`), an EPUB 2 `<meta name=…
+/// content=…>` under its name; a name written more than once is a
+/// list. The curated core reads the Dublin Core conventions: the
+/// title, the language, the creators as the author, the description, the subjects
+/// as tags, `dc:date` as `published` and `dcterms:modified` as
+/// `modified` where they read as ISO dates.
+fn package_head(opf: &str) -> HeadMeta {
+    let mut h = HeadMeta::default();
+    let mut reader = Reader::from_str(opf);
+    let mut buf = Vec::new();
+    let mut inside = false;
+    // the element whose text is being gathered: its declared name
+    let mut open: Option<(String, String)> = None;
+    while let Ok(ev) = reader.read_event_into(&mut buf) {
+        match &ev {
+            Event::Start(e) if local(e.name().as_ref()) == b"metadata" => {
+                inside = true;
+                h.present = true;
+            }
+            Event::End(e) if local(e.name().as_ref()) == b"metadata" => break,
+            Event::Start(e) if inside => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                open = if name.starts_with("dc:") {
+                    Some((name, String::new()))
+                } else if local(e.name().as_ref()) == b"meta" {
+                    attr(e, b"property").map(|p| (p, String::new()))
+                } else {
+                    None
+                };
+            }
+            Event::Empty(e) if inside && local(e.name().as_ref()) == b"meta" => {
+                if let (Some(name), Some(content)) = (attr(e, b"name"), attr(e, b"content")) {
+                    h.declare(&name, &content);
+                }
+            }
+            Event::Text(t) => {
+                if let Some((_, text)) = &mut open {
+                    match t.xml_content() {
+                        Ok(piece) => text.push_str(&piece),
+                        Err(_) => text.push_str(&String::from_utf8_lossy(t)),
+                    }
+                }
+            }
+            Event::End(_) => {
+                if let Some((name, text)) = open.take() {
+                    h.declare(&name, &text);
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    let all = |h: &HeadMeta, name: &str| -> Vec<String> {
+        h.declared
+            .iter()
+            .filter(|(k, _)| k == name)
+            .flat_map(|(_, vs)| vs.iter().cloned())
+            .collect()
+    };
+    h.title = all(&h, "dc:title").into_iter().next();
+    h.lang = all(&h, "dc:language").into_iter().next();
+    let creators = all(&h, "dc:creator");
+    h.author = (!creators.is_empty()).then(|| creators.join(", "));
+    h.description = all(&h, "dc:description").into_iter().next();
+    for subject in all(&h, "dc:subject") {
+        h.tag(&subject);
+    }
+    h.published = all(&h, "dc:date")
+        .first()
+        .and_then(|s| quarb_text_html::instant(s));
+    h.modified = all(&h, "dcterms:modified")
+        .first()
+        .and_then(|s| quarb_text_html::instant(s));
+    h
 }
 
 /// The package's members, read under the mount's rule: a member

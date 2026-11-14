@@ -212,7 +212,7 @@ fn build(
         }
         Cbor::Array(items) => {
             for (i, v) in items.iter().enumerate() {
-                let c = build(v, Some(i.to_string()), Some(id), None, nodes);
+                let c = build(v, Some(quarb::item_name(i)), Some(id), None, nodes);
                 nodes[id.0 as usize].children.push(c);
             }
         }
@@ -320,7 +320,12 @@ fn build_property(
         Cbor::Array(arr) => {
             for (i, v) in arr.iter().enumerate() {
                 if is_container(v) {
-                    children.push(build_property(v, Some(i.to_string()), Some(id), nodes));
+                    children.push(build_property(
+                        v,
+                        Some(quarb::item_name(i)),
+                        Some(id),
+                        nodes,
+                    ));
                 } else if !root_list {
                     items.push((i, scalar_value(v)));
                 }
@@ -359,8 +364,8 @@ impl CborAdapter {
         })
     }
 
-    /// A pointer-style path to `node` (`/users/0/name`), for
-    /// rendering.
+    /// The path to `node` as Quarb names it (`/users/1/name`: a list
+    /// item from one), for rendering.
     pub fn pointer(&self, node: NodeId) -> String {
         let mut parts = Vec::new();
         let mut cur = Some(node);
@@ -451,7 +456,7 @@ impl AstAdapter for CborAdapter {
             Kind::Array => n
                 .items
                 .iter()
-                .map(|(i, v)| (i.to_string(), v.clone()))
+                .map(|(i, v)| (quarb::item_name(*i), v.clone()))
                 .collect(),
             _ => Vec::new(),
         }
@@ -553,47 +558,47 @@ mod tests {
     #[test]
     fn property_reading() {
         let a = CborAdapter::parse_as(&music(), Reading::Property).unwrap();
-        assert_eq!(v(&a, "*//*"), ["/", "/tracks", "/tracks/0"]);
+        assert_eq!(v(&a, "*//*"), ["/", "/tracks", "/tracks/1"]);
         assert_eq!(v(&a, "//title @| count"), ["0"]);
         assert_eq!(v(&a, "/tracks/*::title"), ["Mars"]);
         assert_eq!(v(&a, "/tracks/*::price"), ["1.29"]);
         assert_eq!(v(&a, "/tracks/*::art"), ["c0ffee"]);
         assert_eq!(v(&a, "/tracks/*::42"), ["int-keyed"]);
         assert_eq!(v(&a, "/tracks/*::added | year"), ["2023"]);
-        assert_eq!(v(&a, "/tracks/0:::length"), ["5"]);
+        assert_eq!(v(&a, "/tracks/1:::length"), ["5"]);
     }
 
     #[test]
     fn navigates_like_json() {
         let a = CborAdapter::parse(&music()).unwrap();
-        assert_eq!(v(&a, "/tracks/0/title::"), ["Mars"]);
-        assert_eq!(v(&a, "/tracks/0::price"), ["1.29"]);
+        assert_eq!(v(&a, "/tracks/1/title::"), ["Mars"]);
+        assert_eq!(v(&a, "/tracks/1::price"), ["1.29"]);
         assert_eq!(v(&a, "/tracks:::length"), ["1"]);
     }
 
     #[test]
     fn time_tags_become_instants() {
         let a = CborAdapter::parse(&music()).unwrap();
-        assert_eq!(v(&a, "/tracks/0/added:::type"), ["instant"]);
+        assert_eq!(v(&a, "/tracks/1/added:::type"), ["instant"]);
         assert_eq!(v(&a, "/tracks/*[::added > 2023-01-01] @| count"), ["1"]);
-        assert_eq!(v(&a, "/tracks/0/added:::tag"), ["1"]);
+        assert_eq!(v(&a, "/tracks/1/added:::tag"), ["1"]);
     }
 
     #[test]
     fn bytes_render_hex_with_raw_length() {
         let a = CborAdapter::parse(&music()).unwrap();
-        assert_eq!(v(&a, "/tracks/0/art::"), ["c0ffee"]);
+        assert_eq!(v(&a, "/tracks/1/art::"), ["c0ffee"]);
         // a byte string's raw byte count is its size, a quantity;
         // length is the count of entries or characters elsewhere
-        assert_eq!(v(&a, "/tracks/0/art:::size"), ["3_B"]);
-        assert_eq!(v(&a, "/tracks/0/art:::length"), [""]);
-        assert_eq!(v(&a, "/tracks/0/*<bytes> @| count"), ["1"]);
+        assert_eq!(v(&a, "/tracks/1/art:::size"), ["3_B"]);
+        assert_eq!(v(&a, "/tracks/1/art:::length"), [""]);
+        assert_eq!(v(&a, "/tracks/1/*<bytes> @| count"), ["1"]);
     }
 
     #[test]
     fn nontext_keys_address_by_rendering() {
         let a = CborAdapter::parse(&music()).unwrap();
-        assert_eq!(v(&a, "/tracks/0/42::"), ["int-keyed"]);
+        assert_eq!(v(&a, "/tracks/1/42::"), ["int-keyed"]);
     }
 
     #[test]

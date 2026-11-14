@@ -12,7 +12,7 @@ fn fixture(tag: &str) -> PathBuf {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("books.json"),
-        r#"{"books": [{"title": "The Histories", "year": -430}, {"title": "Dune", "year": 1965},
+        r#"{"books": [{"title": "The Histories", "year": -430}, {"title": "Dracula", "year": 1897},
                      {"title": "The Divine Comedy", "year": 1320}]}"#,
     )
     .unwrap();
@@ -101,8 +101,11 @@ fn a_regex_construct_without_a_reading_refuses_by_name() {
     );
     assert!(e.contains("backreferences are not supported"), "{e}");
     assert_eq!(
-        ok(&d, &["/books/*[::title == (/Dune/)]::title", "books.json"]),
-        "Dune"
+        ok(
+            &d,
+            &["/books/*[::title == (/Dracula/)]::title", "books.json"]
+        ),
+        "Dracula"
     );
 }
 

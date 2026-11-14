@@ -104,7 +104,7 @@ fn the_context_tables_after_the_aggregation_pipe() {
     );
     assert_eq!(
         ok(&d, &format!("{pushed} @| #_")),
-        "#(@(topic; position);\n  %(null; /row/0);\n  %(null; /row/1))"
+        "#(@(topic; position);\n  %(null; /row/1);\n  %(null; /row/2))"
     );
     assert_eq!(
         ok(&d, &format!("{pushed} | %(k = #.) @| first")),

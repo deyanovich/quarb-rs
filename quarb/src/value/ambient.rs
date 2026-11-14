@@ -601,6 +601,13 @@ pub(crate) fn surface_ask(container: u64, name: &str, label: bool) {
     });
 }
 
+/// Raise a warning beside the answer from an adapter, once per run
+/// for one text: what a read could not answer the way it was asked,
+/// where the run goes on (a refusal ends it: [`record_refusal`]).
+pub fn record_warning(code: &str, site: &str, message: String) {
+    record_warning_once(code, site, message);
+}
+
 /// Raise a warning beside the answer, once per run for one text.
 pub(crate) fn record_warning_once(code: &str, site: &str, message: String) {
     with_ambient(|a| {

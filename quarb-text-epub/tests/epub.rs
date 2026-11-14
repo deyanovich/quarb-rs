@@ -161,3 +161,73 @@ fn chapter_ids_keep_to_their_chapter() {
         ["A's note."]
     );
 }
+
+/// The package's `<metadata>` is what the book declares (ruling
+/// 2026-11-14): the record `::head` on the document node, each
+/// entry under the name the package writes, and the curated core
+/// read by the Dublin Core conventions. A package with no metadata
+/// declares nothing.
+#[test]
+fn the_package_metadata_is_the_head() {
+    const DECLARED: &str = r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>The Odyssey</dc:title>
+    <dc:creator>Homer</dc:creator>
+    <dc:creator>Samuel Butler</dc:creator>
+    <dc:language>en</dc:language>
+    <dc:identifier>urn:uuid:0d1e</dc:identifier>
+    <dc:subject>epic</dc:subject>
+    <dc:subject>sea</dc:subject>
+    <dc:date>1900-01-01</dc:date>
+    <dc:description>The return of Odysseus.</dc:description>
+    <meta property="dcterms:modified">2024-05-06T07:08:09Z</meta>
+    <meta name="cover" content="cover-image"/>
+  </metadata>
+  <manifest>
+    <item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>"#;
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    {
+        let mut z = zip::ZipWriter::new(&mut cursor);
+        let o = zip::write::SimpleFileOptions::default();
+        for (name, body) in [
+            ("META-INF/container.xml", CONTAINER),
+            ("OEBPS/content.opf", DECLARED),
+            ("OEBPS/text/ch1.xhtml", CH1),
+        ] {
+            z.start_file(name, o).unwrap();
+            z.write_all(body.as_bytes()).unwrap();
+        }
+        z.finish().unwrap();
+    }
+    let m = quarb_text_epub::parse(&cursor.into_inner()).unwrap();
+    assert_eq!(
+        values(&m, "::head"),
+        [concat!(
+            r#"%("dc:title" = "The Odyssey"; "dc:creator" = @("Homer"; "Samuel Butler"); "#,
+            r#""dc:language" = "en"; "dc:identifier" = "urn:uuid:0d1e"; "#,
+            r#""dc:subject" = @("epic"; "sea"); "dc:date" = "1900-01-01"; "#,
+            r#""dc:description" = "The return of Odysseus."; "#,
+            r#""dcterms:modified" = "2024-05-06T07:08:09Z"; cover = "cover-image")"#
+        )]
+    );
+    assert_eq!(values(&m, r#"::head:"dc:title""#), ["The Odyssey"]);
+    assert_eq!(
+        values(&m, "^ | %(::title; ::author; ::description; ::tags)"),
+        [concat!(
+            r#"%(title = "The Odyssey"; author = "Homer, Samuel Butler"; "#,
+            r#"description = "The return of Odysseus."; tags = @("epic"; "sea"))"#
+        )]
+    );
+    assert_eq!(values(&m, "::published"), ["1900-01-01"]);
+    assert_eq!(values(&m, "::modified"), ["2024-05-06T07:08:09Z"]);
+    assert_eq!(values(&m, "//*<tag:epic> @| count"), ["0"]);
+    assert_eq!(values(&m, "^ | %(:traits)").len(), 1);
+    // the text is the spine's, as before
+    assert_eq!(values(&m, "//section::lemma"), ["The war"]);
+    // a package that declares nothing
+    let bare = quarb_text_epub::parse(&epub()).unwrap();
+    assert_eq!(values(&bare, "::head"), [""]);
+}

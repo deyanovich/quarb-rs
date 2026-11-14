@@ -189,7 +189,7 @@ fn a_fold_by_several_regulae_partitions_by_the_tuple() {
     // a mark among the references: the answer stands on its node
     assert_eq!(
         rows("/books/* | .b | .g(::genre) @|{.b; .g} first | :name"),
-        ["0", "1", "2", "3"]
+        ["1", "2", "3", "4"]
     );
     assert!(err("/books/* | .g(::genre) @|{.g; .nothere} count").contains("no push '.nothere'"));
     assert!(err("/books/* | .g(::genre) @|{.g;} count").contains("the selector names a regula"));

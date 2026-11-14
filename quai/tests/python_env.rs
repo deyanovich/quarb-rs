@@ -49,7 +49,7 @@ fn a_python_mount_serves_every_line_of_the_session() {
     let mount = format!("py=python:{HELPERS}");
     let (ok, out, err) = session(
         &[&mount],
-        "/w/* | :: | py:shout\n/p/* | ::x @| py:spread\n/w/0 | :: | py:sub(\"^p\"; \"P\"; $_)\n",
+        "/w/* | :: | py:shout\n/p/* | ::x @| py:spread\n/w/1 | :: | py:sub(\"^p\"; \"P\"; $_)\n",
     );
     assert!(ok, "{err}");
     assert!(out.contains("PEAR") && out.contains("FIG"), "{out}");

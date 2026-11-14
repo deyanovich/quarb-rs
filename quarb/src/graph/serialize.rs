@@ -83,10 +83,13 @@ pub(crate) fn node_to_json_text(adapter: &impl AstAdapter, node: NodeId) -> Stri
             if entries.len() > 1 && entries.iter().all(|(n, _)| n.parse::<usize>().is_ok()) {
                 entries.sort_by_key(|(n, _)| n.parse::<usize>().unwrap_or(usize::MAX));
             }
+            // a list: every name is its item's position, from one,
+            // on a node that does not say it is a record
             let is_array = entries
                 .iter()
                 .enumerate()
-                .all(|(i, (n, _))| n == &i.to_string());
+                .all(|(i, (n, _))| n == &(i + 1).to_string())
+                && !says_record(adapter, done.node);
             if is_array {
                 let inner: Vec<&str> = entries.iter().map(|(_, t)| t.as_str()).collect();
                 format!("[{}]", inner.join(", "))
@@ -107,10 +110,26 @@ pub(crate) fn node_to_json_text(adapter: &impl AstAdapter, node: NodeId) -> Stri
     }
 }
 
+/// Whether a node says of itself that it is a record: the kind a
+/// mapping has in the adapters of the JSON data model (`<object>`
+/// in JSON, YAML and TOML; `<map>` in CBOR, the document stores and
+/// Kubernetes). A mapping keyed `"1"`, `"2"` (a map by id, a common
+/// shape, and CBOR's integer keys) has the names a two-item list
+/// has; its kind tells them apart, and it keeps its keys on the
+/// way out. A node that says nothing is told by its names.
+pub(crate) fn says_record(adapter: &impl AstAdapter, node: NodeId) -> bool {
+    adapter
+        .traits(node)
+        .iter()
+        .any(|t| t == "object" || t == "map")
+}
+
 /// The value of a node whose children are already built: the
 /// entries (children, then the enumerated properties a child does
 /// not shadow — a reading that keeps scalars off the tree) as a
-/// list when every name is an index, else a record; a node with no
+/// list when every name is its item's position (from one, as a
+/// list item is named: ruling 2026-11-14) and the node does not say
+/// it is a record ([`says_record`]), else a record; a node with no
 /// entries is its own scalar.
 #[cfg_attr(not(feature = "kaiv"), allow(dead_code))]
 pub(crate) fn node_value_from(
@@ -134,7 +153,8 @@ pub(crate) fn node_value_from(
     let is_array = entries
         .iter()
         .enumerate()
-        .all(|(i, (n, _))| n == &i.to_string());
+        .all(|(i, (n, _))| n == &(i + 1).to_string())
+        && !says_record(adapter, node);
     if is_array {
         Value::list(entries.into_iter().map(|(_, v)| v).collect())
     } else {
@@ -228,7 +248,7 @@ pub(crate) fn node_to_xml_named(adapter: &impl AstAdapter, node: NodeId, tag: &s
 }
 
 /// A valid XML element name, or `item` when the source name is
-/// not one (e.g. a JSON array index "0" — tags cannot start with
+/// not one (e.g. a JSON array item "1" — tags cannot start with
 /// a digit).
 pub(crate) fn xml_tag(name: &str) -> String {
     let mut chars = name.chars();

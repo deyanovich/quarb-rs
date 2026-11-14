@@ -713,6 +713,7 @@ fn koine_edition(notation: &str, _text: &str) -> Result<TextModel> {
     bail!("this build has no reader for {notation} at the text level")
 }
 
+#[cfg(feature = "koine")]
 fn strip_bom(text: &str) -> &str {
     text.strip_prefix('\u{feff}').unwrap_or(text)
 }

@@ -453,17 +453,18 @@ fn read_entry(xml: &str) -> Result<(Vec<(String, String)>, Vec<String>), OfdText
                 if name == "DocRoot" {
                     roots.push(text.to_string());
                 } else if docs == 1 && stack.iter().any(|s| s == "DocInfo") {
+                    // the record is verbatim (ruling 2026-11-14):
+                    // each entry under the element name the file
+                    // writes (`Title`, `Author`, `Subject`,
+                    // `Abstract`, `CreationDate`, `ModDate`,
+                    // `Creator`, `CreatorVersion`, `DocID`,
+                    // `DocUsage`), the keywords together under
+                    // `Keywords`, a custom entry under its own name
                     let key = match name.as_str() {
-                        "Title" => "title",
-                        "Author" => "author",
-                        "Subject" => "subject",
-                        "Abstract" => "abstract",
-                        "CreationDate" => "created",
-                        "ModDate" => "modified",
-                        "Creator" => "creator",
-                        "CreatorVersion" => "creator-version",
-                        "DocID" => "doc-id",
-                        "DocUsage" => "usage",
+                        "Title" | "Author" | "Subject" | "Abstract" | "CreationDate"
+                        | "ModDate" | "Creator" | "CreatorVersion" | "DocID" | "DocUsage" => {
+                            name.as_str()
+                        }
                         "Cover" => continue,
                         "Keyword" => {
                             keywords.push(text.to_string());
@@ -489,7 +490,7 @@ fn read_entry(xml: &str) -> Result<(Vec<(String, String)>, Vec<String>), OfdText
         }
     }
     if !keywords.is_empty() {
-        identity.push(("keywords".to_string(), keywords.join("; ")));
+        identity.push(("Keywords".to_string(), keywords.join("; ")));
     }
     if roots.is_empty() {
         return Err(OfdTextError::Malformed("OFD.xml names no DocRoot".into()));
@@ -764,6 +765,98 @@ impl OfdText {
     }
 }
 
+/// The curated core of an OFD document, by `DocInfo`'s own names.
+const CURATED: &[(&str, &str)] = &[
+    ("title", "Title"),
+    ("author", "Author"),
+    ("description", "Abstract"),
+    ("tags", "Keywords"),
+    ("published", "CreationDate"),
+    ("modified", "ModDate"),
+];
+
+/// What the document node answers to the property `name` from its
+/// declared identity (ruling 2026-11-14): `head`, the record of
+/// every entry under the name the file writes (null where it
+/// declares nothing); a curated property, read from the entry
+/// `curated` names for it; and nothing else. An entry asked for
+/// directly (`::Subject`, `::edition`) read until 0.63: for one
+/// release it says where the entry is.
+fn document_property(
+    identity: &[(String, String)],
+    name: &str,
+    curated: &[(&str, &str)],
+) -> Option<Value> {
+    if name == "head" {
+        return (!identity.is_empty()).then(|| {
+            Value::record(
+                identity
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Value::Str(v.clone())))
+                    .collect(),
+            )
+        });
+    }
+    let said = |key: &str| {
+        identity
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+    };
+    if let Some((_, key)) = curated.iter().find(|(c, _)| *c == name) {
+        let text = said(key)?;
+        return Some(match name {
+            "tags" => Value::list(
+                text.split([';', ','])
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .map(|t| Value::Str(t.to_string()))
+                    .collect(),
+            ),
+            "published" | "modified" => quarb::temporal::parse_iso(text.trim())
+                .map(|(secs, nanos, offset_min)| Value::Instant {
+                    secs,
+                    nanos,
+                    offset_min,
+                    calendar: Default::default(),
+                })
+                .unwrap_or(Value::Str(text)),
+            _ => Value::Str(text),
+        });
+    }
+    // the reader's own names of 0.63 for the entries whose file
+    // name is another word
+    let was = [
+        ("created", "CreationDate"),
+        ("creator-version", "CreatorVersion"),
+        ("doc-id", "DocID"),
+        ("usage", "DocUsage"),
+    ];
+    let asked = was
+        .iter()
+        .find(|(old, _)| *old == name)
+        .map_or(name, |(_, now)| *now);
+    if let Some((key, _)) = identity.iter().find(|(k, _)| k.eq_ignore_ascii_case(asked)) {
+        let field = if key
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-'))
+        {
+            key.clone()
+        } else {
+            format!("\"{key}\"")
+        };
+        quarb::record_warning(
+            quarb::diagnostic::RETIRED_KEY,
+            &format!("::{name}"),
+            format!(
+                "'::{name}' no longer reads what the document declares: the declarations \
+                 are the record '::head', and this one is '::head:{field}'"
+            ),
+        );
+    }
+    None
+}
+
 impl AstAdapter for OfdText {
     /// This source defines no references to resolve.
     fn resolves_references(&self) -> bool {
@@ -811,24 +904,28 @@ impl AstAdapter for OfdText {
     fn property(&self, node: NodeId, name: &str) -> Option<Value> {
         match (&self.nodes[node.0 as usize], name) {
             (Node::Section { lemma, .. }, "lemma") => Some(Value::Str(lemma.clone())),
-            // The declared identity: DocInfo on the document node.
-            (Node::Root { .. }, key) => self
-                .identity
-                .iter()
-                .find(|(k, _)| k == key)
-                .map(|(_, v)| Value::Str(v.clone()))
-                .or_else(|| (key == "text").then(|| self.default_value(node)).flatten()),
+            // The declared identity: DocInfo on the document node,
+            // as one record (ruling 2026-11-14), and the curated
+            // core read from it
+            (Node::Root { .. }, "text") => self.default_value(node),
+            (Node::Root { .. }, name) => document_property(&self.identity, name, CURATED),
             (_, "text") => self.default_value(node),
             _ => None,
         }
     }
     fn properties(&self, node: NodeId) -> Vec<(String, Value)> {
         match &self.nodes[node.0 as usize] {
-            Node::Root { .. } => self
-                .identity
-                .iter()
-                .map(|(k, v)| (k.clone(), Value::Str(v.clone())))
-                .collect(),
+            Node::Root { .. } => [
+                "title",
+                "author",
+                "description",
+                "tags",
+                "published",
+                "modified",
+            ]
+            .iter()
+            .filter_map(|k| Some((k.to_string(), self.property(node, k)?)))
+            .collect(),
             Node::Section { lemma, .. } => vec![("lemma".into(), Value::Str(lemma.clone()))],
             _ => Vec::new(),
         }

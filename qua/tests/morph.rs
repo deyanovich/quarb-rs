@@ -96,21 +96,21 @@ fn lemma_parse_and_inflect_over_russian_forms() {
     );
     // `$_` places the input itself; an option is a keyword argument.
     assert_eq!(
-        run("/w/0 | :: | morph:lemma($_; --lang=ru)").unwrap(),
+        run("/w/1 | :: | morph:lemma($_; --lang=ru)").unwrap(),
         vec!["книга"]
     );
     // The best parse is a record with its score.
-    let best = run("/w/1 | :: | morph:parse(-n=1) | ... | :lemma").unwrap();
+    let best = run("/w/2 | :: | morph:parse(-n=1) | ... | :lemma").unwrap();
     assert_eq!(best, vec!["стать"]);
-    let all = run("/w/1 | :: | morph:parse @| count").unwrap();
+    let all = run("/w/2 | :: | morph:parse @| count").unwrap();
     assert_eq!(all, vec!["1"]);
-    let n = run("/w/1 | :: | morph:parse | ... @| count").unwrap();
+    let n = run("/w/2 | :: | morph:parse | ... @| count").unwrap();
     assert!(n[0].parse::<i64>().unwrap() >= 2, "{n:?}");
     assert_eq!(
-        run("/w/2 | :: | morph:inflect(--case=gent --number=plur)").unwrap(),
+        run("/w/3 | :: | morph:inflect(--case=gent --number=plur)").unwrap(),
         vec!["книг"]
     );
-    assert_eq!(run("/w/0 | :: | morph:pos").unwrap(), vec!["NOUN"]);
+    assert_eq!(run("/w/1 | :: | morph:pos").unwrap(), vec!["NOUN"]);
 }
 
 #[test]
@@ -137,5 +137,5 @@ fn a_node_crosses_as_its_record() {
     }
     // A node without a topic is handed over as the record of its
     // name, text and properties; the library reads the text.
-    assert_eq!(run("/p/0/n | morph:lemma").unwrap(), vec!["книга"]);
+    assert_eq!(run("/p/1/n | morph:lemma").unwrap(), vec!["книга"]);
 }

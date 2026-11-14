@@ -9,7 +9,7 @@ use std::process::Command;
 const DOC: &str = r#"{
   "books": [
     {"title": "The Histories", "author": "Herodotus", "price": 22.5, "genre": "history"},
-    {"title": "Dune", "author": "Herbert", "price": 9.99, "genre": "scifi"},
+    {"title": "Walden", "author": "Thoreau", "price": 9.99, "genre": "essay"},
     {"title": "Emma", "author": "Austen", "price": 7.5, "genre": "classic"},
     {"title": "The Peloponnesian War", "author": "Thucydides", "price": 18.0, "genre": "history"}
   ],
@@ -37,6 +37,29 @@ fn translations() {
         x("/books/*[/title:: == (/^S/)]/title::"),
         ".books[] | select((.title | test(\"^S\"))).title"
     );
+    // a path that opens on an array: jq's `.[]`, where a bare `[]`
+    // (which was written) is jq's empty array
+    assert_eq!(x("/*/title::"), ".[].title");
+    assert_eq!(x("/*"), ".[]");
+    assert_eq!(x("/*[2]/title::"), ".[1].title");
+}
+
+/// The items of a list are named from one (ruling 2026-11-14): a
+/// numeric step is the item, jq's zero-based index, and the note
+/// says how the same step reads under an object. `0` and `01` name
+/// no item and stay keys.
+#[test]
+fn a_numeric_step_is_a_list_item() {
+    assert_eq!(x("/books/1/title::"), ".books[0].title");
+    assert_eq!(x("/books/4"), ".books[3]");
+    assert_eq!(x("/2/title::"), ".[1].title");
+    assert_eq!(x("/books/0/title::"), ".books.\"0\".title");
+    assert_eq!(x("/books/01"), ".books.\"01\"");
+    let t = export("/books/1/title::").unwrap();
+    assert_eq!(t.notes.len(), 1, "{:?}", t.notes);
+    assert!(t.notes[0].contains("numeric step: '/1'"), "{:?}", t.notes);
+    assert!(t.notes[0].contains(".\"1\""), "{:?}", t.notes);
+    assert!(export("/books/*/title::").unwrap().notes.is_empty());
 }
 
 #[test]
@@ -70,6 +93,9 @@ fn differential_against_jq() {
         "/books/*/author:: @| join(\", \")",
         "/books/*[/title:: == (/^S/)]/title::",
         "/clerk/name::",
+        "/books/1/title::",
+        "/books/4/author::",
+        "/books/*[2]/title::",
     ];
     for quarb in cases {
         let filter = export(quarb).unwrap().query;

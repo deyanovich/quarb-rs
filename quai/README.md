@@ -16,7 +16,7 @@ by cell, except a cell is a path into your data.
 
 ```
 &1  /teams/*/members/*
-    /teams/0/members/0  ⋮  (every member, across all teams, one path)
+    /teams/1/members/1  ⋮  (every member, across all teams, one path)
 &2  &1 | [/langs/*:: = 'Go'] | /name::
     ada
     eu

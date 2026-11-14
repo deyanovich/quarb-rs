@@ -105,8 +105,8 @@ fn rows_read_as_documents_with_doc() {
     let opts = OpenOpts::default();
     let target = format!("corpus:{}?doc=posts/*/body", path.display());
     let a = Dyn(open_target(&target, &opts).expect("mount").adapter);
-    assert_eq!(run_q(&a, "/posts/*/body:::title"), ["Ithaca", "Troy"]);
-    assert_eq!(run_q(&a, "/posts/1/body:::author"), ["Homer"]);
+    assert_eq!(run_q(&a, "/posts/*/body::head:title"), ["Ithaca", "Troy"]);
+    assert_eq!(run_q(&a, "/posts/1/body::head:author"), ["Homer"]);
     assert_eq!(run_q(&a, "/posts/1/body//sentence @| count"), ["2"]);
     assert_eq!(run_q(&a, "/posts/2/body//token @| count"), ["9"]);
     assert_eq!(run_q(&a, "/posts/*/title::"), ["Ithaca", "Troy"]);

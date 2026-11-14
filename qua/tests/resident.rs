@@ -89,3 +89,28 @@ fn a_session_is_keyed_by_its_root_and_its_environments() {
     let e = qua_refused(&a, &["/c:: | bin:cat", "t.json"]);
     assert!(e.contains("'bin'"), "{e}");
 }
+
+/// A model's mounts under a resident session: the session mounts
+/// what the model states, under the names as written (a mount name
+/// is an identifier, and admits a dot). quai's daemon mode drives
+/// this door; it handed the model's mounts over as inputs as well,
+/// each name was mounted twice, and the session refused to start.
+#[test]
+fn a_session_mounts_what_its_model_states() {
+    let dir = fixture("model");
+    std::fs::write(
+        dir.join("a/shelf.model"),
+        "mount f.json: f.json;\nmount notes-1.0: text:t.txt;\n",
+    )
+    .unwrap();
+    let a = dir.join("a");
+    assert_eq!(qua(&a, &["--model", "shelf.model", "/f.json/n::"]), "7");
+    assert_eq!(
+        qua(&a, &["--model", "shelf.model", "/notes-1.0/paragraph::"]),
+        "in a"
+    );
+    assert_eq!(
+        qua(&a, &["--model", "shelf.model", "/* | :name"]),
+        "notes-1.0\nf.json"
+    );
+}

@@ -850,10 +850,14 @@ fn node_kind<A: AstAdapter>(adapter: &A, family: &str, node: NodeId, depth: usiz
         "json" | "yaml" | "toml" | "kaiv" => {
             if kids.is_empty() {
                 "value".into()
-            } else if kids
-                .iter()
-                .enumerate()
-                .all(|(i, &c)| adapter.name(c).as_deref() == Some(i.to_string().as_str()))
+            } else if !crate::graph::serialize::says_record(adapter, node)
+                && kids.iter().enumerate().all(|(i, &c)| {
+                    // a list's items are named by their position: from
+                    // one, and from zero in a kaiv file, whose namepaths
+                    // write the names themselves
+                    let from = usize::from(family != "kaiv");
+                    adapter.name(c).as_deref() == Some((i + from).to_string().as_str())
+                })
             {
                 "array".into()
             } else {

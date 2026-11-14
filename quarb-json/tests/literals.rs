@@ -26,7 +26,7 @@ fn values(q: &str) -> Vec<String> {
 fn a_record_literal_is_a_value() {
     // a field of another record: built on the same node
     assert_eq!(
-        values("/riders/0 | %(who = ::name; ticket = %(::fare; ::class))"),
+        values("/riders/1 | %(who = ::name; ticket = %(::fare; ::class))"),
         [r#"%(who = "ambrose"; ticket = %(fare = 700; class = 1))"#]
     );
     // an item of a list (the sigil follows whitespace, as
@@ -35,7 +35,7 @@ fn a_record_literal_is_a_value() {
     assert_eq!(values(r#"= %(a = 1; b = "x") | :b"#), ["x"]);
     // the topic is the enclosing one
     assert_eq!(
-        values("/riders/1 | ::name | %(t = $_; r = %(x = $_))"),
+        values("/riders/2 | ::name | %(t = $_; r = %(x = $_))"),
         [r#"%(t = "beatrix"; r = %(x = "beatrix"))"#]
     );
 }

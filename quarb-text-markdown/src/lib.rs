@@ -28,8 +28,9 @@ use quarb_text::{Block, Container, HeadMeta, NoteFamily, TextModel};
 ///
 /// A YAML header at the top (`---`, a mapping, `---` or `...`: a
 /// note's front matter) is what the document declares about itself,
-/// as an HTML head is: every key answers on the document node under
-/// its own name with its YAML type (`:::year`), and the curated core
+/// as an HTML head is: every key is a field of the document node's
+/// record `::head` with its YAML type (`::head:year`; a header with
+/// nothing in it is the empty record), and the curated core
 /// as properties (`::title`, `::author`, `::tags`, `::published`),
 /// the tags as traits too ([`HeadMeta::from_header`]). The header is
 /// no part of the text: no rule, no heading, no paragraph.

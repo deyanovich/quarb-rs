@@ -94,7 +94,7 @@ fn a_text_that_does_not_parse_as_asked_refuses() {
     // than text refuses naming the host.
     let e = refuse(r#"= "x" | graft(corpus)"#);
     assert!(e.contains("not available in this host"), "{e}");
-    let e = refuse("/rows/0 | ::id | graft(json)");
+    let e = refuse("/rows/1 | ::id | graft(json)");
     assert!(e.contains("graft reads a text"), "{e}");
 }
 

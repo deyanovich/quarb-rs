@@ -77,6 +77,15 @@ struct Cli {
     /// from stdin.
     paths: Vec<PathBuf>,
 
+    /// The mounts a `--model` file states, by the input each was
+    /// injected as: the name as the statement gives it. A mount
+    /// name is an identifier, which admits a dot (`mount
+    /// library.json: …`); the command line's `NAME=TARGET` reading
+    /// is narrower, so that `a=b.json` can be a file, and must not
+    /// read a statement's name back.
+    #[arg(skip)]
+    stated: std::collections::HashMap<PathBuf, (String, PathBuf)>,
+
     /// The calculator's: one thread per line of the input, the line
     /// as its topic (`seq 5 | qc -l '$_ * 2'`); sugar for
     /// `$_ | lines |` at the head.
@@ -1057,8 +1066,10 @@ fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
                     m.name
                 );
             }
-            cli.paths
-                .insert(0, PathBuf::from(format!("{}={}", m.name, target)));
+            let input = PathBuf::from(format!("{}={}", m.name, target));
+            cli.stated
+                .insert(input.clone(), (m.name.clone(), PathBuf::from(&target)));
+            cli.paths.insert(0, input);
         }
         // A model's `def`/`macro` statements are its domain's
         // vocabulary: in scope for the query too, ahead of any
@@ -1837,7 +1848,21 @@ fn tempfile_in_temp() -> std::io::Result<std::fs::File> {
 /// `false` too when an input has no catalog — a database, a
 /// service — since its plan is the opened adapter's to price.
 #[cfg(feature = "adapters")]
+impl Cli {
+    /// An input's mount name and target, where it has a name: the
+    /// name a model's statement gave it, as written, else the
+    /// command line's `NAME=TARGET`.
+    fn alias(&self, p: &Path) -> Option<(String, PathBuf)> {
+        self.stated
+            .get(p)
+            .cloned()
+            .or_else(|| quarb_open::split_alias(p))
+    }
+}
+
+#[cfg(feature = "adapters")]
 fn preflight(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<bool> {
+    let split_alias = |p: &Path| cli.alias(p);
     let cap = oc.budget.as_ref().map_or(quarb::Cap::NONE, |b| b.cap());
     // A folder is priced as the run will walk it: the same hidden
     // and ignore rules, so the plan counts the files the mount
@@ -1853,7 +1878,9 @@ fn preflight(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<bool> {
             None => (
                 p.file_stem()
                     .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| format!("doc{i}")),
+                    // a mount no name can be had for is named by its place
+                    // among the inputs, from one (ruling 2026-11-14)
+                    .unwrap_or_else(|| format!("doc{}", i + 1)),
                 p.clone(),
             ),
         };
@@ -2021,6 +2048,7 @@ fn python_environment(
 
 #[cfg(feature = "adapters")]
 fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
+    let split_alias = |p: &Path| cli.alias(p);
     // The offline switch (`QUARB_OFFLINE`), before anything is
     // opened or priced: the opener holds every mount to it, and the
     // doors this function opens itself (the relational stores, for
@@ -2095,7 +2123,9 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                 None => (
                     p.file_stem()
                         .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| format!("doc{i}")),
+                        // a mount no name can be had for is named by its place
+                        // among the inputs, from one (ruling 2026-11-14)
+                        .unwrap_or_else(|| format!("doc{}", i + 1)),
                     p.clone(),
                 ),
             };

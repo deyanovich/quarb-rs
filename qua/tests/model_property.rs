@@ -157,7 +157,7 @@ fn a_type_trait_casts_and_refuses_at_read() {
     let err = refused(&d, &[m[0], m[1], "/legs/*[2] | ::count", "legs.json"]);
     assert!(
         err.contains(
-            "property /legs/*::count<int>: the expression yields \"x\" at /legs/1, which does \
+            "property /legs/*::count<int>: the expression yields \"x\" at /legs/2, which does \
              not cast to int"
         ),
         "{err}"
@@ -177,7 +177,7 @@ fn the_load_check_refuses_by_name() {
     );
     assert!(
         err.contains(
-            "property /legs/*::speed<_mph>: the expression yields 155 EUR at /legs/0 — a \
+            "property /legs/*::speed<_mph>: the expression yields 155 EUR at /legs/1 — a \
              quantity of another dimension"
         ),
         "{err}"
@@ -197,7 +197,7 @@ fn the_load_check_refuses_by_name() {
     );
     assert!(
         err.contains(
-            "property /legs/*::x<_km>: the expression yields \"x\" at /legs/1, which is no number"
+            "property /legs/*::x<_km>: the expression yields \"x\" at /legs/2, which is no number"
         ),
         "{err}"
     );
@@ -230,7 +230,7 @@ fn the_load_check_refuses_by_name() {
     );
     assert!(
         err.contains(
-            "property /legs/*::b: the declared properties read each other in a cycle at /legs/0 \
+            "property /legs/*::b: the declared properties read each other in a cycle at /legs/1 \
              (::b → ::a → ::b)"
         ),
         "{err}"

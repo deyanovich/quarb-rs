@@ -10,7 +10,7 @@ fn fixture(name: &str) -> std::path::PathBuf {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("store.json"),
-        r#"{"books": [{"t": "Dune", "p": 9}, {"t": "Emma", "p": 7}]}"#,
+        r#"{"books": [{"t": "Dracula", "p": 9}, {"t": "Emma", "p": 7}]}"#,
     )
     .unwrap();
     std::fs::write(dir.join("names.csv"), "name,qty\nAda,2\nBo,1\n").unwrap();
@@ -116,11 +116,11 @@ fn grafted_nodes_inherit_outer_leaf_provenance() {
     let a = ComposeAdapter::new(FsAdapter::with_options(&dir, FsOptions::default()).unwrap());
     // Inside the graft and on the file: same source, same instant.
     assert_eq!(
-        values(&a, "/store.json/books/*[/t:: = 'Dune']:source"),
+        values(&a, "/store.json/books/*[/t:: = 'Dracula']:source"),
         values(&a, "/store.json:source")
     );
     assert_eq!(
-        values(&a, "/store.json/books/*[/t:: = 'Dune']:instant"),
+        values(&a, "/store.json/books/*[/t:: = 'Dracula']:instant"),
         values(&a, "/store.json:instant")
     );
     // The source is the real file path, not the jar-style locator.
@@ -289,8 +289,12 @@ fn a_tarball_of_pages_at_the_text_level() {
         values(&site, "//*[::category = \"Guides\"]::tags"),
         vec!["guide, jq", "guide, sql"]
     );
-    // ...and every declaration, verbatim, under the name it was made with.
-    assert_eq!(values(&site, "/capsa.html:::\"og:type\""), vec!["article"]);
+    // ...and every declaration, verbatim, under the name it was made
+    // with: a field of the page's `::head`.
+    assert_eq!(
+        values(&site, "/capsa.html::head:\"og:type\""),
+        vec!["article"]
+    );
     // A hit links back to its page, narrowed to its section.
     assert_eq!(
         values(&site, "//paragraph[:: *= \"witness\"] | link | :href"),

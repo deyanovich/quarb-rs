@@ -69,7 +69,6 @@ fn what_is_no_header_is_left_to_the_reader() {
         // a list, a sentence, nothing at all: no mapping
         "---\n- epic\n- greek\n---\n",
         "---\nSing, goddess\n---\n",
-        "---\n---\n# Book I\n",
         // four dashes, or dashes with text after them
         "----\ntitle: x\n---\n",
         "--- title: x\n---\n",
@@ -79,6 +78,11 @@ fn what_is_no_header_is_left_to_the_reader() {
     ] {
         assert!(front_matter(text).is_none(), "{text:?}");
     }
+    // a header with nothing in it is a header still: it declares
+    // nothing and is no part of the text
+    let (entries, body) = front_matter("---\n---\n# Book I\n").unwrap();
+    assert!(entries.is_empty());
+    assert_eq!(body, "# Book I\n");
     // a closing line inside a block is no closing line
     let (entries, body) =
         front_matter("---\nabstract: |\n  one\n  ---\n  two\n---\nText.\n").unwrap();

@@ -141,7 +141,8 @@ fn the_code_page_decodes_the_bytes_and_is_reported() {
     assert_eq!(values(&m, "//paragraph::"), ["Поэма — том первый."]);
     assert_eq!(values(&m, "^::title"), ["Мёртвые души"]);
     assert_eq!(values(&m, "^::author"), ["Гоголь"]);
-    assert_eq!(values(&m, "^:::created"), ["1842-05-21T00:00:00"]);
+    // the record is verbatim: the info group's control words
+    assert_eq!(values(&m, "::head:creatim"), ["1842-05-21T00:00:00"]);
 }
 
 #[test]

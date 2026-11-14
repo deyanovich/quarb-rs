@@ -79,6 +79,12 @@ pub fn front_matter(text: &str) -> Option<(Vec<(String, quarb::Value)>, &str)> {
         if l == "---" || l == "..." {
             let block = &t[open..at];
             let body = &t[at + line.len()..];
+            // a header with nothing in it is a header still (the
+            // two lines a static site marks a page with): it
+            // declares nothing, and is no part of the text
+            if block.trim().is_empty() {
+                return Some((Vec::new(), body));
+            }
             let serde_yaml_ng::Value::Mapping(map) =
                 serde_yaml_ng::from_str::<serde_yaml_ng::Value>(block).ok()?
             else {

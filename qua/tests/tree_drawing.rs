@@ -136,10 +136,10 @@ fn a_document_hangs_its_starting_points_by_their_path() {
         "\
 /
 └┄┄ archives/gro/entries
-    ├── 0  Ali
+    ├── 1  Ali
     │   ├── surname
     │   └── given
-    └── 1  Crease
+    └── 2  Crease
         ├── surname
         └── given"
     );
@@ -148,23 +148,23 @@ fn a_document_hangs_its_starting_points_by_their_path() {
         "\
 /
 └┄┄ archives/gro/entries
-    ├── 0  Ahmed
-    └── 1  Ernest"
+    ├── 1  Ahmed
+    └── 2  Ernest"
     );
     // props names the properties, % gives them as a record
     assert_eq!(
-        text("/archives/gro/entries/0 @| tree(-d=0 --props)", &d),
-        "/ ::archives\n└┄┄ archives/gro/entries\n    └── 0 ::surname ::given"
+        text("/archives/gro/entries/1 @| tree(-d=0 --props)", &d),
+        "/ ::archives\n└┄┄ archives/gro/entries\n    └── 1 ::surname ::given"
     );
     assert_eq!(
-        text("/archives/gro/entries/1 @| tree(-d=0 -r)", &d),
-        "/\n└┄┄ archives/gro/entries\n    └── 1 %(surname = \"Crease\"; given = \"Ernest\")"
+        text("/archives/gro/entries/2 @| tree(-d=0 -r)", &d),
+        "/\n└┄┄ archives/gro/entries\n    └── 2 %(surname = \"Crease\"; given = \"Ernest\")"
     );
     // a parenthesised column is a body on each node, a bare word
     // in it a command
     assert_eq!(
-        text("/archives/gro/entries/0 @| tree((count); -d=0)", &d),
-        "/  1\n└┄┄ archives/gro/entries\n    └── 0  1"
+        text("/archives/gro/entries/1 @| tree((count); -d=0)", &d),
+        "/  1\n└┄┄ archives/gro/entries\n    └── 1  1"
     );
     // the root itself as a starting point draws the whole document
     assert_eq!(text("^ @| tree(-d=2)", &d), "/\n└── archives\n    └── gro");
@@ -196,8 +196,8 @@ fn the_plain_pipe_draws_each_thread() {
     assert_eq!(
         each,
         [
-            text("/archives/gro/entries/0 @| tree(-d=0)", &d),
             text("/archives/gro/entries/1 @| tree(-d=0)", &d),
+            text("/archives/gro/entries/2 @| tree(-d=0)", &d),
         ]
     );
     // the options and the column expressions mean what they mean
@@ -205,8 +205,8 @@ fn the_plain_pipe_draws_each_thread() {
     assert_eq!(
         drawings("/archives/gro/entries/* | tree(::given; -d=0)"),
         [
-            "/\n└┄┄ archives/gro/entries\n    └── 0  Ahmed",
-            "/\n└┄┄ archives/gro/entries\n    └── 1  Ernest",
+            "/\n└┄┄ archives/gro/entries\n    └── 1  Ahmed",
+            "/\n└┄┄ archives/gro/entries\n    └── 2  Ernest",
         ]
     );
     // the thread keeps its node: the drawing is pushed and the node
@@ -249,14 +249,14 @@ fn several_mounts_are_a_forest() {
         },
     ]);
     assert_eq!(
-        text("/*/archives/gro/entries/0 @| tree(::surname; -d=0)", &m),
+        text("/*/archives/gro/entries/1 @| tree(::surname; -d=0)", &m),
         "\
 r
 └┄┄ archives/gro/entries
-    └── 0  Ali
+    └── 1  Ali
 s
 └┄┄ archives/gro/entries
-    └── 0  Ali"
+    └── 1  Ali"
     );
 }
 
@@ -443,26 +443,26 @@ fn leaf_runs_collapse_sampling_and_the_record_part() {
     // with children are not leaves
     assert_eq!(
         text("/flat @| tree(-d=1)"),
-        "/\n└── flat\n    ├── 0\n    ├── 1\n    ├── 2\n    └── 3"
+        "/\n└── flat\n    ├── 1\n    ├── 2\n    ├── 3\n    └── 4"
     );
     assert_eq!(
         text("/rows @| tree(-d=1)"),
-        "/\n└── rows\n    ├── 0\n    ├── 1\n    └── 2"
+        "/\n└── rows\n    ├── 1\n    ├── 2\n    └── 3"
     );
     // same-named leaves whose lines read alike collapse; a column
     // that differs keeps them apart
     assert_eq!(
         text("/rows/*/k @| tree(-d=0)"),
-        "/\n└── rows\n    ├┄┄ 0\n    │   └── k\n    ├┄┄ 1\n    │   └── k\n    └┄┄ 2\n        └── k"
+        "/\n└── rows\n    ├┄┄ 1\n    │   └── k\n    ├┄┄ 2\n    │   └── k\n    └┄┄ 3\n        └── k"
     );
     assert_eq!(
         text("/flat/* @| tree(-d=0 -k)"),
-        "/ <object>\n└┄┄ flat\n    ├── 0 <string>\n    ├── 1 <string>\n    ├── 2 <string>\n    └── 3 <string>"
+        "/ <object>\n└┄┄ flat\n    ├── 1 <string>\n    ├── 2 <string>\n    ├── 3 <string>\n    └── 4 <string>"
     );
     // --sample=n: the first n, then the more line
     assert_eq!(
         text("/flat @| tree(-d=1 -s=2)"),
-        "/\n└── flat\n    ├── 0\n    ├── 1\n    └── … and 2 more"
+        "/\n└── flat\n    ├── 1\n    ├── 2\n    └── … and 2 more"
     );
     assert_eq!(
         text("/o @| tree(-d=1 --sample=3)"),
@@ -498,7 +498,7 @@ fn diverging_paths_share_their_prefix_as_solid_nodes() {
     // one skipped path: one stub, as before
     assert_eq!(
         text("/archives/gro/entries/* @| tree(::s; -d=0)"),
-        "/\n└┄┄ archives/gro/entries\n    ├── 0  Ali\n    └── 1  Crease"
+        "/\n└┄┄ archives/gro/entries\n    ├── 1  Ali\n    └── 2  Crease"
     );
     // the paths diverge under gro: archives and gro drawn once, solid,
     // the stubs hanging from the divergence
@@ -509,8 +509,8 @@ fn diverging_paths_share_their_prefix_as_solid_nodes() {
 └── archives
     └── gro
         ├┄┄ entries
-        │   ├── 0
-        │   └── 1
+        │   ├── 1
+        │   └── 2
         └┄┄ index
             └── a"
     );
@@ -534,8 +534,8 @@ fn diverging_paths_share_their_prefix_as_solid_nodes() {
 └── archives
     └── gro
         ├┄┄ entries
-        │   ├── 0
-        │   └── 1
+        │   ├── 1
+        │   └── 2
         └── index"
     );
     // the column prints on every solid line, the top's included
@@ -546,8 +546,8 @@ fn diverging_paths_share_their_prefix_as_solid_nodes() {
 └── archives  2
     └── gro  2
         ├┄┄ entries
-        │   ├── 0  1
-        │   └── 1  1
+        │   ├── 1  1
+        │   └── 2  1
         └┄┄ index
             └── a  0"
     );

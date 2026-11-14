@@ -90,7 +90,7 @@ fn values_cross_as_the_hosts_own() {
         run("/p/* | %(n = ::n; x = ::x) | py:kind").unwrap(),
         vec!["dict", "dict"]
     );
-    assert_eq!(run("/p/0 | @(::n; ::x) | py:kind").unwrap(), vec!["list"]);
+    assert_eq!(run("/p/1 | @(::n; ::x) | py:kind").unwrap(), vec!["list"]);
     // A node crosses as the record of its name, text and properties.
     assert_eq!(run("/p/* | py:kind").unwrap(), vec!["dict", "dict"]);
 }
@@ -202,7 +202,7 @@ fn headless_the_first_operand_fills_the_slot_when_the_operands_reach() {
         vec!["%(r = 2)", "%(r = 1)"]
     );
     assert_eq!(
-        run("/p/0 | %(r = py:round_to(2.567; 1))").unwrap(),
+        run("/p/1 | %(r = py:round_to(2.567; 1))").unwrap(),
         vec!["%(r = 2.6)"]
     );
 }

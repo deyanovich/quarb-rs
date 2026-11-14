@@ -59,7 +59,7 @@ fn the_topics_and_the_positions() {
         ok(&d, "/a/* | ::x | %(pct = $_ * 100 div sum(@_)) @| first"),
         "%(pct = 16.666666666666668)"
     );
-    assert_eq!(ok(&d, "/a/* | @@_ @| first"), "@(/a/0; /a/1; /a/2)");
+    assert_eq!(ok(&d, "/a/* | @@_ @| first"), "@(/a/1; /a/2; /a/3)");
     assert_eq!(ok(&d, "/a/* | @@_::k @| first"), "@(1; 2; 3)");
     assert_eq!(ok(&d, "/a/* | ((*_))::x @| first"), "@(10; 20; 30)");
     // Inside a map, the element context.
@@ -88,7 +88,7 @@ fn the_context_as_a_table() {
     );
     assert_eq!(
         ok(&d, "/a/* | .A | .k(::k) | ##.* @| first"),
-        "#(@(A);\n  %(/a/0);\n  %(/a/1);\n  %(/a/2))"
+        "#(@(A);\n  %(/a/1);\n  %(/a/2);\n  %(/a/3))"
     );
     // A regula that is no cell refuses by name.
     assert!(err(&d, "/a/* | .l(@(1; 2)) | #.*").contains("'#.*' holds a list under 'l'"));

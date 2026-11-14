@@ -20,7 +20,7 @@ crate-type = ["cdylib", "rlib"]
 # document, TEI and the other vocabularies at the text level) are
 # asked for by name; both are pure Rust.
 quarb-session = { path = "../quarb-session", default-features = false, features = ["sqlite", "compose", "koine", "xlsx", "archives", "docx", "odt"] }
-quarb-model = { path = "../quarb-model", version = "0.63.0" }
+quarb-model = { path = "../quarb-model", version = "0.64.0" }
 quarb = { path = "../quarb" }
 # The web level over pages held in memory (a site loaded from its
 # sitemap by the browser extension). The session's reader also opens

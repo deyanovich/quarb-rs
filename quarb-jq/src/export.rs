@@ -129,8 +129,10 @@ impl Exporter {
                 }
             }
         }
-        if out.is_empty() {
-            out.push('.');
+        // a path that opens on an array (`/*`, `/1`): jq's `.[]`,
+        // `.[0]`; a bare `[]` is jq's empty array literal
+        if out.is_empty() || out.starts_with('[') {
+            out.insert(0, '.');
         }
         Ok(out)
     }
@@ -165,13 +167,29 @@ impl Exporter {
         }
         let mut out = match self.prop_s(s, "matcher-kind").as_str() {
             "name" => {
-                let field = format!(".{}", quote_jq_field(&self.prop_s(s, "matcher")));
+                let name = self.prop_s(s, "matcher");
                 if !positional.is_empty() {
                     return Err(JqError::Unsupported(
                         "a positional predicate on a named hop".into(),
                     ));
                 }
-                field
+                match quarb::item_index(&name) {
+                    // The items of a list are named from one (ruling
+                    // 2026-11-14): `/items/1` is the first item,
+                    // jq's `.items[0]`. The same step under an
+                    // object is its key "1"; the path alone does not
+                    // say which, so the commoner reading is written
+                    // and the other one told.
+                    Some(index) => {
+                        self.notes.push(format!(
+                            "numeric step: '/{name}' is read as a list's item (Quarb names \
+                             them from one; jq's [{index}]); an object's key \"{name}\" is \
+                             .\"{name}\" in jq"
+                        ));
+                        format!("[{index}]")
+                    }
+                    None => format!(".{}", quote_jq_field(&name)),
+                }
             }
             "any" => {
                 if positional.is_empty() {

@@ -438,7 +438,7 @@ pub(crate) fn missing_row_column(record: &crate::value::Record, name: &str) -> O
 /// node's core field whatever row the enclosing body evaluates for.
 /// (The row is the run's, not the scope's, so a path nested in
 /// `map`'s body over a table read the row's cell in its predicate:
-/// `map((^/books/*[:name = "0"] @| count))` counted 0 or refused
+/// `map((^/books/*[:name = "1"] @| count))` counted 0 or refused
 /// "no column 'name'" by the table's header.)
 pub(crate) fn out_of_row_reach<R>(f: impl FnOnce() -> R) -> R {
     if with_run(|s| s.row_in_reach.last().is_none_or(Option::is_none)) {

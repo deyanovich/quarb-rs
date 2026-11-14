@@ -48,9 +48,10 @@ def test_stdin_not_json_is_refused_not_sniffed(capsys, monkeypatch):
 def test_a_text_file_by_its_extension(tmp_path, capsys, monkeypatch):
     p = tmp_path / "books.json"
     p.write_text('{"books": [{"title": "Emma"}]}')
-    # node results keep the text formats' own rendering (pointers)
+    # node results keep the text formats' own rendering (the path,
+    # a list item named from one)
     code, out, err = run(["/books/*", str(p)], capsys, monkeypatch)
-    assert (code, out, err) == (0, "/books/0\n", "")
+    assert (code, out, err) == (0, "/books/1\n", "")
 
 
 def test_a_file_under_another_format(tmp_path, capsys, monkeypatch):

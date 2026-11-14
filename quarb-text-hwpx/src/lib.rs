@@ -278,6 +278,7 @@ impl Package {
             h.declare(name, value);
             match name.as_str() {
                 "title" => h.title = Some(value.clone()),
+                "language" => h.lang = Some(value.clone()),
                 "creator" => h.author = Some(value.clone()),
                 "description" | "subject" if h.description.is_none() => {
                     h.description = Some(value.clone())

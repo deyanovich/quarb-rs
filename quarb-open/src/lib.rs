@@ -2468,8 +2468,8 @@ fn take_root_option(p: &Path) -> (PathBuf, Option<String>) {
 
 /// A document's text-level model from a text and what the source
 /// says of it (spec: The Corpus Reading): the prose read as
-/// paragraphs, every (name, value) a declaration answering under
-/// `:::name`.
+/// paragraphs, every (name, value) a declaration, a field of the
+/// document node's record `::head` (`::head:title`).
 pub fn document_of(text: &str, path: &str, declared: &[(String, String)]) -> quarb_text::TextModel {
     let mut m = quarb_text::TextModel::parse_plain(text);
     let mut head = m.head_meta().clone();

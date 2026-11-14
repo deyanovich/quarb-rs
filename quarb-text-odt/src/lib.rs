@@ -196,7 +196,21 @@ impl Parts {
     }
 
     fn head(&self) -> HeadMeta {
-        let mut h = HeadMeta::default();
+        let mut h = HeadMeta {
+            // the plain names this reader answered under until 0.63
+            renamed: vec![
+                ("title", "dc:title"),
+                ("author", "dc:creator"),
+                ("author", "meta:initial-creator"),
+                ("description", "dc:description"),
+                ("subject", "dc:subject"),
+                ("keywords", "meta:keyword"),
+                ("lang", "dc:language"),
+                ("created", "meta:creation-date"),
+                ("modified", "dc:date"),
+            ],
+            ..HeadMeta::default()
+        };
         let Some(xml) = &self.meta else {
             return h;
         };
@@ -204,25 +218,29 @@ impl Parts {
         let mut buf = Vec::new();
         let mut open: Option<String> = None;
         let mut text = String::new();
+        let mut inside = false;
         while let Ok(ev) = reader.read_event_into(&mut buf) {
             match &ev {
                 Event::Start(e) => {
                     let name = e.name();
                     let name = String::from_utf8_lossy(name.as_ref()).to_string();
-                    if matches!(
-                        name.as_str(),
-                        "dc:title"
-                            | "dc:creator"
-                            | "meta:initial-creator"
-                            | "dc:description"
-                            | "dc:subject"
-                            | "meta:keyword"
-                            | "dc:language"
-                            | "dc:date"
-                            | "meta:creation-date"
-                    ) {
+                    // every entry of `office:meta`, under the name
+                    // the file writes; a user-defined entry under
+                    // the name it gives itself
+                    if inside && open.is_none() {
+                        let name = if name == "meta:user-defined" {
+                            e.attributes()
+                                .flatten()
+                                .find(|a| a.key.as_ref() == b"meta:name")
+                                .and_then(|a| a.unescape_value().ok().map(|v| v.to_string()))
+                                .unwrap_or(name)
+                        } else {
+                            name
+                        };
                         open = Some(name);
                         text.clear();
+                    } else if name == "office:meta" {
+                        inside = true;
                     }
                 }
                 Event::Text(t) if open.is_some() => {
@@ -235,40 +253,36 @@ impl Parts {
                         text.push_str(&c);
                     }
                 }
-                Event::End(_) => {
+                Event::End(e) => {
+                    if e.name().as_ref() == b"office:meta" {
+                        inside = false;
+                    }
                     if let Some(name) = open.take() {
                         let value = quarb_text::normalize_ws(&text);
                         if value.is_empty() {
                             continue;
                         }
+                        // the record is verbatim (ruling 2026-11-14):
+                        // the name the file writes; the curated core
+                        // reads the conventions
+                        h.declare(&name, &value);
                         match name.as_str() {
-                            "dc:title" => {
-                                h.declare("title", &value);
-                                h.title = Some(value);
-                            }
+                            "dc:title" => h.title = Some(value),
                             "dc:creator" | "meta:initial-creator" => {
-                                h.declare("author", &value);
                                 if h.author.is_none() {
                                     h.author = Some(value);
                                 }
                             }
-                            "dc:description" => {
-                                h.declare("description", &value);
-                                h.description = Some(value);
-                            }
+                            "dc:description" => h.description = Some(value),
                             "dc:subject" => {
-                                h.declare("subject", &value);
                                 if h.category.is_none() {
                                     h.category = Some(value);
                                 }
                             }
-                            "meta:keyword" => {
-                                h.declare("keywords", &value);
-                                h.tag(&value);
-                            }
-                            "dc:language" => h.declare("lang", &value),
-                            "dc:date" => h.declare("modified", &value),
-                            "meta:creation-date" => h.declare("created", &value),
+                            "meta:keyword" => h.tag(&value),
+                            "dc:language" => h.lang = Some(value),
+                            "meta:creation-date" => h.published = HeadMeta::instant(&value),
+                            "dc:date" => h.modified = HeadMeta::instant(&value),
                             _ => {}
                         }
                     }

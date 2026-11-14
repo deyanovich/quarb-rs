@@ -12,7 +12,7 @@ fn fixture(tag: &str) -> PathBuf {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("books.json"),
-        r#"{"books": [{"title": "The Histories", "year": -430, "shelf": "A"}, {"title": "Dune", "year": 1965, "shelf": "A"},
+        r#"{"books": [{"title": "The Histories", "year": -430, "shelf": "A"}, {"title": "Dracula", "year": 1897, "shelf": "A"},
                      {"title": "Emma", "year": 1815, "shelf": "B"}]}"#,
     )
     .unwrap();
@@ -219,7 +219,7 @@ fn a_forking_interpolation_is_refused() {
             &d,
             &["= \"${/books/*::title @| join(', ')}\"", "books.json"]
         ),
-        "The Histories, Dune, Emma"
+        "The Histories, Dracula, Emma"
     );
     assert_eq!(
         ok(&d, &["/books/* | \"${::title}!\" @| count", "books.json"]),
@@ -265,7 +265,7 @@ fn a_bare_read_at_the_head_has_nothing_to_project_from() {
     // the projector stays an operand of the commands that take it
     assert_eq!(
         ok(&d, &["/books/* @| max(--of=::year)", "books.json"]),
-        "1965"
+        "1897"
     );
 }
 
@@ -336,11 +336,11 @@ fn a_unions_branch_without_a_projector_answers_its_nodes() {
     let d = fixture("union");
     assert_eq!(
         ok(&d, &["/books/1 || /books/*::title", "books.json"]),
-        "/books/1\nThe Histories\nDune\nEmma"
+        "/books/1\nThe Histories\nDracula\nEmma"
     );
     assert_eq!(
         ok(&d, &["/books/*::title || /books/1", "books.json"]),
-        "The Histories\nDune\nEmma\n/books/1"
+        "The Histories\nDracula\nEmma\n/books/1"
     );
 }
 

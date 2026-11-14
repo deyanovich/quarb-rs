@@ -108,17 +108,37 @@ pub fn parse_with_decoding(
     Ok(model)
 }
 
-/// What the document declares about itself: `docProps/core.xml`'s
-/// `dc:title`, `dc:creator`, `dc:description`, `dc:subject`,
-/// `cp:keywords`, `cp:category`, `dc:language`, `dcterms:created`
-/// and `dcterms:modified`, under the HTML head's keys.
+/// What the document declares about itself: every property of
+/// `docProps/core.xml` under the name the package writes
+/// (`dc:title`, `dc:creator`, `dc:description`, `dc:subject`,
+/// `cp:keywords`, `cp:category`, `dc:language`, `dcterms:created`,
+/// `dcterms:modified`, `cp:lastModifiedBy`, `cp:revision`, …): the
+/// record `::head`, verbatim (ruling 2026-11-14). The curated core
+/// reads the conventions: the title, the creator as the author, the
+/// description, the category (the subject where none is written),
+/// the keywords as tags, the language, and the two dates as
+/// `published` and `modified`.
 pub fn head(bytes: &[u8]) -> Result<HeadMeta, DocxError> {
     head_with_decoding(bytes, &SourceDecoding::default())
 }
 
 /// [`head`] under a mount's source-boundary rule.
 pub fn head_with_decoding(bytes: &[u8], decoding: &SourceDecoding) -> Result<HeadMeta, DocxError> {
-    let mut h = HeadMeta::default();
+    let mut h = HeadMeta {
+        // the plain names this reader answered under until 0.63
+        renamed: vec![
+            ("title", "dc:title"),
+            ("author", "dc:creator"),
+            ("description", "dc:description"),
+            ("subject", "dc:subject"),
+            ("category", "cp:category"),
+            ("keywords", "cp:keywords"),
+            ("lang", "dc:language"),
+            ("created", "dcterms:created"),
+            ("modified", "dcterms:modified"),
+        ],
+        ..HeadMeta::default()
+    };
     let mut zip = Members::new(zip::ZipArchive::new(std::io::Cursor::new(bytes))?, decoding);
     let Some(xml) = zip.get("docProps/core.xml")? else {
         return Ok(h);
@@ -127,23 +147,16 @@ pub fn head_with_decoding(bytes: &[u8], decoding: &SourceDecoding) -> Result<Hea
     let mut buf = Vec::new();
     let mut open: Option<String> = None;
     let mut text = String::new();
+    let mut depth = 0usize;
     while let Ok(ev) = reader.read_event_into(&mut buf) {
         match &ev {
             Event::Start(e) => {
                 let name = e.name();
                 let name = String::from_utf8_lossy(name.as_ref()).to_string();
-                if matches!(
-                    name.as_str(),
-                    "dc:title"
-                        | "dc:creator"
-                        | "dc:description"
-                        | "dc:subject"
-                        | "cp:keywords"
-                        | "cp:category"
-                        | "dc:language"
-                        | "dcterms:created"
-                        | "dcterms:modified"
-                ) {
+                // every property the part holds: the children of
+                // its root, each under the name the package writes
+                depth += 1;
+                if depth == 2 {
                     open = Some(name);
                     text.clear();
                 }
@@ -159,43 +172,36 @@ pub fn head_with_decoding(bytes: &[u8], decoding: &SourceDecoding) -> Result<Hea
                 }
             }
             Event::End(_) => {
-                if let Some(name) = open.take() {
+                depth = depth.saturating_sub(1);
+                if depth == 1
+                    && let Some(name) = open.take()
+                {
                     let value = quarb_text::normalize_ws(&text);
                     if value.is_empty() {
                         continue;
                     }
+                    // the record is verbatim (ruling 2026-11-14): the
+                    // name the file writes; the curated core reads
+                    // the Dublin Core and core-property conventions
+                    h.declare(&name, &value);
                     match name.as_str() {
-                        "dc:title" => {
-                            h.declare("title", &value);
-                            h.title = Some(value);
-                        }
-                        "dc:creator" => {
-                            h.declare("author", &value);
-                            h.author = Some(value);
-                        }
-                        "dc:description" => {
-                            h.declare("description", &value);
-                            h.description = Some(value);
-                        }
+                        "dc:title" => h.title = Some(value),
+                        "dc:creator" => h.author = Some(value),
+                        "dc:description" => h.description = Some(value),
                         "dc:subject" => {
-                            h.declare("subject", &value);
                             if h.category.is_none() {
                                 h.category = Some(value);
                             }
                         }
-                        "cp:category" => {
-                            h.declare("category", &value);
-                            h.category = Some(value);
-                        }
+                        "cp:category" => h.category = Some(value),
                         "cp:keywords" => {
-                            h.declare("keywords", &value);
                             for t in value.split([',', ';']) {
                                 h.tag(t);
                             }
                         }
-                        "dc:language" => h.declare("lang", &value),
-                        "dcterms:created" => h.declare("created", &value),
-                        "dcterms:modified" => h.declare("modified", &value),
+                        "dc:language" => h.lang = Some(value),
+                        "dcterms:created" => h.published = HeadMeta::instant(&value),
+                        "dcterms:modified" => h.modified = HeadMeta::instant(&value),
                         _ => {}
                     }
                 }

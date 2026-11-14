@@ -374,6 +374,10 @@ fn main() -> Result<()> {
     // A --model file may declare its own sources; parse it and inject
     // the mounts (relative targets resolved against the model file's
     // directory) as NAME=TARGET inputs, ahead of any positional ones.
+    // The mounts the model states, by the input each is injected
+    // as: the name as the statement gives it, never read back by
+    // the command line's narrower `NAME=TARGET` rule.
+    let mut stated: std::collections::HashMap<String, MountSpec> = Default::default();
     let model = match &cli.model {
         Some(path) => {
             let m = quarb_model::parse_model_file(path)
@@ -392,7 +396,9 @@ fn main() -> Result<()> {
                         mt.name
                     );
                 }
-                cli.paths.insert(0, format!("{}={}", mt.name, target));
+                let input = format!("{}={}", mt.name, target);
+                stated.insert(input.clone(), MountSpec::stated(&mt.name, &target));
+                cli.paths.insert(0, input);
             }
             Some(m)
         }
@@ -434,14 +440,31 @@ fn main() -> Result<()> {
     // The linked libraries and the python: mounts bound as
     // libraries, as qua binds them.
     let libraries = qua::session_libraries(&environments)?;
-    let specs: Vec<MountSpec> = cli.paths.iter().map(|a| MountSpec::parse(a)).collect();
+    let specs: Vec<MountSpec> = cli
+        .paths
+        .iter()
+        .map(|a| {
+            stated
+                .get(a)
+                .cloned()
+                .unwrap_or_else(|| MountSpec::parse(a))
+        })
+        .collect();
     let mut remount: Option<Remount> = None;
     let session = if cli.daemon {
         // The daemon holds the arbor (via `qua --resident`); the store
         // persists the macro history across runs. Raw args pass
         // through: `qua` itself understands NAME=TARGET.
+        // The daemon reads the model itself and mounts what it
+        // states: handing it those mounts as inputs too mounted each
+        // name twice, and the resident session refused to start.
+        let own: Vec<PathBuf> = raw_paths
+            .iter()
+            .filter(|p| p.to_str().is_none_or(|a| !stated.contains_key(a)))
+            .cloned()
+            .collect();
         let executor = Box::new(DaemonExecutor::new(
-            raw_paths.clone(),
+            own,
             cli.now.clone(),
             cli.allow_shell,
             cli.hidden,
@@ -878,8 +901,7 @@ fn apply_model_cell(
                 mt.name
             );
         }
-        ctx.specs
-            .push(MountSpec::parse(&format!("{}={}", mt.name, target)));
+        ctx.specs.push(MountSpec::stated(&mt.name, &target));
     }
     let merged = match ctx.model.take() {
         None => m.clone(),

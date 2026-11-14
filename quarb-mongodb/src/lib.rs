@@ -325,7 +325,7 @@ impl MongodbAdapter {
                 .map(|(i, v)| {
                     self.push_node(
                         Kind::Field { value: v.clone() },
-                        Some(i.to_string()),
+                        Some(quarb::item_name(i)),
                         Some(parent),
                     )
                 })

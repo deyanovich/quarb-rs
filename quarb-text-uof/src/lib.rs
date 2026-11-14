@@ -217,7 +217,21 @@ impl Doc {
 /// `uof:元数据`.
 fn read_head(xml: &str) -> Result<HeadMeta, UofError> {
     let mut reader = Reader::from_str(xml);
-    let mut h = HeadMeta::default();
+    let mut h = HeadMeta {
+        // the plain names this reader answered under until 0.63
+        renamed: vec![
+            ("title", "标题"),
+            ("creator", "创建者"),
+            ("subject", "主题"),
+            ("description", "摘要"),
+            ("keyword", "关键字"),
+            ("created", "创建日期"),
+            ("modified", "编辑时间"),
+            ("last-author", "最后作者"),
+            ("language", "语言"),
+        ],
+        ..HeadMeta::default()
+    };
     let mut in_meta = false;
     let mut open: Option<String> = None;
     loop {
@@ -243,25 +257,16 @@ fn read_head(xml: &str) -> Result<HeadMeta, UofError> {
                     if value.is_empty() {
                         continue;
                     }
-                    let key = match name.as_str() {
-                        "标题" => "title",
-                        "创建者" => "creator",
-                        "主题" => "subject",
-                        "摘要" => "description",
-                        "关键字" => "keyword",
-                        "创建日期" => "created",
-                        "编辑时间" => "modified",
-                        "最后作者" => "last-author",
-                        "语言" => "language",
-                        other => other,
-                    };
-                    h.declare(key, value);
-                    match key {
-                        "title" => h.title = Some(value.to_string()),
-                        "creator" => h.author = Some(value.to_string()),
-                        "description" => h.description = Some(value.to_string()),
-                        "subject" if h.category.is_none() => h.category = Some(value.to_string()),
-                        "keyword" => {
+                    // the record is verbatim (ruling 2026-11-14): the
+                    // element's name as the file writes it; the
+                    // curated core reads the standard's names
+                    h.declare(name, value);
+                    match name.as_str() {
+                        "标题" => h.title = Some(value.to_string()),
+                        "创建者" => h.author = Some(value.to_string()),
+                        "摘要" => h.description = Some(value.to_string()),
+                        "主题" if h.category.is_none() => h.category = Some(value.to_string()),
+                        "关键字" => {
                             for k in value.split([';', ',']) {
                                 let k = k.trim();
                                 if !k.is_empty() && !h.tags.iter().any(|t| t == k) {
@@ -269,8 +274,9 @@ fn read_head(xml: &str) -> Result<HeadMeta, UofError> {
                                 }
                             }
                         }
-                        "created" => h.published = Some(Value::Str(value.to_string())),
-                        "modified" => h.modified = Some(Value::Str(value.to_string())),
+                        "语言" => h.lang = Some(value.to_string()),
+                        "创建日期" => h.published = Some(Value::Str(value.to_string())),
+                        "编辑时间" => h.modified = Some(Value::Str(value.to_string())),
                         _ => {}
                     }
                 }

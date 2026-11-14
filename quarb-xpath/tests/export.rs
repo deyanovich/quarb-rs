@@ -12,8 +12,8 @@ const DOC: &str = r#"<?xml version="1.0"?>
     <book id="b1" pages="512"><title>The Histories</title></book>
     <book id="b2" pages="606"><title>The Peloponnesian War</title></book>
   </shelf>
-  <shelf label="scifi">
-    <book id="b3" pages="412"><title>Dune</title></book>
+  <shelf label="gothic">
+    <book id="b3" pages="412"><title>Dracula</title></book>
   </shelf>
 </library>"#;
 
@@ -72,7 +72,7 @@ fn differential_against_xmllint() {
         "//book @| count",
         "//book::pages @| sum",
         "//book[::pages > 500] @| count",
-        "//shelf[::label = \"scifi\"]/book @| count",
+        "//shelf[::label = \"gothic\"]/book @| count",
         "//book[!(::pages > 500)] @| count",
     ];
     for quarb in cases {

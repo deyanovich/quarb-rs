@@ -268,11 +268,11 @@ fn a_ref_as_name_renames_the_edge() {
     assert!(err.contains("a cycle under the promise"), "{err}");
     // on a document with no declared reference the ref declares
     // the edge under NAME instead of the role (the array's children
-    // are numbered from 0: /figures/0 is Gaia)
+    // are named from 1: /figures/1 is Gaia)
     let fig = |q: &str| lines(&dir, &["--model", "figures.model", q, "figures.json"]);
-    assert_eq!(fig("/figures/1->mother::name"), ["Gaia"]);
-    assert_eq!(fig("/figures/0<-mother::name"), ["Uranus", "Cronus"]);
-    assert_eq!(fig("/figures/1->*[$- = \"mother\"] @| count"), ["1"]);
-    assert_eq!(fig("/figures/1->figures @| count"), ["0"]);
+    assert_eq!(fig("/figures/2->mother::name"), ["Gaia"]);
+    assert_eq!(fig("/figures/1<-mother::name"), ["Uranus", "Cronus"]);
+    assert_eq!(fig("/figures/2->*[$- = \"mother\"] @| count"), ["1"]);
+    assert_eq!(fig("/figures/2->figures @| count"), ["0"]);
     assert_eq!(fig("/figures/*->* @| count"), ["2"]);
 }

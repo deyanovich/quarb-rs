@@ -35,7 +35,7 @@ fn the_bare_target_names_a_root_level_container_of_the_source() {
     // as the source's own container, its children keyed by name.
     let a = shelf("ref /books/*::author --> authors;");
     a.check().unwrap();
-    assert_eq!(values(&a, "/books/0::author-->::name"), ["Mark Twain"]);
+    assert_eq!(values(&a, "/books/1::author-->::name"), ["Mark Twain"]);
     assert_eq!(
         values(&a, "/authors/twain<--(::author)::title"),
         ["Tom Sawyer", "Huckleberry Finn"]
@@ -43,7 +43,7 @@ fn the_bare_target_names_a_root_level_container_of_the_source() {
     // The path form says the same thing.
     let b = shelf("ref /books/*::author --> /authors/*;");
     b.check().unwrap();
-    assert_eq!(values(&b, "/books/2::author-->::name"), ["Jane Austen"]);
+    assert_eq!(values(&b, "/books/3::author-->::name"), ["Jane Austen"]);
 }
 
 #[test]
@@ -52,7 +52,7 @@ fn a_declared_container_still_wins_the_name() {
         "node /authors/writer: /books/*::author | unique;\nref /books/*::author --> authors;",
     );
     a.check().unwrap();
-    assert_eq!(values(&a, "/books/0->writer"), ["writer"]);
+    assert_eq!(values(&a, "/books/1->writer"), ["writer"]);
 }
 
 #[test]
@@ -82,7 +82,7 @@ fn any_property_is_searched_where_a_ref_is_declared_into_the_container() {
     );
     assert_eq!(
         a.can_refer_to(
-            quarb::run("/books/0", &a)
+            quarb::run("/books/1", &a)
                 .ok()
                 .and_then(first_node)
                 .unwrap(),

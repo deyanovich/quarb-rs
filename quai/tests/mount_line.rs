@@ -78,6 +78,44 @@ fn a_notebook_cell_re_reads_a_source_under_options() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// A mount name is an identifier, and an identifier admits a dot:
+/// a notebook's `mount ports.json: …` and a `--model` file's are
+/// mounted under the name as written, as the browser's session
+/// mounts them. They were read back by the command line's narrower
+/// `NAME=TARGET` rule and taken for a file name.
+#[test]
+fn a_stated_mount_keeps_a_name_with_a_dot() {
+    let d = dir("dotted");
+    std::fs::write(
+        d.join("nb.quai"),
+        "    mount ports.json: ports.json;\n    mount grain-2.0: grain.csv;\n\n    /ports.json/n::\n\n    \
+         /grain-2.0/row[1]::port\n\n    mount ports.json: ?;\n\n    /* | :name\n",
+    )
+    .unwrap();
+    let (out, err) = quai(&d, &["--run", "nb.quai"], "");
+    let want = "&1  mount ports.json: ports.json;\n    mount grain-2.0: grain.csv;\n\n\
+                &2  /ports.json/n::\n    2\n\n\
+                &3  /grain-2.0/row[1]::port\n    Piraeus\n\n\
+                &4  mount ports.json: ?;\n\n\
+                &5  /* | :name\n    ports.json\n    grain-2.0\n";
+    assert!(out.starts_with(want), "{out}\n{err}");
+    // the same statements in a model file
+    std::fs::write(
+        d.join("ports.model"),
+        "mount ports.json: ports.json;\nmount grain-2.0: grain.csv;\n",
+    )
+    .unwrap();
+    let (out, err) = quai(
+        &d,
+        &["--model", "ports.model"],
+        "/ports.json/n::\n/grain-2.0/row[2]::port\n",
+    );
+    assert!(out.contains("2\n"), "{out}\n{err}");
+    assert!(out.contains("Koper"), "{out}\n{err}");
+    assert!(!err.contains("No such file"), "{err}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// A line of the interactive session: the same statement, with or
 /// without its semicolon; it takes its ordinal, and a refused one
 /// takes none.

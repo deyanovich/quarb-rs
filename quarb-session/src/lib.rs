@@ -35,6 +35,18 @@ pub struct MountSpec {
 }
 
 impl MountSpec {
+    /// A mount a statement names (`mount NAME: target`): the name as
+    /// the statement gives it. A mount name is an identifier, which
+    /// admits a dot (`library.json`); the command line's `NAME=TARGET`
+    /// reading ([`MountSpec::parse`]) is narrower and must not read a
+    /// statement's name back.
+    pub fn stated(name: &str, target: &str) -> MountSpec {
+        MountSpec {
+            name: Some(name.to_string()),
+            path: std::path::PathBuf::from(target),
+        }
+    }
+
     /// Parse a CLI argument: `NAME=TARGET` when the left side is a
     /// plain mount name (letters, digits, `_`, `-`), else a bare
     /// path.
@@ -217,6 +229,16 @@ mod mount_spec_tests {
         assert_eq!(spec.path.to_str(), Some("data/titanic.csv"));
         let spec = MountSpec::parse("births-2=x.json");
         assert_eq!(spec.name.as_deref(), Some("births-2"));
+    }
+
+    #[test]
+    fn a_stated_mount_keeps_its_name() {
+        // a statement's name is an identifier: it may hold a dot,
+        // which the command line's reading takes for path text
+        let spec = MountSpec::stated("library.json", "data/library.json.gz");
+        assert_eq!(spec.name.as_deref(), Some("library.json"));
+        assert_eq!(spec.path.to_str(), Some("data/library.json.gz"));
+        assert!(MountSpec::parse("library.json=x.json").name.is_none());
     }
 
     #[test]

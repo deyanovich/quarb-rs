@@ -111,3 +111,47 @@ fn a_used_models_mounts_are_found_from_any_directory() {
     assert_eq!(run(&lib, "same.model"), want);
     assert_eq!(run(&lib.join("data"), "../same.model"), want);
 }
+
+/// A mount name is an identifier, and an identifier admits a dot:
+/// `mount library.json: …` names its mount `library.json`. The
+/// statement's name is carried as written; the command line's
+/// `NAME=TARGET` reading is narrower (so that `a=b.json` can be a
+/// file) and took the statement's name for a file name.
+#[test]
+fn a_model_mount_keeps_a_name_with_a_dot() {
+    let dir = fixture("dotted");
+    std::fs::write(
+        dir.join("shelf.model"),
+        "mount books.csv: books.csv;\nmount writers-1.0: authors.csv;\n",
+    )
+    .unwrap();
+    let run = |query: &str| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_qua"))
+            .env("QUARB_LOCALE", "C")
+            .current_dir(&dir)
+            .args(["--model", "shelf.model", query])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{query}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    assert_eq!(run("/* | :name"), "writers-1.0\nbooks.csv");
+    assert_eq!(run("/books.csv/row[1]::title"), "The Iliad");
+    assert_eq!(run("/writers-1.0/row[3]::name"), "Twain");
+    // on the command line the same spelling names a file, as before
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_qua"))
+        .current_dir(&dir)
+        .args(["/* | :name", "books.csv=books.csv"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("reading books.csv=books.csv"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

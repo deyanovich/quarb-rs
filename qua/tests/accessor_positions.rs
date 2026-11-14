@@ -79,11 +79,11 @@ fn the_context_topics_are_the_threads_topics() {
     assert_eq!(ok(&d, "/row/* | ::Age @| sum"), "86");
     assert_eq!(
         ok(&d, "/row/* @| %(p = @@_)"),
-        "%(p = @(/row/0; /row/1; /row/2))"
+        "%(p = @(/row/1; /row/2; /row/3))"
     );
     assert_eq!(ok(&d, "/row/* | @@_::Age @| first"), "@(22; 38; 26)");
     // the thread commands keep the nodes
-    assert_eq!(ok(&d, "/row/* @| first"), "/row/0");
+    assert_eq!(ok(&d, "/row/* @| first"), "/row/1");
     assert_eq!(ok(&d, "/row/* @| count"), "3");
     // a reduction that combines values says what to project
     let e = err(&d, "/row/* @| pairs");
@@ -166,7 +166,7 @@ fn a_reference_refuses_an_unknown_core_field() {
     }
     assert_eq!(
         ok(&d, "/row/* @| [..2] | $$_:%(:name; ::Age)"),
-        "%(name = \"0\"; Age = 22)\n%(name = \"1\"; Age = 38)"
+        "%(name = \"1\"; Age = 22)\n%(name = \"2\"; Age = 38)"
     );
     assert_eq!(
         ok(&d, "/row/* @| [..2] | @@_:%(::Age)"),

@@ -28,19 +28,19 @@ fn values(q: &str) -> Vec<String> {
 fn pairs_are_unordered_and_each_once() {
     // distinct values, in their own order whatever the stream's
     assert_eq!(
-        values("/scenes/0/who/* | :: @| pairs"),
+        values("/scenes/1/who/* | :: @| pairs"),
         ["anna, kitty", "anna, levin", "kitty, levin"]
     );
     assert_eq!(
-        values("/scenes/0/who/* | :: @| triples"),
+        values("/scenes/1/who/* | :: @| triples"),
         ["anna, kitty, levin"]
     );
     assert_eq!(
-        values("/scenes/0/who/* | :: @| combinations(1) @| count"),
+        values("/scenes/1/who/* | :: @| combinations(1) @| count"),
         ["3"]
     );
     // fewer values than the size: no combination
-    assert_eq!(values("/scenes/3/who/* | :: @| pairs @| count"), ["0"]);
+    assert_eq!(values("/scenes/4/who/* | :: @| pairs @| count"), ["0"]);
 }
 
 #[test]
@@ -63,10 +63,10 @@ fn a_pair_counts_the_same_from_either_order() {
 
 #[test]
 fn an_operand_command_yields_every_value() {
-    assert_eq!(values("/scenes/1 | (/who/*::)"), ["anna", "vronsky"]);
+    assert_eq!(values("/scenes/2 | (/who/*::)"), ["anna", "vronsky"]);
     // one value is that value; none is null, the row kept
-    assert_eq!(values("/scenes/3 | (/who/*::)"), ["dolly"]);
-    assert_eq!(values("/scenes/4 | (/who/*::) @| count"), ["1"]);
+    assert_eq!(values("/scenes/4 | (/who/*::)"), ["dolly"]);
+    assert_eq!(values("/scenes/5 | (/who/*::) @| count"), ["1"]);
 }
 
 #[test]
@@ -82,7 +82,7 @@ fn the_sizes_are_validated() {
 fn unique_compares_nodes_by_identity() {
     // every scene node reads as an empty object: still five nodes
     assert_eq!(values("/scenes/* @| unique @| count"), ["5"]);
-    assert_eq!(values("/scenes/0 | (/who/* @| unique @| count)"), ["4"]);
+    assert_eq!(values("/scenes/1 | (/who/* @| unique @| count)"), ["4"]);
     // as values, kitty twice is one
-    assert_eq!(values("/scenes/0 | (/who/*:: @| unique @| count)"), ["3"]);
+    assert_eq!(values("/scenes/1 | (/who/*:: @| unique @| count)"), ["3"]);
 }

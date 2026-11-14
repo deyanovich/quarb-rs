@@ -288,20 +288,26 @@ fn a_yaml_header_is_the_documents_declared_identity() {
         on(&m, "^ | %(:traits)"),
         [r#"%(traits = @("document"; "tag:epic"; "tag:greek"; "category:poetry"))"#]
     );
-    // the lossless layer: every key, its type kept
-    assert_eq!(on(&m, "^:::title"), ["The Iliad"]);
-    assert_eq!(on(&m, "^ | :::books + 1"), ["25"]);
+    // the lossless layer: `::head`, the record of every key, its
+    // type kept (ruling 2026-11-14); a field heads an expression
+    // and ends a path
+    assert_eq!(on(&m, "::head:title"), ["The Iliad"]);
+    assert_eq!(on(&m, "^ | ::head:books + 1"), ["25"]);
     assert_eq!(
-        on(&m, "^ | %(:::aliases)"),
+        on(&m, "^ | %(::head:aliases)"),
         [r#"%(aliases = @("Ilias"; "Song of Ilium"))"#]
     );
     assert_eq!(
-        on(&m, "^ | :::edition"),
+        on(&m, "::head:edition"),
         [r#"%(editor = "Monro and Allen"; year = 1920)"#]
     );
-    assert_eq!(on(&m, "^ | :::draft"), ["false"]);
+    assert_eq!(on(&m, "::head:edition:year"), ["1920"]);
+    assert_eq!(on(&m, "^::head:draft"), ["false"]);
     // the date as the author wrote it, a text
-    assert_eq!(on(&m, "^:::date"), ["2026-03-01"]);
+    assert_eq!(on(&m, "^::head:date"), ["2026-03-01"]);
+    // three colons are the reader's own facts again: a declared
+    // name there answers nothing
+    assert_eq!(on(&m, "^:::title"), [""]);
     // no part of the text
     assert_eq!(on(&m, "//section::lemma"), ["Book I"]);
     assert_eq!(on(&m, "/* | :name"), ["section"]);
@@ -338,9 +344,9 @@ fn a_headers_curated_core_reads_the_shared_conventions() {
         on(&m, "^ | %(::published; ::category; ::title)"),
         ["%(published = null; category = null; title = null)"]
     );
-    assert_eq!(on(&m, "^ | :::published"), ["false"]);
+    assert_eq!(on(&m, "^ | ::head:published"), ["false"]);
     assert_eq!(
-        on(&m, "^ | %(:::categories)"),
+        on(&m, "^ | %(::head:categories)"),
         [r#"%(categories = @("poetry"; "war"))"#]
     );
     // no header: nothing declared, and a rule is a rule

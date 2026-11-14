@@ -395,6 +395,83 @@ impl DjvuText {
     }
 }
 
+/// The curated core of a DjVu document, by its ANT metadata's names.
+const CURATED: &[(&str, &str)] = &[
+    ("title", "title"),
+    ("author", "author"),
+    ("tags", "keywords"),
+];
+
+/// What the document node answers to the property `name` from its
+/// declared identity (ruling 2026-11-14): `head`, the record of
+/// every entry under the name the file writes (null where it
+/// declares nothing); a curated property, read from the entry
+/// `curated` names for it; and nothing else. An entry asked for
+/// directly (`::Subject`, `::edition`) read until 0.63: for one
+/// release it says where the entry is.
+fn document_property(
+    identity: &[(String, String)],
+    name: &str,
+    curated: &[(&str, &str)],
+) -> Option<Value> {
+    if name == "head" {
+        return (!identity.is_empty()).then(|| {
+            Value::record(
+                identity
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Value::Str(v.clone())))
+                    .collect(),
+            )
+        });
+    }
+    let said = |key: &str| {
+        identity
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+    };
+    if let Some((_, key)) = curated.iter().find(|(c, _)| *c == name) {
+        let text = said(key)?;
+        return Some(match name {
+            "tags" => Value::list(
+                text.split([';', ','])
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .map(|t| Value::Str(t.to_string()))
+                    .collect(),
+            ),
+            "published" | "modified" => quarb::temporal::parse_iso(text.trim())
+                .map(|(secs, nanos, offset_min)| Value::Instant {
+                    secs,
+                    nanos,
+                    offset_min,
+                    calendar: Default::default(),
+                })
+                .unwrap_or(Value::Str(text)),
+            _ => Value::Str(text),
+        });
+    }
+    if let Some((key, _)) = identity.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)) {
+        let field = if key
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-'))
+        {
+            key.clone()
+        } else {
+            format!("\"{key}\"")
+        };
+        quarb::record_warning(
+            quarb::diagnostic::RETIRED_KEY,
+            &format!("::{name}"),
+            format!(
+                "'::{name}' no longer reads what the document declares: the declarations \
+                 are the record '::head', and this one is '::head:{field}'"
+            ),
+        );
+    }
+    None
+}
+
 impl AstAdapter for DjvuText {
     /// This source defines no references to resolve.
     fn resolves_references(&self) -> bool {
@@ -444,23 +521,19 @@ impl AstAdapter for DjvuText {
         match (&self.nodes[node.0 as usize], name) {
             (Node::Section { lemma, .. }, "lemma") => Some(Value::Str(lemma.clone())),
             // The declared identity: the ANT metadata on the
-            // document node.
-            (Node::Root { .. }, key) => self
-                .identity
-                .iter()
-                .find(|(k, _)| k == key)
-                .map(|(_, v)| Value::Str(v.clone()))
-                .or_else(|| (key == "text").then(|| self.default_value(node)).flatten()),
+            // document node, as one record (ruling 2026-11-14), and
+            // the curated core read from it
+            (Node::Root { .. }, "text") => self.default_value(node),
+            (Node::Root { .. }, name) => document_property(&self.identity, name, CURATED),
             (_, "text") => self.default_value(node),
             _ => None,
         }
     }
     fn properties(&self, node: NodeId) -> Vec<(String, Value)> {
         match &self.nodes[node.0 as usize] {
-            Node::Root { .. } => self
-                .identity
+            Node::Root { .. } => ["title", "author", "tags"]
                 .iter()
-                .map(|(k, v)| (k.clone(), Value::Str(v.clone())))
+                .filter_map(|k| Some((k.to_string(), self.property(node, k)?)))
                 .collect(),
             Node::Section { lemma, .. } => vec![("lemma".into(), Value::Str(lemma.clone()))],
             _ => Vec::new(),

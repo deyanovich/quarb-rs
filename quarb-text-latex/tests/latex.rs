@@ -371,3 +371,45 @@ fn multibyte_characters_are_never_split() {
     let m = parse("\\section{x}\n\nA \\ё b and \\verb§c d§ e.\n");
     assert_eq!(values(&m, "//paragraph::"), ["A ё b and c d e."]);
 }
+
+/// `\title`, `\author` and `\date` are what the source declares
+/// about itself (ruling 2026-11-14): the record `::head` on the
+/// document node, under the commands' names, and no part of the
+/// text. The title read as a paragraph of front matter.
+#[test]
+fn the_title_commands_are_the_head() {
+    let m = quarb_text_latex::parse(
+        r#"\documentclass{article}
+\title{The \emph{Emu} War}
+\author{W. Meredith}
+\date{1932-11-02}
+\begin{document}
+\maketitle
+\section{The war}
+Emus advanced on the wheat.
+\end{document}
+"#,
+    );
+    let on = |q: &str| match quarb::run(q, &m).unwrap() {
+        quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+        quarb::QueryResult::Nodes(ns) => ns.iter().map(|n| m.locator(*n)).collect(),
+    };
+    assert_eq!(
+        on("::head"),
+        [r#"%(title = "The Emu War"; author = "W. Meredith"; date = "1932-11-02")"#]
+    );
+    assert_eq!(
+        on("^ | %(::title; ::author; ::published)"),
+        [r#"%(title = "The Emu War"; author = "W. Meredith"; published = 1932-11-02)"#]
+    );
+    assert_eq!(on("//paragraph::"), ["Emus advanced on the wheat."]);
+    // a source that declares nothing, and a date that is no date
+    let bare = quarb_text_latex::parse("\\date{\\today}\nText.\n");
+    assert_eq!(
+        quarb_text_latex::head("\\date{\\today}\nText.\n")
+            .declared
+            .len(),
+        0
+    );
+    assert!(bare.head_meta().title.is_none());
+}

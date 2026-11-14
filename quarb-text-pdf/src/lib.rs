@@ -85,6 +85,13 @@ enum Node {
 
 pub struct PdfText {
     nodes: Vec<Node>,
+    /// The information dictionary, as (key, text): what the file
+    /// declares about itself, under the names it writes (`Title`,
+    /// `Author`, `Subject`, `Keywords`, `Creator`, `Producer`,
+    /// `CreationDate`, `ModDate`, and any other text entry).
+    identity: Vec<(String, String)>,
+    /// The catalog's `/Lang`: the document's declared language.
+    lang: Option<String>,
 }
 
 pub fn parse(bytes: &[u8]) -> Result<PdfText, PdfTextError> {
@@ -93,7 +100,78 @@ pub fn parse(bytes: &[u8]) -> Result<PdfText, PdfTextError> {
     let page_index: HashMap<ObjectId, u32> = pages.iter().map(|(n, id)| (*id, *n)).collect();
     let mut lines = extract_lines(&doc, &pages);
     let outline = extract_outline(&doc, &page_index);
-    Ok(assemble(&mut lines, outline))
+    let mut out = assemble(&mut lines, outline);
+    out.identity = info(&doc);
+    // the document's language: the catalog's `/Lang`
+    out.lang = doc
+        .catalog()
+        .ok()
+        .and_then(|c| match resolve(&doc, c.get(b"Lang").ok()) {
+            Some(Object::String(bytes, _)) => Some(text_string(bytes).trim().to_string()),
+            _ => None,
+        })
+        .filter(|l| !l.is_empty());
+    Ok(out)
+}
+
+/// The trailer's `/Info` dictionary: its text entries in the
+/// file's order, each under the key the file writes.
+fn info(doc: &Document) -> Vec<(String, String)> {
+    let Some(dict) = resolve_dict(doc, doc.trailer.get(b"Info").ok()) else {
+        return Vec::new();
+    };
+    dict.iter()
+        .filter_map(|(key, value)| {
+            let Some(Object::String(bytes, _)) = resolve(doc, Some(value)) else {
+                return None;
+            };
+            let text = text_string(bytes).trim().to_string();
+            (!text.is_empty()).then(|| (String::from_utf8_lossy(key).to_string(), text))
+        })
+        .collect()
+}
+
+/// A PDF date (`D:20240506070809+02'00'`, any prefix of it from the
+/// year on) as an instant.
+fn pdf_date(text: &str) -> Option<Value> {
+    let t = text.strip_prefix("D:").unwrap_or(text);
+    let digits: String = t.chars().take_while(char::is_ascii_digit).collect();
+    if digits.len() < 4 {
+        return None;
+    }
+    let part = |from: usize, default: &str| -> String {
+        digits
+            .get(from..from + 2)
+            .map_or_else(|| default.to_string(), str::to_string)
+    };
+    let zone = match &t[digits.len()..] {
+        "" | "Z" => "Z".to_string(),
+        z => {
+            // +HH'mm' or -HH'mm
+            let sign = z.chars().next().filter(|c| matches!(c, '+' | '-'))?;
+            let nums: String = z.chars().filter(char::is_ascii_digit).collect();
+            format!(
+                "{sign}{}:{}",
+                nums.get(0..2)?,
+                nums.get(2..4).unwrap_or("00")
+            )
+        }
+    };
+    let iso = format!(
+        "{}-{}-{}T{}:{}:{}{zone}",
+        &digits[..4],
+        part(4, "01"),
+        part(6, "01"),
+        part(8, "00"),
+        part(10, "00"),
+        part(12, "00"),
+    );
+    quarb::temporal::parse_iso(&iso).map(|(secs, nanos, offset_min)| Value::Instant {
+        secs,
+        nanos,
+        offset_min,
+        calendar: Default::default(),
+    })
 }
 
 // ---------------------------------------------------------------
@@ -145,7 +223,11 @@ fn assemble(lines: &mut Vec<Line>, outline: Vec<OutlineEntry>) -> PdfText {
                 children.push(ln);
             }
         }
-        return PdfText { nodes };
+        return PdfText {
+            nodes,
+            identity: Vec::new(),
+            lang: None,
+        };
     }
     // Sections in outline order; each takes the lines from its
     // destination up to the next entry's. Front matter stays at
@@ -197,7 +279,11 @@ fn assemble(lines: &mut Vec<Line>, outline: Vec<OutlineEntry>) -> PdfText {
     }
     // Anything after the last destination belongs to the last
     // section (already taken: its stop was None).
-    PdfText { nodes }
+    PdfText {
+        nodes,
+        identity: Vec::new(),
+        lang: None,
+    }
 }
 
 fn ordf(f: f64) -> ordered::F {
@@ -832,8 +918,41 @@ impl AstAdapter for PdfText {
         }
     }
     fn property(&self, node: NodeId, name: &str) -> Option<Value> {
+        // The document node answers what the file declares (ruling
+        // 2026-11-14): `::head`, the record of the information
+        // dictionary under the names the file writes, and the
+        // curated core read by the dictionary's own keys.
+        let said = |key: &str| {
+            self.identity
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.clone())
+        };
         match (&self.nodes[node.0 as usize], name) {
             (Node::Section { lemma, .. }, "lemma") => Some(Value::Str(lemma.clone())),
+            (Node::Root { .. }, "head") => (!self.identity.is_empty()).then(|| {
+                Value::record(
+                    self.identity
+                        .iter()
+                        .map(|(k, v)| (k.clone(), Value::Str(v.clone())))
+                        .collect(),
+                )
+            }),
+            (Node::Root { .. }, "lang") => self.lang.clone().map(Value::Str),
+            (Node::Root { .. }, "title") => said("Title").map(Value::Str),
+            (Node::Root { .. }, "author") => said("Author").map(Value::Str),
+            (Node::Root { .. }, "description") => said("Subject").map(Value::Str),
+            (Node::Root { .. }, "tags") => {
+                let tags: Vec<Value> = said("Keywords")?
+                    .split([',', ';'])
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .map(|t| Value::Str(t.to_string()))
+                    .collect();
+                (!tags.is_empty()).then(|| Value::list(tags))
+            }
+            (Node::Root { .. }, "published") => pdf_date(&said("CreationDate")?),
+            (Node::Root { .. }, "modified") => pdf_date(&said("ModDate")?),
             (_, "text") => self.default_value(node),
             _ => None,
         }

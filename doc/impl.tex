@@ -136,8 +136,22 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   \texttt{QUARB\_IMAP\_USER}/\texttt{PASS} or
   \texttt{\textasciitilde/.netrc}. Read-only. Tested against a
   bundled deterministic mini IMAP server. \\
-\texttt{quarb-json} & The JSON adapter (keys and indices as names,
-  value types as traits). Depends on \texttt{quarb} and
+\texttt{quarb-json} & The JSON adapter (keys and positions as names,
+  value types as traits). A list item's name is its position
+  counted from one (\texttt{/shelves/1} the first, 2026-11-14;
+  \texttt{quarb::item\_name}, which every adapter that names items
+  by position goes through, so \texttt{:name} agrees with
+  \texttt{:index} and a serializer tells a list by names 1, 2, 3
+  \ldots\ on a node that does not say it is a record: a mapping
+  keyed \texttt{"1"}, \texttt{"2"} carries the kind
+  \texttt{object}, \texttt{map} in the adapters whose mappings
+  are maps, and keeps its keys,
+  \texttt{serialize::says\_record}). A JSON Pointer the data
+  writes (\texttt{\$ref},
+  \texttt{\#/users/0}) is read as RFC 6901 writes it, from zero,
+  and lands on the node named one higher; a name the source writes
+  itself (an object's key, a kaiv namepath's segment, a Firebase
+  key) is not a position and is kept. Depends on \texttt{quarb} and
   \texttt{serde\_json}. \\
 \texttt{quarb-gsheet} & Google Sheets on the
   \texttt{quarb-xlsx} mapping (sheets as tables, first-row
@@ -244,9 +258,30 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   soup dropped (nav, chrome, scripts, forms, media), the head
   read for the page's declared identity (\texttt{title},
   \texttt{lang}, canonical, every \texttt{meta}, \texttt{rel=tag}
-  links, a JSON-LD block — verbatim as \texttt{:::} metadata on
-  the document, and curated into tags-as-traits, \texttt{::category},
-  \texttt{::description}, \texttt{::author}, \texttt{::published};
+  links, a JSON-LD block — verbatim as the fields of the record
+  \texttt{::head} on the document, the block one nested record
+  under \texttt{ld}, and curated into tags-as-traits,
+  \texttt{::category}, \texttt{::description}, \texttt{::author},
+  \texttt{::published}. \texttt{::head} is the one rule of every
+  text-level reader (2026-11-14, \texttt{HeadMeta::record}): what
+  the document declares, each field under the name it was declared
+  with and with the value its format gives it, verbatim (a
+  Markdown header's YAML types; the \texttt{dc:} and \texttt{cp:}
+  entries of an EPUB package and of a Word or OpenDocument file
+  under the qualified names those files write; RTF's control
+  words; a \LaTeX{} source's \texttt{\textbackslash title}; a
+  PDF's information dictionary), beside the curated properties each
+  reader fills from its own format's names (\texttt{::title},
+  \texttt{::author}, \texttt{::description}, \texttt{::tags},
+  \texttt{::category}, \texttt{::published}, \texttt{::modified}
+  and the declared language \texttt{::lang});
+  \texttt{::head} is the empty record where the place for declarations is empty, null
+  where the format has none; \texttt{:::name} no longer reads a
+  declaration (warning \texttt{RETIRED\_KEY} for one release), and
+  the header of an XML import (TEI, FictionBook, DocBook, JATS) is
+  no part of the text. A field after a projection in path position
+  (\texttt{::head:year}, \texttt{/a::head:year}) is parsed as the
+  pipe form (\texttt{::head | :year});
   every node answers \texttt{::href} / \texttt{::anchor} /
   \texttt{::link}, and \texttt{| link} rides them),
   wrappers transparent, headings flat into the shared derivation, trailing
@@ -493,7 +528,13 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   mode pairs with \texttt{jq 'path(...)'}), and \texttt{export}
   walks the reflection arbor back to a jq filter. Binaries
   \texttt{jq2quarb} / \texttt{quarb2jq}; the export side is
-  differentially tested against the \texttt{jq} binary. \\
+  differentially tested against the \texttt{jq} binary. The items
+  of a list are named from one and jq's indexes count from zero:
+  \texttt{.items[0]} imports as \texttt{/items/1}, and a numeric
+  step exports as the index (\texttt{/items/1} is
+  \texttt{.items[0]}), with a note that under an object the same
+  step is the key \texttt{"1"}; a path that opens on an array
+  exports as \texttt{.[]}. \\
 \texttt{quarb-bigquery} & The Google BigQuery driver: the
   REST API directly (\texttt{jobs.query} over a synchronous HTTP
   client — no cloud SDK, no async runtime), bearer token from
@@ -1427,7 +1468,13 @@ root-anchored sequence of hops, each an axis followed by a name:
     \texttt{:show}/\texttt{:undo}; retired from \texttt{qua} in
     favor of the standalone \texttt{quai} crate;
     \texttt{NAME=TARGET} mount aliases via
-    \texttt{quarb\_session::MountSpec} and in-session
+    \texttt{quarb\_session::MountSpec}, whose name is a letter or
+    \texttt{\_}, then letters, digits, \texttt{\_} and \texttt{-},
+    so that \texttt{a=b.json} can be a file; a statement's mount
+    (\texttt{mount NAME: target} in a model or a notebook) is
+    \texttt{MountSpec::stated}, the name as written, an identifier
+    that may hold a dot, never read back through
+    \texttt{NAME=TARGET}; and in-session
     \texttt{:mount} via \texttt{Session::set\_executor} ---
     in-process mode only; the Python \texttt{Session}/kernel
     accrete defs-only cells through the \texttt{parse\_defs}
@@ -1493,7 +1540,21 @@ root-anchored sequence of hops, each an axis followed by a name:
     and \texttt{\$\$k} may navigate from its context node
     (\texttt{\$\$1/field::}), so joins work where keys are
     children, e.g. JSON. Misplaced correlated references are
-    parse errors, never silent nulls \\
+    parse errors, never silent nulls. The mark that ends a joined
+    expression (\texttt{<=> B[…] .b}; the dot that closes its own
+    pipeline where it has one) names its witness (2026-11-14): when
+    the join binds, the gate files the bound node as an ordinary
+    mark on the driver's thread, after the driver's marks and in
+    the entries' order, so \texttt{\$\$.b}, the mark positions and
+    the node side read it, and a condition joined later reads it as
+    the candidate under trial. No witness under \texttt{<=>?}\
+    files no mark. The name must be new; a condition's read of its
+    own or a later mark, and a read from outside of a mark that is
+    a joined expression's own, are parse errors. A condition's
+    equality between a property of the candidate and a key read
+    from the driver or an earlier entry (\texttt{\$\$0::k},
+    \texttt{\$\$.t::k}, \texttt{\$\$1::k}) is served by an index
+    of the joined context, built once \\
 \texttt{::ref\textasciitilde>}, \texttt{::'\$ref'\textasciitilde>/city}
   & \live cross-reference resolution (JSON: follow a \texttt{\$ref}
     JSON Pointer) \\
@@ -3142,7 +3203,7 @@ cargo run -p qua -- '//*.rs' src/     # all Rust files under src/
 cargo run -p qua -- '/README.md'      # a single top-level file
 
 # query a document
-cargo run -p qua -- '/users/0/name::' data.json
+cargo run -p qua -- '/users/1/name::' data.json
 cargo run -p qua -- '//book[::pages > 200]:::id' catalog.xml
 cargo run -p qua -- '//a::href' page.html
 \end{lstlisting}

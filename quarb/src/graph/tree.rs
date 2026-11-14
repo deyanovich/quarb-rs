@@ -260,8 +260,9 @@ impl<A: AstAdapter> Drawer<'_, A> {
         false
     }
 
-    /// A node's label: its name; a nameless node its locator
-    /// segment (`[0]`).
+    /// A node's label: its name; a nameless node its position among
+    /// its siblings, as the predicate that selects it writes it
+    /// (`[1]` the first).
     fn label(&self, node: NodeId) -> String {
         if let Some(name) = self.adapter.name(node) {
             return name;
@@ -274,7 +275,7 @@ impl<A: AstAdapter> Drawer<'_, A> {
                     .iter()
                     .position(|c| *c == node)
                     .unwrap_or(0);
-                format!("[{pos}]")
+                format!("[{}]", pos + 1)
             }
             None => "/".to_string(),
         }

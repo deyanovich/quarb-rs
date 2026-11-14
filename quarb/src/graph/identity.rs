@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// The node's name-path from the adapter's root: `/teams/0/members/0`.
+/// The node's name-path from the adapter's root: `/teams/1/members/1`.
 pub fn name_path<A: AstAdapter + ?Sized>(adapter: &A, node: NodeId) -> String {
     let mut parts = Vec::new();
     let mut cur = Some(node);

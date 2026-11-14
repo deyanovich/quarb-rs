@@ -50,13 +50,13 @@ fn ok(dir: &Path, env: &[(&str, &str)], args: &[&str]) -> String {
 fn rendering_follows_the_locale_the_values_do_not() {
     let dir = fixture("render");
     // canonical without a locale
-    assert_eq!(ok(&dir, &[], &["/rows/0::n", "sales.json"]), "1234567.5");
+    assert_eq!(ok(&dir, &[], &["/rows/1::n", "sales.json"]), "1234567.5");
     // --locale: numbers and instants in the locale's form
     assert_eq!(
         ok(
             &dir,
             &[],
-            &["--locale", "ru-RU", "/rows/0::n", "sales.json"]
+            &["--locale", "ru-RU", "/rows/1::n", "sales.json"]
         ),
         "1234567,5"
     );
@@ -67,7 +67,7 @@ fn rendering_follows_the_locale_the_values_do_not() {
             &[
                 "--locale",
                 "ru-RU",
-                "/rows/0::when | datetime",
+                "/rows/1::when | datetime",
                 "sales.json"
             ]
         ),
@@ -77,7 +77,7 @@ fn rendering_follows_the_locale_the_values_do_not() {
         ok(
             &dir,
             &[],
-            &["--locale", "de", "/rows/0 | %(::city; ::n)", "sales.json"]
+            &["--locale", "de", "/rows/1 | %(::city; ::n)", "sales.json"]
         ),
         "%(city = \"Ярославль\"; n = 1234567,5)"
     );
@@ -86,7 +86,7 @@ fn rendering_follows_the_locale_the_values_do_not() {
         ok(
             &dir,
             &[],
-            &["--locale", "ru-RU", "/rows/0 | ::n * 2", "sales.json"]
+            &["--locale", "ru-RU", "/rows/1 | ::n * 2", "sales.json"]
         ),
         "2469135,0"
     );
@@ -97,7 +97,7 @@ fn rendering_follows_the_locale_the_values_do_not() {
             &[
                 "--locale",
                 "ru-RU",
-                "/rows/0 | %(::n) @| json",
+                "/rows/1 | %(::n) @| json",
                 "sales.json"
             ]
         ),
@@ -169,7 +169,7 @@ fn sort_collates_under_the_locale() {
 #[test]
 fn the_layers_nearest_wins() {
     let dir = fixture("layers");
-    let q = "/rows/0::n";
+    let q = "/rows/1::n";
     // system locale
     assert_eq!(
         ok(&dir, &[("LANG", "ru_RU.UTF-8")], &[q, "sales.json"]),
@@ -272,7 +272,7 @@ fn a_closing_table_renders_and_the_value_never_changes() {
             &[
                 ru[0],
                 ru[1],
-                "/rows/0 | %(w = (::when | datetime)) @| csv",
+                "/rows/1 | %(w = (::when | datetime)) @| csv",
                 "sales.json"
             ]
         ),
@@ -297,7 +297,7 @@ fn a_closing_table_renders_and_the_value_never_changes() {
         ok(
             &dir,
             &[],
-            &[ru[0], ru[1], "/rows/0 | %(::n) @| jsonl", "sales.json"]
+            &[ru[0], ru[1], "/rows/1 | %(::n) @| jsonl", "sales.json"]
         ),
         "{\"n\": 1234567.5}"
     );
@@ -338,7 +338,7 @@ fn numbers_and_dates_keep_their_order_and_their_forms() {
 #[test]
 fn grouping_is_asked_for() {
     let dir = fixture("grouping");
-    let q = "/rows/0::n";
+    let q = "/rows/1::n";
     // a year or an id prints as written under any locale
     assert_eq!(ok(&dir, &[], &["--locale", "en-US", "= 1876"]), "1876");
     assert_eq!(
