@@ -281,8 +281,8 @@ impl Parts {
                             }
                             "meta:keyword" => h.tag(&value),
                             "dc:language" => h.lang = Some(value),
-                            "meta:creation-date" => h.published = HeadMeta::instant(&value),
-                            "dc:date" => h.modified = HeadMeta::instant(&value),
+                            "meta:creation-date" => h.published = HeadMeta::when(&value),
+                            "dc:date" => h.modified = HeadMeta::when(&value),
                             _ => {}
                         }
                     }

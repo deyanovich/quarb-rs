@@ -195,7 +195,11 @@ fn the_information_dictionary_is_the_head() {
         )]
     );
     assert_eq!(values(&m, "::published"), ["1932-11-02T09:30:00+08:00"]);
-    assert_eq!(values(&m, "::modified"), ["1932-01-01T00:00:00Z"]);
+    // a date that names a year and no more is that year, the
+    // calendar period (it answered the first instant of the year,
+    // a month and a day the file does not state)
+    assert_eq!(values(&m, "::modified"), ["1932"]);
+    assert_eq!(values(&m, "::modified | type"), ["period"]);
     assert_eq!(values(&m, "^ | (::head | keys | count)"), ["7"]);
     // no dictionary: nothing declared
     let bare = parse(&pdf(&bodies[..5])).unwrap();

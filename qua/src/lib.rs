@@ -385,11 +385,12 @@ struct Cli {
     #[arg(long, value_name = "ISO")]
     now: Option<String>,
 
-    /// Pin the seed of the run's random values (random(), sample,
-    /// shuffle): a whole number from 0. A run with a seed answers
+    /// Pin the seed of the session's random values (`rnd`, `sample`,
+    /// `shuffle`): a whole number from 0. A run with a seed answers
     /// the same on every machine and in every release, so a pinned
-    /// run replays exactly. Default: a seed drawn at startup, which
-    /// the run names in an info (--info) so that it can be repeated.
+    /// run replays exactly; a `session(--seed=n)` in the query moves
+    /// it. Default: a seed drawn at startup, which the run names in
+    /// an info (--info) so that it can be repeated.
     #[arg(long, value_name = "N")]
     seed: Option<u64>,
 
@@ -1194,6 +1195,7 @@ fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
         }
         if cli.resident_serve {
             let sock = resident_socket(&cli, &oc)?;
+            RESIDENT_NOTE.with(|n| *n.borrow_mut() = Some(resident_note(&cli)));
             oc.resident = Some((sock, cli.resident_ttl, cli.now.is_some()));
         }
     }
@@ -1455,6 +1457,135 @@ fn resident_dir() -> anyhow::Result<PathBuf> {
     Ok(d)
 }
 
+/// The inputs a session stands over, apart from how it reads them:
+/// each target as the file system names it, or as written beside the
+/// directory where it names no file (a source with a reading prefix,
+/// a URL). Two sessions with this key in common hold the same inputs
+/// twice.
+#[cfg(unix)]
+#[cfg(feature = "adapters")]
+fn resident_inputs_key(cli: &Cli) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for p in &cli.paths {
+        match std::fs::canonicalize(p) {
+            Ok(real) => real.hash(&mut h),
+            Err(_) => (std::env::current_dir().ok(), p).hash(&mut h),
+        }
+    }
+    h.finish()
+}
+
+/// What a session says of itself beside its socket (the file
+/// `quarb-KEY.session`): the key of its inputs, its process, the
+/// directory it was started in and its arguments without the query.
+/// A client about to start another session over the same inputs
+/// reads it ([`warn_of_standing_sessions`]).
+#[cfg(unix)]
+#[cfg(feature = "adapters")]
+fn resident_note(cli: &Cli) -> String {
+    let quoted = |arg: &std::ffi::OsStr| -> String {
+        let arg = arg.to_string_lossy();
+        let plain = !arg.is_empty()
+            && arg
+                .chars()
+                .all(|c| c.is_alphanumeric() || "-_./=:,+@%".contains(c));
+        if plain {
+            arg.into_owned()
+        } else {
+            format!("'{}'", arg.replace('\'', "'\\''"))
+        }
+    };
+    // the arguments as the first client wrote them: the serve flag
+    // and the query are no part of how the inputs are read
+    let mut query_seen = false;
+    let args: Vec<String> = std::env::args_os()
+        .skip(1)
+        .filter(|a| a != "--resident-serve")
+        .filter(|a| {
+            let is_query = !query_seen && a.to_string_lossy() == cli.query;
+            query_seen |= is_query;
+            !is_query
+        })
+        .map(|a| quoted(&a))
+        .collect();
+    format!(
+        "inputs {:016x}\npid {}\ncwd {}\nargs {}\n",
+        resident_inputs_key(cli),
+        std::process::id(),
+        std::env::current_dir()
+            .map(|d| d.display().to_string())
+            .unwrap_or_default(),
+        args.join(" ")
+    )
+}
+
+#[cfg(unix)]
+#[cfg(feature = "adapters")]
+thread_local! {
+    /// A serving session's note of itself, written beside its socket
+    /// once the socket is bound and removed with it.
+    static RESIDENT_NOTE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Before a client starts a session: every other session that stands
+/// over the same inputs is named on standard error (the user,
+/// 2026-11-16). A session is keyed by its inputs AND by every option
+/// that changes what a query answers, the output form and the
+/// directory, so the same tree asked under another flag, or from
+/// another directory, is materialized a second time beside the
+/// first: two sessions over the Linux tree, 36 GB each, on a machine
+/// of 62 GB. The second still starts: it may be what is meant.
+#[cfg(unix)]
+#[cfg(feature = "adapters")]
+fn warn_of_standing_sessions(cli: &Cli, sock: &std::path::Path) {
+    let Ok(dir) = resident_dir() else { return };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let ours = format!("{:016x}", resident_inputs_key(cli));
+    let own_note = sock.with_extension("session");
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let named = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("quarb-") && n.ends_with(".session"));
+        if !named || path == own_note {
+            continue;
+        }
+        let Ok(note) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let field = |name: &str| -> &str {
+            note.lines()
+                .find_map(|l| l.strip_prefix(name)?.strip_prefix(' '))
+                .unwrap_or("")
+        };
+        let Ok(pid) = field("pid").parse::<i32>() else {
+            continue;
+        };
+        // a session that is gone left its note behind (killed, or
+        // the machine went down): not standing, and the note goes
+        let alive = unsafe { libc::kill(pid, 0) } == 0 && path.with_extension("sock").exists();
+        if !alive {
+            let _ = std::fs::remove_file(&path);
+            continue;
+        }
+        if field("inputs") != ours {
+            continue;
+        }
+        eprintln!(
+            "resident session: another one already stands over the same inputs (pid {pid}, \
+             started in {} as: qua {}). This run starts a second, which reads the inputs \
+             again; a session is reused under the same options and from the same directory. \
+             To end the first: kill {pid}",
+            field("cwd"),
+            field("args")
+        );
+    }
+}
+
 /// Client side: connect to the session (starting it if needed),
 /// send the query, stream the result.
 #[cfg(unix)]
@@ -1467,7 +1598,10 @@ fn resident_client(cli: &Cli, oc: &OutputCtx) -> anyhow::Result<()> {
         // No live session. The server owns stale-socket cleanup
         // (removing here would race a concurrent client into
         // orphaning a daemon that just bound).
-        Err(_) => spawn_resident(&sock)?,
+        Err(_) => {
+            warn_of_standing_sessions(cli, &sock);
+            spawn_resident(&sock)?
+        }
     };
     let q = cli.query.as_bytes();
     stream.write_all(format!("Q {}\n", q.len()).as_bytes())?;
@@ -1628,6 +1762,16 @@ fn resident_serve_loop<A: AstAdapter>(
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::Permissions::from_mode(0o600)
     });
+    // What this session is, for a client about to start another over
+    // the same inputs.
+    let note = sock.with_extension("session");
+    if let Some(text) = RESIDENT_NOTE.with(|n| n.borrow_mut().take()) {
+        let _ = std::fs::write(&note, text);
+        let _ = std::fs::set_permissions(&note, {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::Permissions::from_mode(0o600)
+        });
+    }
     listener.set_nonblocking(true)?;
     let mut idle = std::time::Instant::now();
     loop {
@@ -1729,6 +1873,7 @@ fn resident_serve_loop<A: AstAdapter>(
         }
     }
     let _ = std::fs::remove_file(sock);
+    let _ = std::fs::remove_file(&note);
     Ok(())
 }
 

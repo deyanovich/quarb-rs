@@ -3826,6 +3826,39 @@ impl Value {
         }
     }
 
+    /// When a declared date says (the user, 2026-11-16: "Try not to
+    /// return null for ::published if you have data. Why not just
+    /// return the calendar period"): the instant of a full ISO date
+    /// or timestamp, and the calendar period of an ISO date at
+    /// reduced precision, a year (`1776`) or a year and month
+    /// (`1776-02`), which prints as it is written. What `::published`
+    /// and `::modified` answer in every format. Wording that is no
+    /// ISO date ("17 February 1776") says none.
+    pub fn declared_when(text: &str) -> Option<Value> {
+        let text = text.trim();
+        if let Some((secs, nanos, offset_min)) = crate::temporal::parse_iso(text) {
+            return Some(Value::Instant {
+                secs,
+                nanos,
+                offset_min,
+                calendar: Default::default(),
+            });
+        }
+        // a year, or a year and a month: digits, one dash at most
+        let (year, month) = text.split_once('-').unwrap_or((text, ""));
+        let digits = |s: &str, n: std::ops::RangeInclusive<usize>| {
+            n.contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit())
+        };
+        let shaped = digits(year, 4..=6)
+            && (digits(month, 2..=2) || (month.is_empty() && !text.contains('-')));
+        if !shaped {
+            return None;
+        }
+        Value::Str(text.to_string())
+            .calendar_reading()
+            .map(Value::period)
+    }
+
     /// A period as a value.
     pub fn period(p: crate::period::Period) -> Value {
         Value::Period {
@@ -4986,5 +5019,35 @@ mod one_pass_typing_tests {
         by_record.push_record(vec![("a".to_string(), s("2")), ("b".to_string(), s("x"))]);
         by_record.push_record(vec![("a".to_string(), s("3"))]);
         assert_eq!(by_text.finish().unwrap(), by_record.finish().unwrap());
+    }
+
+    #[test]
+    fn a_declared_date_says_when_at_its_own_precision() {
+        let kind = |text: &str| Value::declared_when(text).map(|v| v.to_string());
+        // a full date and a timestamp: the instant
+        assert_eq!(kind("1776-02-17").as_deref(), Some("1776-02-17"));
+        assert!(matches!(
+            Value::declared_when("1776-02-17T10:30:00Z"),
+            Some(Value::Instant { .. })
+        ));
+        // a year, and a year and a month: the calendar period
+        assert!(matches!(
+            Value::declared_when("1776"),
+            Some(Value::Period { .. })
+        ));
+        assert_eq!(kind(" 1776 ").as_deref(), Some("1776"));
+        assert_eq!(kind("1776-02").as_deref(), Some("1776-02"));
+        // wording, a number that is no year, a month of one digit
+        for none in [
+            "17 February 1776",
+            "12",
+            "1776-2",
+            "1776-",
+            "-1776",
+            "false",
+            "",
+        ] {
+            assert_eq!(Value::declared_when(none), None, "{none}");
+        }
     }
 }

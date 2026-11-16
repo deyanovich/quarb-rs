@@ -139,6 +139,17 @@ fn pdf_date(text: &str) -> Option<Value> {
     if digits.len() < 4 {
         return None;
     }
+    // a date that names a year, or a year and a month, and no more
+    // (`D:1776`, `D:177602`) is that calendar period: the month and
+    // the day it does not state are not supplied (it answered the
+    // first instant of the year)
+    if digits.len() < 8 && t.len() == digits.len() {
+        let iso = match digits.len() {
+            4 | 5 => digits[..4].to_string(),
+            _ => format!("{}-{}", &digits[..4], &digits[4..6]),
+        };
+        return Value::declared_when(&iso);
+    }
     let part = |from: usize, default: &str| -> String {
         digits
             .get(from..from + 2)

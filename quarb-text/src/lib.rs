@@ -1319,13 +1319,12 @@ impl HeadMeta {
             }
         }
         fn instant(v: &Value) -> Option<Value> {
-            let Value::Str(s) = v else { return None };
-            quarb::temporal::parse_iso(s.trim()).map(|(secs, nanos, offset_min)| Value::Instant {
-                secs,
-                nanos,
-                offset_min,
-                calendar: Default::default(),
-            })
+            match v {
+                Value::Str(s) => HeadMeta::when(s),
+                // `date: 1776`: YAML reads the bare year as a number
+                Value::Int(y) if (1000..=9999).contains(y) => HeadMeta::when(&y.to_string()),
+                _ => None,
+            }
         }
         let mut h = HeadMeta::default();
         let get = |name: &str| entries.iter().find(|(k, _)| k == name).map(|(_, v)| v);
@@ -1423,8 +1422,20 @@ impl HeadMeta {
         )
     }
 
-    /// A text that reads as an ISO date or timestamp, as the
-    /// instant the curated `published` and `modified` are.
+    /// When a declared date says: the instant of a full ISO date or
+    /// timestamp, and the calendar period of an ISO date at reduced
+    /// precision, a year (`1776`) or a year and month (`1776-02`),
+    /// which prints as it is written. What `::published` and
+    /// `::modified` answer, in every format (the user, 2026-11-16:
+    /// "Try not to return null for ::published if you have data.
+    /// Why not just return the calendar period"; such a date answered
+    /// null). Wording that is no ISO date ("17 February 1776") says
+    /// none.
+    pub fn when(text: &str) -> Option<Value> {
+        Value::declared_when(text)
+    }
+
+    /// A text that reads as an ISO date or timestamp, as an instant.
     pub fn instant(text: &str) -> Option<Value> {
         quarb::temporal::parse_iso(text.trim()).map(|(secs, nanos, offset_min)| Value::Instant {
             secs,
@@ -1432,6 +1443,29 @@ impl HeadMeta {
             offset_min,
             calendar: Default::default(),
         })
+    }
+
+    /// What a publication date's value answers as `::published`
+    /// where the source gives the date a value of its own (a
+    /// colophon's, read from a TEI date's `when`, or `from` and `to`).
+    /// One date is what [`HeadMeta::when`] reads: a full ISO date or
+    /// timestamp the instant, a year or a year and month the period.
+    /// An interval (`2015/2022`) is the list of its two ends (the
+    /// user, 2026-11-16: "how about returning a list ::published ->
+    /// @(2015; 2022)"), each read the same way, an open end null in
+    /// its place.
+    pub fn published_of(value: &str) -> Option<Value> {
+        let Some((from, to)) = value.split_once('/') else {
+            return Self::when(value);
+        };
+        let end = |text: &str| -> Value {
+            if text.trim().is_empty() {
+                return Value::Null;
+            }
+            Self::when(text).unwrap_or(Value::Null)
+        };
+        let (from, to) = (end(from), end(to));
+        (!matches!((&from, &to), (Value::Null, Value::Null))).then(|| Value::list(vec![from, to]))
     }
 
     /// A declaration's value: as declared where the source has

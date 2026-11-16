@@ -360,7 +360,7 @@ fn hoisted_header(doc: &atrep::Document, dial: &Dialektos) -> Vec<usize> {
 /// canonicalized through the dialektos, so a colophon authored
 /// under any of its aliases lands on the same name; a name outside
 /// the vocabulary stands as written.
-fn colophons(doc: &atrep::Document) -> Vec<(usize, Vec<(String, String)>)> {
+fn colophons(doc: &atrep::Document) -> Vec<(usize, Vec<ColophonField>)> {
     let kolophon = dialektos::resolve(Path::new("."), "kolophon").ok();
     let canon = |term: &str| -> String {
         kolophon
@@ -392,8 +392,21 @@ fn colophons(doc: &atrep::Document) -> Vec<(usize, Vec<(String, String)>)> {
                     .map(block_text)
                     .collect::<Vec<_>>()
                     .join(" ");
+                let chronos = children.iter().find_map(|child| match child {
+                    ABlock::Paragraph(inlines) => inlines.iter().find_map(|i| match i {
+                        Inline::Monosim { symbol, param, .. } if symbol == CHRONOS => {
+                            Some(param.clone())
+                        }
+                        _ => None,
+                    }),
+                    _ => None,
+                });
                 if !name.is_empty() && !value.trim().is_empty() {
-                    fields.push((name, value));
+                    fields.push(ColophonField {
+                        name,
+                        value,
+                        chronos,
+                    });
                 }
             }
         }
@@ -402,17 +415,37 @@ fn colophons(doc: &atrep::Document) -> Vec<(usize, Vec<(String, String)>)> {
     out
 }
 
+/// The at-aphanes chronos: the normalized value of a date, unseen
+/// beside its wording (`@?-(1776-02-17)17 February 1776`). atrep
+/// 0.3.12 opens a colophon's `datum` with one where the source
+/// gives the date a value (TEI's `when`, or `from` and `to` as an
+/// interval, `2015/2022`).
+const CHRONOS: &str = "?-";
+
+/// One field of a colophon: its canonical name, its text as the
+/// document words it, and the chronos of a date that carries one.
+struct ColophonField {
+    name: String,
+    value: String,
+    chronos: Option<String>,
+}
+
 /// A colophon's fields as declarations of the head: each under its
 /// own name in the record `::head` (`::head:officina`,
-/// `::head:locus`, `::head:datum`), and the first `datum` that
-/// reads as an ISO date or timestamp the curated `::published`, as
-/// a page's or a note's date is (a span such as "2015–2022" is no
-/// instant and stays the text it is).
-fn declare_colophon(head: &mut quarb_text::HeadMeta, colophons: &[(usize, Vec<(String, String)>)]) {
-    for (name, value) in colophons.iter().flat_map(|(_, fields)| fields) {
-        head.declare(name, value);
-        if name == "datum" && head.published.is_none() {
-            head.published = quarb_text::HeadMeta::instant(value);
+/// `::head:locus`, `::head:datum`), the text as the document words
+/// it. The curated `::published` is the first `datum` that says
+/// when: by its chronos where it carries one (an edition's "17
+/// February 1776" with the value 1776-02-17), else by its text
+/// ([`quarb_text::HeadMeta::published_of`]).
+fn declare_colophon(head: &mut quarb_text::HeadMeta, colophons: &[(usize, Vec<ColophonField>)]) {
+    for field in colophons.iter().flat_map(|(_, fields)| fields) {
+        head.declare(&field.name, &field.value);
+        if field.name == "datum" && head.published.is_none() {
+            head.published = field
+                .chronos
+                .as_deref()
+                .and_then(quarb_text::HeadMeta::published_of)
+                .or_else(|| quarb_text::HeadMeta::published_of(&field.value));
         }
     }
 }
@@ -2143,6 +2176,11 @@ fn flat(inlines: &[Inline]) -> String {
             | Inline::EndoDiaphane { content, .. }
             | Inline::EndoAxioma { content, .. } => out.push_str(&flat(content)),
             Inline::VerbatimInline { content, .. } => out.push_str(content),
+            // An aphanes monosim is unseen metadata, never prose, here
+            // as in the main flattening: a date's chronos stood in the
+            // text before its wording ("1776-02-1717 February 1776",
+            // a colophon's datum under atrep 0.3.12).
+            Inline::Monosim { symbol, .. } if is_aphanes(symbol) => {}
             Inline::Monosim { param, .. } => out.push_str(param),
             _ => {}
         }

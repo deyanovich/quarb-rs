@@ -7,8 +7,11 @@
 //! the fields `officina`, `locus` and `datum`, the bibliography's
 //! own names. Here the block is the head's: the record `::head`
 //! carries each field under its name, the curated `::published`
-//! reads a `datum` that is an ISO date, and the text has no node
-//! for it, so no count under any reading moves. (Read as any other
+//! reads a `datum` that is a full ISO date, by the value the date
+//! carries (atrep 0.4: its chronos) or by its text, a year or a year
+//! and month as the calendar period, an interval as the list of its
+//! two ends, and the text has no node for it, so no count under any
+//! reading moves. (Read as any other
 //! embedded block it was a `verbatim` at the document's end, its
 //! field names and values counted as words.)
 
@@ -74,6 +77,28 @@ fn editions(name: &str) -> PathBuf {
         ),
     );
     write("prose.tei.xml", &tei("<p>Published in London.</p>"));
+    // dates whose value is no single day
+    write(
+        "span.tei.xml",
+        &tei("<publisher>Tolstoy Digital</publisher><date from=\"2015\" to=\"2022\"/>"),
+    );
+    write(
+        "open.tei.xml",
+        &tei("<publisher>Tolstoy Digital</publisher><date from=\"2015\"/>"),
+    );
+    write(
+        "days.tei.xml",
+        &tei("<publisher>Tolstoy Digital</publisher>\
+             <date from=\"2015-03-01\" to=\"2022-06-30\">from spring 2015</date>"),
+    );
+    write(
+        "year.tei.xml",
+        &tei("<publisher>Strahan and Cadell</publisher><date>1776</date>"),
+    );
+    write(
+        "month.tei.xml",
+        &tei("<publisher>Strahan and Cadell</publisher><date when=\"1776-02\"/>"),
+    );
     write(
         "smith.docbook.xml",
         "<?xml version=\"1.0\"?>\n<article xmlns=\"http://docbook.org/ns/docbook\" \
@@ -118,16 +143,78 @@ fn the_colophon_is_the_heads() {
             r#"%(officina = "Strahan and Cadell"; locus = "London")"#,
             "{reading}"
         );
-        // a date that is an ISO date is the curated `published`; the
-        // date as the edition prints it is a text of the head alone
+        // a date that is an ISO date is the curated `published`
         assert_eq!(
             qua("^ | ::published", &at("iso.tei.xml", reading)),
             "1776-02-17",
             "{reading}"
         );
+        // and so is the value a date carries beside its wording (TEI's
+        // `when`, the chronos atrep 0.4 opens the field with): the
+        // head's text stays the wording, the value is no part of it
+        // (it read "1776-02-1717 February 1776", and no instant)
         assert_eq!(
-            qua("^ | ::published", &at("printed.tei.xml", reading)),
-            "null",
+            qua(
+                "^ | %(::head:datum; ::published)",
+                &at("printed.tei.xml", reading)
+            ),
+            r#"%(datum = "17 February 1776"; published = 1776-02-17)"#,
+            "{reading}"
+        );
+        // an interval is the list of its two ends (the user,
+        // 2026-11-16), each at the precision it is written at: a year
+        // the period, a full date the instant, an open end null in
+        // its place. The head's text is the wording.
+        assert_eq!(
+            qua(
+                "^ | %(::head:datum; ::published)",
+                &at("span.tei.xml", reading)
+            ),
+            "%(datum = \"2015\u{2013}2022\"; published = @(2015; 2022))",
+            "{reading}"
+        );
+        assert_eq!(
+            qua("^ | ::published | ... | type", &at("span.tei.xml", reading)),
+            "period\nperiod",
+            "{reading}"
+        );
+        assert_eq!(
+            qua("^ | ::published", &at("open.tei.xml", reading)),
+            "@(2015; null)",
+            "{reading}"
+        );
+        assert_eq!(
+            qua(
+                "^ | %(::head:datum; ::published)",
+                &at("days.tei.xml", reading)
+            ),
+            r#"%(datum = "from spring 2015"; published = @(2015-03-01; 2022-06-30))"#,
+            "{reading}"
+        );
+        // a year and month, and a year alone, are no instant: each
+        // answers its calendar period, which prints as it is written
+        // (the user, 2026-11-16: "Try not to return null for
+        // ::published if you have data"; they answered null)
+        assert_eq!(
+            qua(
+                "^ | %(::head:datum; ::published)",
+                &at("month.tei.xml", reading)
+            ),
+            r#"%(datum = "1776-02"; published = 1776-02)"#,
+            "{reading}"
+        );
+        assert_eq!(
+            qua(
+                "^ | %(::published; kind = (::published | type))",
+                &at("year.tei.xml", reading)
+            ),
+            r#"%(published = 1776; kind = "period")"#,
+            "{reading}"
+        );
+        // a period orders against a date as the stretch it is
+        assert_eq!(
+            qua("^ | ::published < 1800-01-01", &at("year.tei.xml", reading)),
+            "true",
             "{reading}"
         );
         // a statement in prose declares nothing
@@ -155,7 +242,14 @@ fn the_colophon_is_no_part_of_an_imported_text() {
     let at = |file: &str, reading: &str| format!("{reading}:{}", dir.join(file).display());
     // the three editions differ in their publication statement alone
     // and read as the same text: no block, no sentence, no word
-    for file in ["printed.tei.xml", "iso.tei.xml", "prose.tei.xml"] {
+    for file in [
+        "printed.tei.xml",
+        "iso.tei.xml",
+        "prose.tei.xml",
+        "span.tei.xml",
+        "month.tei.xml",
+        "year.tei.xml",
+    ] {
         assert_eq!(
             qua(r#"//* | :name @| unique @| join(" ")"#, &at(file, "text")),
             "section paragraph",

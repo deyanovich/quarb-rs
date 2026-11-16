@@ -440,14 +440,9 @@ fn document_property(
                     .map(|t| Value::Str(t.to_string()))
                     .collect(),
             ),
-            "published" | "modified" => quarb::temporal::parse_iso(text.trim())
-                .map(|(secs, nanos, offset_min)| Value::Instant {
-                    secs,
-                    nanos,
-                    offset_min,
-                    calendar: Default::default(),
-                })
-                .unwrap_or(Value::Str(text)),
+            // an ISO date the instant, a year or a year and month the
+            // calendar period; other wording stays the text it is
+            "published" | "modified" => Value::declared_when(&text).unwrap_or(Value::Str(text)),
             _ => Value::Str(text),
         });
     }

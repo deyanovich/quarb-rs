@@ -200,8 +200,8 @@ pub fn head_with_decoding(bytes: &[u8], decoding: &SourceDecoding) -> Result<Hea
                             }
                         }
                         "dc:language" => h.lang = Some(value),
-                        "dcterms:created" => h.published = HeadMeta::instant(&value),
-                        "dcterms:modified" => h.modified = HeadMeta::instant(&value),
+                        "dcterms:created" => h.published = HeadMeta::when(&value),
+                        "dcterms:modified" => h.modified = HeadMeta::when(&value),
                         _ => {}
                     }
                 }

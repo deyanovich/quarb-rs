@@ -90,7 +90,7 @@ struct Cli {
     #[arg(long, value_name = "ISO")]
     now: Option<String>,
 
-    /// Pin the seed of the session's random values (`random()`,
+    /// Pin the seed of the session's random values (`rnd`,
     /// `sample`, `shuffle`): a whole number from 0. Every line then
     /// answers as a run with that seed, on every machine and in
     /// every release. Default: each line draws its own.

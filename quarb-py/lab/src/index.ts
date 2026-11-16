@@ -20,30 +20,13 @@ import {
   StringStream,
   LanguageSupport
 } from '@codemirror/language';
+import { COMMANDS } from './commands';
 
-// Pipeline functions, aggregates, temporal/quantity/encoding
-// built-ins, and the reuse keywords — the stdlib surface.
-const KEYWORDS = new Set([
-  // aggregates and pipeline
-  'count', 'sum', 'product', 'min', 'max', 'mean', 'avg', 'median',
-  'stddev', 'variance', 'sort', 'unique', 'reverse', 'first', 'last',
-  'join', 'ungroup', 'window', 'shift', 'group', 'top', 'bottom',
-  'sort_by', 'unique_by', 'min_by', 'max_by',
-  // scalar
-  'upper', 'lower', 'trim', 'chars', 'wc', 'lines', 'words', 'split',
-  'round', 'floor', 'ceil', 'abs', 'json', 'xml', 'record', 'rec',
-  'default',
-  // temporal
-  'datetime', 'epoch', 'isoformat', 'year', 'month', 'day', 'hour',
-  'minute', 'second', 'weekday', 'date', 'seconds', 'minutes', 'hours',
-  'days', 'duration', 'td', 'strptime', 'tp', 'isodate', 'isomonth',
-  'isoweek', 'strftime', 'tfmt', 'now',
-  // quantity, encoding, shell
-  'quantity', 'convert', 'sh', 'sha256', 'base64', 'base64url',
-  'base32', 'crockford32', 'hex', 'decode', 'dec',
-  // reuse / logic
-  'def', 'macro', 'not', 'and', 'or'
-]);
+// The words highlighted as keywords: every command of the built-in
+// library and its aliases, generated from the engine's command
+// inventory (commands.ts; an alias and a command are declared there
+// once), and the two words that open a definition.
+const KEYWORDS = new Set<string>([...COMMANDS, 'def', 'macro']);
 
 interface State {
   // inside a string; the closing quote, or 0
@@ -53,14 +36,16 @@ interface State {
 // Longest-match operator table. Order matters: try longer sigils
 // before their prefixes (`:::` before `::`, `<=>?` before `<=>`).
 const OPERATORS = [
-  ';;;', ':::', '::;', '::', // adapter-meta / core-meta / property projections (::; = deprecated alias of ;;;)
-  '<=>?', '<=>', // correlation, outer correlation
-  '~>', '<~', '->', '<-', // resolve / reverse / link / reverse-link
-  '@|', '|', // pipes
-  '%.', '@.', '$*', '$.', '$$', '$-', // register / record / context refs
-  '&&', '||', '!', // logic
-  '=~', '?=', '>=', '<=', '!=', '=', '<', '>', // comparisons
-  '//', '/', // axes
+  ':::', '::', // the colon ladder: trait keys, properties
+  '<=>*?', '<=>*', '<=>?', '<=>', // joins: every witness, outer
+  '-->', '<--', '=>', '->', '<-', '--', // cross-references, the value match, links
+  '...?', '...', // spread
+  '@|', '$|', '|', // pipes
+  '%.', '@.', '$.', '$$', '$-', // register / record / context refs
+  '??', '&&', '||', // null default, logic
+  '!==', '!=', '==', '!', // the pattern comparison, inequality, negation
+  '?=', '>=', '<=', '=', '<', '>', // comparisons
+  '//', '/', '\\\\', '\\', // axes
   '+', '{', '}', '?' // quantifiers / reach
 ];
 
@@ -120,11 +105,6 @@ function tokenizer(stream: StringStream, state: State): string | null {
     }
     return 'number';
   }
-
-  // A regex literal after =~ (best effort): a `/`…`/`flags run with
-  // no spaces reads as a regex; otherwise `/` is the axis operator.
-  // Handled below via the operator table; regexes highlight as
-  // strings only when the pattern is single-token.
 
   // Identifiers: keywords vs plain names (property/edge names).
   if (/[A-Za-z_]/.test(ch)) {

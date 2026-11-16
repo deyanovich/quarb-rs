@@ -1363,8 +1363,8 @@ impl Lower {
                                     self.head.tag(t);
                                 }
                             }
-                            "creatim" => self.head.published = HeadMeta::instant(&value),
-                            "revtim" => self.head.modified = HeadMeta::instant(&value),
+                            "creatim" => self.head.published = HeadMeta::when(&value),
+                            "revtim" => self.head.modified = HeadMeta::when(&value),
                             _ => {}
                         }
                     }

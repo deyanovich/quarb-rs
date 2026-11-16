@@ -543,7 +543,7 @@ impl<'a> Lower<'a> {
                         match name.as_str() {
                             "title" => self.head.title = Some(text),
                             "author" => self.head.author = Some(text),
-                            _ => self.head.published = HeadMeta::instant(&text),
+                            _ => self.head.published = HeadMeta::when(&text),
                         }
                     }
                 }

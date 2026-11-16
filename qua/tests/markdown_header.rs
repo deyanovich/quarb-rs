@@ -108,3 +108,77 @@ fn a_folder_of_notes_answers_by_what_each_declares() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A declared date at reduced precision answers its calendar period
+/// (the user, 2026-11-16: "Try not to return null for ::published if
+/// you have data. Why not just return the calendar period"): a year,
+/// or a year and a month, where it answered null. So does a page's
+/// and a LaTeX source's.
+#[test]
+fn a_year_or_a_month_is_the_period() {
+    let dir = std::env::temp_dir().join(format!("quarb-notes-when-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let write = |file: &str, text: &str| std::fs::write(dir.join(file), text).unwrap();
+    // YAML reads a bare year as a number
+    write(
+        "year.md",
+        "---\ntitle: Common Sense\ndate: 1776\n---\n\nText.\n",
+    );
+    write(
+        "month.md",
+        "---\ntitle: Common Sense\ndate: 1776-01\nupdated: 1776-02\n---\n\nText.\n",
+    );
+    write(
+        "day.md",
+        "---\ntitle: Common Sense\ndate: 1776-01-10\n---\n\nText.\n",
+    );
+    // wording that is no ISO date, and a number that is no year
+    write(
+        "prose.md",
+        "---\ntitle: Common Sense\ndate: 10 January 1776\n---\n\nText.\n",
+    );
+    write(
+        "number.md",
+        "---\ntitle: Common Sense\ndate: 12\n---\n\nText.\n",
+    );
+    write(
+        "page.html",
+        "<html><head><title>Common Sense</title>\
+         <meta property=\"article:published_time\" content=\"1776-01\"></head>\
+         <body><p>Text.</p></body></html>",
+    );
+    write(
+        "paper.tex",
+        "\\documentclass{article}\n\\title{Common Sense}\n\\date{1776}\n\
+         \\begin{document}\nText.\n\\end{document}\n",
+    );
+    let at = |file: &str| format!("text:{}", dir.join(file).display());
+    let read = |file: &str| lines(&["^ | %(::published; kind = (::published | type))", &at(file)]);
+    assert_eq!(read("year.md"), [r#"%(published = 1776; kind = "period")"#]);
+    assert_eq!(
+        read("month.md"),
+        [r#"%(published = 1776-01; kind = "period")"#]
+    );
+    assert_eq!(
+        read("day.md"),
+        [r#"%(published = 1776-01-10; kind = "instant")"#]
+    );
+    assert_eq!(read("prose.md"), [r#"%(published = null; kind = "null")"#]);
+    assert_eq!(read("number.md"), [r#"%(published = null; kind = "null")"#]);
+    assert_eq!(
+        read("page.html"),
+        [r#"%(published = 1776-01; kind = "period")"#]
+    );
+    assert_eq!(
+        read("paper.tex"),
+        [r#"%(published = 1776; kind = "period")"#]
+    );
+    // the same reading for the date a note was changed
+    assert_eq!(lines(&["^ | ::modified", &at("month.md")]), ["1776-02"]);
+    // a period orders against a date as the stretch it is
+    assert_eq!(
+        lines(&["^ | ::published < 1776-07-04", &at("year.md")]),
+        ["true"]
+    );
+}

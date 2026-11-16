@@ -271,16 +271,12 @@ fn declare_ld(h: &mut HeadMeta, name: &str, v: &serde_json::Value) {
     }
 }
 
-/// An ISO-8601 timestamp as an instant; a bare date counts too —
-/// a publication date is a moment on the timeline, not a name.
+/// When a page's declared date says: an ISO-8601 timestamp or a bare
+/// date the instant (a publication date is a moment on the timeline,
+/// not a name), a year or a year and month the calendar period
+/// ([`HeadMeta::when`]).
 pub fn instant(s: &str) -> Option<quarb::Value> {
-    let s = s.trim();
-    quarb::temporal::parse_iso(s).map(|(secs, nanos, offset_min)| quarb::Value::Instant {
-        secs,
-        nanos,
-        offset_min,
-        calendar: Default::default(),
-    })
+    HeadMeta::when(s)
 }
 
 /// The event stream `parse` builds from — exposed for testing and

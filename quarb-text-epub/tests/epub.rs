@@ -227,6 +227,27 @@ fn the_package_metadata_is_the_head() {
     assert_eq!(values(&m, "^ | %(:traits)").len(), 1);
     // the text is the spine's, as before
     assert_eq!(values(&m, "//section::lemma"), ["The war"]);
+    // a date that names its year alone, the commonest date a book
+    // carries, is that year: the calendar period (it answered null)
+    let year = DECLARED.replace("<dc:date>1900-01-01</dc:date>", "<dc:date>1900</dc:date>");
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    {
+        let mut z = zip::ZipWriter::new(&mut cursor);
+        let o = zip::write::SimpleFileOptions::default();
+        for (name, body) in [
+            ("META-INF/container.xml", CONTAINER),
+            ("OEBPS/content.opf", year.as_str()),
+            ("OEBPS/text/ch1.xhtml", CH1),
+        ] {
+            z.start_file(name, o).unwrap();
+            z.write_all(body.as_bytes()).unwrap();
+        }
+        z.finish().unwrap();
+    }
+    let m = quarb_text_epub::parse(&cursor.into_inner()).unwrap();
+    assert_eq!(values(&m, "::published"), ["1900"]);
+    assert_eq!(values(&m, "::published | type"), ["period"]);
+    assert_eq!(values(&m, r#"::head:"dc:date""#), ["1900"]);
     // a package that declares nothing
     let bare = quarb_text_epub::parse(&epub()).unwrap();
     assert_eq!(values(&bare, "::head"), [""]);
