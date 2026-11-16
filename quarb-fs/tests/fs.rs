@@ -115,12 +115,16 @@ fn no_match_is_empty() {
 }
 
 #[test]
-fn unsupported_operator_errors() {
+fn an_unknown_command_is_refused_by_name() {
     let dir = sample_tree();
     let adapter = FsAdapter::new(dir.path()).unwrap();
-    // an unknown pipeline command reports "not yet supported"
+    // a word that names no command is a parse error that says so
     let err = quarb::run("//file @| bogus", &adapter).unwrap_err();
-    assert_eq!(err.kind(), quarb::error::Kind::Unsupported);
+    assert_eq!(err.kind(), quarb::error::Kind::Parse);
+    assert!(
+        err.to_string().contains("'bogus' is not a command"),
+        "{err}"
+    );
 }
 
 #[test]

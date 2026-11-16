@@ -32,7 +32,7 @@ pub fn signatures(name: &str) -> Option<&'static [crate::syntax::signature::Sign
             })
             .collect()
     })
-    .get(name)
+    .get(named(name))
     .map(Vec::as_slice)
 }
 
@@ -77,7 +77,7 @@ pub fn declares_long(written: &str, long: &str) -> bool {
             }
             out
         })
-        .get(written)
+        .get(named(written))
         .is_some_and(|longs| longs.iter().any(|l| l == long))
 }
 
@@ -90,6 +90,11 @@ pub fn takes_of_by_signature(name: &str) -> Option<bool> {
 #[derive(Debug, Clone)]
 pub struct Entry {
     pub name: String,
+    /// The other names the command answers to, each written as the
+    /// name is (the `aliases` cell: names separated by spaces). The
+    /// one place an alias is declared (ruling 2026-11-15): the
+    /// registry, the parser and this manual all read it here.
+    pub aliases: Vec<String>,
     pub library: String,
     pub pipes: String,
     pub synopsis: String,
@@ -107,12 +112,68 @@ impl Entry {
     /// The name as written in a query: `pos` of the `morph` library
     /// is `morph:pos`.
     pub fn written(&self) -> String {
+        self.in_library(&self.name)
+    }
+
+    /// The aliases as written in a query, in the cell's order.
+    pub fn written_aliases(&self) -> Vec<String> {
+        self.aliases.iter().map(|a| self.in_library(a)).collect()
+    }
+
+    fn in_library(&self, name: &str) -> String {
         if self.library.is_empty() {
-            self.name.clone()
+            name.to_string()
         } else {
-            format!("{}:{}", self.library, self.name)
+            format!("{}:{name}", self.library)
         }
     }
+}
+
+/// The aliases of the inventory, read once: each alias as written to
+/// the command whose row declares it, and each command to its
+/// aliases.
+struct Aliases {
+    command: std::collections::HashMap<String, String>,
+    of: std::collections::HashMap<String, Vec<String>>,
+}
+
+fn alias_tables() -> &'static Aliases {
+    static TABLES: std::sync::OnceLock<Aliases> = std::sync::OnceLock::new();
+    TABLES.get_or_init(|| {
+        let mut tables = Aliases {
+            command: Default::default(),
+            of: Default::default(),
+        };
+        for e in entries() {
+            let aliases = e.written_aliases();
+            if aliases.is_empty() {
+                continue;
+            }
+            for a in &aliases {
+                tables.command.insert(a.clone(), e.written());
+            }
+            tables.of.insert(e.written(), aliases);
+        }
+        tables
+    })
+}
+
+/// The command an alias names (`avg` is `mean`); `None` for a word
+/// no row declares as an alias, a command's own name included.
+pub fn alias_of(name: &str) -> Option<&'static str> {
+    alias_tables().command.get(name).map(String::as_str)
+}
+
+/// The aliases of a command, as written, in its row's order; none
+/// for most.
+pub fn aliases_of(name: &str) -> &'static [String] {
+    alias_tables().of.get(name).map_or(&[], Vec::as_slice)
+}
+
+/// The name of the row that answers for a word: the command an
+/// alias names, the word itself otherwise.
+fn named(name: &str) -> &str {
+    alias_of(name).unwrap_or(name)
 }
 
 /// The inventory's rows, in the file's order (comments skipped).
@@ -137,6 +198,10 @@ pub fn entries() -> Vec<Entry> {
         };
         out.push(Entry {
             name: col("name"),
+            aliases: col("aliases")
+                .split_whitespace()
+                .map(str::to_string)
+                .collect(),
             library: col("library"),
             pipes: col("pipes"),
             synopsis: col("synopsis"),
@@ -153,8 +218,10 @@ pub fn entries() -> Vec<Entry> {
     out
 }
 
-/// The entry of a command, as written (`upper`, `morph:pos`).
+/// The entry of a command, as written (`upper`, `morph:pos`); an
+/// alias is answered by the row that declares it.
 pub fn entry(name: &str) -> Option<Entry> {
+    let name = named(name);
     entries().into_iter().find(|e| e.written() == name)
 }
 
@@ -172,13 +239,28 @@ pub fn is_scalar_kind(name: &str) -> bool {
                 .map(|e| e.written())
                 .collect()
         })
-        .contains(name)
+        .contains(named(name))
 }
 
-/// The manual page of one command: its line, the call forms, the
-/// pipes, the typed signature, the result on a null topic, the
-/// note and the spec section.
-pub fn page(e: &Entry, ru: bool) -> String {
+/// The manual page of a command asked for by `asked`. An alias is
+/// told as one, in its own line, and answered by the page of the
+/// command it names (`man product` opens "product — alias of prod"
+/// and prints the page of `prod`, which names its aliases; the
+/// user's word of 2026-11-15). The line is generic: an alias is
+/// declared in its command's row and has no text of its own.
+pub fn page(asked: &str, e: &Entry, ru: bool) -> String {
+    let name = e.written();
+    if asked != name {
+        let said = if ru { "псевдоним" } else { "alias of" };
+        return format!("{asked} — {said} {name}\n\n{}", own_page(e, ru));
+    }
+    own_page(e, ru)
+}
+
+/// The page of a command's own row: its line, its aliases, the call
+/// forms, the pipes, the typed signature, the result on a null
+/// topic, the note and the spec section.
+fn own_page(e: &Entry, ru: bool) -> String {
     let (line, note) = if ru {
         (&e.ru, &e.note_ru)
     } else {
@@ -190,6 +272,7 @@ pub fn page(e: &Entry, ru: bool) -> String {
             s.push_str(&format!("  {label:<9} {text}\n"));
         }
     };
+    row(&mut s, "aliases", &e.written_aliases().join(" "));
     row(&mut s, "synopsis", &e.synopsis);
     row(&mut s, "pipes", &e.pipes);
     row(&mut s, "type", &e.typed);
@@ -200,22 +283,33 @@ pub fn page(e: &Entry, ru: bool) -> String {
 }
 
 /// Every command, one per line with its one-liner; `pipe` keeps the
-/// commands of one pipe (`|`, `@|`, `$|`).
+/// commands of one pipe (`|`, `@|`, `$|`). An alias has its own line
+/// under its command, so a name is found whichever way it is
+/// written.
 pub fn list(pipe: Option<&str>, ru: bool) -> String {
-    let rows: Vec<Entry> = entries()
+    let said = if ru { "псевдоним" } else { "alias of" };
+    let mut lines: Vec<(String, String)> = Vec::new();
+    for e in entries()
         .into_iter()
         .filter(|e| pipe.is_none_or(|p| e.pipes.split_whitespace().any(|x| x == p)))
-        .collect();
-    let width = rows
+    {
+        let name = e.written();
+        let aliases = e.written_aliases();
+        lines.push((name.clone(), if ru { e.ru } else { e.en }));
+        for alias in aliases {
+            lines.push((alias, format!("{said} {name}")));
+        }
+    }
+    let width = lines
         .iter()
-        .map(|e| e.written().chars().count())
+        .map(|(name, _)| name.chars().count())
         .max()
         .unwrap_or(0);
-    rows.iter()
-        .map(|e| {
-            let name = e.written();
+    lines
+        .iter()
+        .map(|(name, line)| {
             let pad = " ".repeat(width - name.chars().count());
-            format!("{name}{pad}  {}", if ru { &e.ru } else { &e.en })
+            format!("{name}{pad}  {line}")
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -278,9 +372,14 @@ impl Glyph {
         enum Part {
             Run(String),
             /// A variable part: one character at least; a count
-            /// (`⟨N⟩`, `⟨n⟩`, `⟨k⟩`, `⟨m⟩`) is digits.
+            /// (`⟨N⟩`, `⟨n⟩`, `⟨k⟩`, `⟨m⟩`) is digits, and a part
+            /// the index writes as an example number (`⟨5⟩` of
+            /// `⟨5⟩_⟨km⟩`) opens with a digit: `t_score` is a
+            /// command's name, no quantity (`man sort_by` printed
+            /// the quantity literal's page under its own).
             Var {
                 digits: bool,
+                number: bool,
             },
             /// An open body (`␣`): anything, nothing included.
             Body,
@@ -292,7 +391,8 @@ impl Glyph {
                 ('⟨', None) => name = Some(String::new()),
                 ('⟩', Some(n)) => {
                     let digits = matches!(n.as_str(), "N" | "n" | "k" | "m");
-                    parts.push(Part::Var { digits });
+                    let number = !n.is_empty() && n.chars().all(|c| c.is_ascii_digit());
+                    parts.push(Part::Var { digits, number });
                     name = None;
                 }
                 (c, Some(n)) => n.push(c),
@@ -318,13 +418,14 @@ impl Glyph {
                     .map(|(at, _)| at)
                     .chain([text.len()])
                     .any(|at| fits(rest, &text[at..])),
-                Some((Part::Var { digits }, rest)) => {
+                Some((Part::Var { digits, number }, rest)) => {
                     let mut ends = text
                         .char_indices()
                         .map(|(at, _)| at)
                         .skip(1)
                         .chain([text.len()]);
                     !text.is_empty()
+                        && (!*number || text.starts_with(|c: char| c.is_ascii_digit()))
                         && ends.any(|at| {
                             (!*digits || text[..at].chars().all(|c| c.is_ascii_digit()))
                                 && fits(rest, &text[at..])
@@ -574,8 +675,8 @@ pub fn man(args: &[&str]) -> Result<String, String> {
             let rows = glyphs_of(name);
             match (entry(name), rows.is_empty()) {
                 // a reading that is a command and a glyph (`#`, `%`)
-                (Some(e), false) => Ok(format!("{}\n\n{}", page(&e, ru), pages(&rows))),
-                (Some(e), true) => Ok(page(&e, ru)),
+                (Some(e), false) => Ok(format!("{}\n\n{}", page(name, &e, ru), pages(&rows))),
+                (Some(e), true) => Ok(page(name, &e, ru)),
                 (None, false) => Ok(pages(&rows)),
                 (None, true) => Err(unknown(name, ru)),
             }
@@ -624,7 +725,7 @@ fn unknown(name: &str, ru: bool) -> String {
     // least: `s` is in every other word) that is part of it
     let near: Vec<String> = entries()
         .iter()
-        .map(Entry::written)
+        .flat_map(|e| std::iter::once(e.written()).chain(e.written_aliases()))
         .filter(|n| {
             n.to_lowercase().contains(&name.to_lowercase())
                 || (n.chars().count() >= 3 && name.to_lowercase().contains(&n.to_lowercase()))
@@ -687,7 +788,7 @@ pub fn operand_bound(name: &str) -> Option<usize> {
                 })
                 .collect()
         })
-        .get(name)
+        .get(named(name))
         .copied()
         .flatten()
 }
@@ -698,11 +799,14 @@ pub fn synopsis(name: &str) -> Option<String> {
 }
 
 /// The registry's own listing as TSV (`qua --commands`): name,
-/// kind, pipes, layer, the result on a null topic, and the one
-/// line, for the documentation gate to diff against the inventory.
+/// aliases, kind, pipes, layer, the result on a null topic, and the
+/// one line, for the documentation gate to diff against the
+/// inventory. The aliases are the vendored inventory's own cell (the
+/// registry holds no table of them), so that column tells whether
+/// the binary was built from the inventory it is compared with.
 pub fn registry_tsv() -> String {
     use crate::syntax::registry::{Agg, Layer, OnNull, SPECS};
-    let mut s = String::from("name\tkind\tpipes\tlayer\tonnull\tdoc\n");
+    let mut s = String::from("name\taliases\tkind\tpipes\tlayer\tonnull\tdoc\n");
     for spec in SPECS {
         let kind = match (spec.scalar, spec.agg) {
             (true, None) => "scalar",
@@ -757,8 +861,9 @@ pub fn registry_tsv() -> String {
             .to_string()
         });
         s.push_str(&format!(
-            "{}\t{kind}\t{}\t{layer}\t{onnull}\t{}\n",
+            "{}\t{}\t{kind}\t{}\t{layer}\t{onnull}\t{}\n",
             spec.name,
+            aliases_of(spec.name).join(" "),
             pipes.join(" "),
             spec.doc
         ));
@@ -828,6 +933,75 @@ mod tests {
                 spec.name
             );
         }
+        // an alias is declared once, on its command's row, and names
+        // no command: no row and no registry entry carries its name
+        let mut declared = std::collections::BTreeSet::new();
+        for e in entries() {
+            for alias in e.written_aliases() {
+                assert!(!names.contains(&alias), "an alias and a command: {alias}");
+                assert!(
+                    declared.insert(alias.clone()),
+                    "an alias declared twice: {alias}"
+                );
+                assert_eq!(alias_of(&alias), Some(e.written().as_str()));
+                assert!(
+                    !crate::syntax::registry::SPECS
+                        .iter()
+                        .any(|s| s.name == alias),
+                    "an alias with a registry entry of its own: {alias}"
+                );
+            }
+        }
+        assert!(declared.contains("avg") && declared.contains("wordcount"));
+    }
+
+    #[test]
+    fn an_alias_is_read_from_its_commands_row() {
+        // the command's page names its aliases
+        let prod = man(&["prod"]).unwrap();
+        assert!(prod.starts_with("prod — "), "{prod}");
+        assert!(prod.contains("\n  aliases   product\n"), "{prod}");
+        // the alias says what it is and prints that page
+        let product = man(&["product"]).unwrap();
+        assert_eq!(product, format!("product — alias of prod\n\n{prod}"));
+        let ru = man(&["--ru", "product"]).unwrap();
+        assert!(ru.starts_with("product — псевдоним prod\n\n"), "{ru}");
+        // a command without one has no such row
+        assert!(!man(&["upper"]).unwrap().contains("aliases"));
+        // the list has a line for the alias under its command
+        let all = man(&[]).unwrap();
+        let lines: Vec<&str> = all.lines().collect();
+        let at = lines.iter().position(|l| l.starts_with("mean ")).unwrap();
+        assert!(lines[at + 1].starts_with("avg "), "{}", lines[at + 1]);
+        assert!(
+            lines[at + 1].ends_with("  alias of mean"),
+            "{}",
+            lines[at + 1]
+        );
+        // and on its command's pipe alone
+        let aggs = man(&["@|"]).unwrap();
+        assert!(aggs.lines().any(|l| l.starts_with("avg ")), "{aggs}");
+        assert!(!aggs.lines().any(|l| l.starts_with("wordcount ")), "{aggs}");
+        // the alias has its command's signature, bound and kind
+        assert_eq!(synopsis("tfmt"), synopsis("strftime"));
+        assert_eq!(operand_bound("tfmt"), operand_bound("strftime"));
+        assert_eq!(operand_bound("tfmt"), Some(3));
+        assert!(is_scalar_kind("wordcount") && !is_scalar_kind("avg"));
+        assert_eq!(takes_of_by_signature("avg"), Some(true));
+        // a name with an underscore is no quantity literal
+        assert_eq!(man(&["tscore"]).unwrap().lines().count(), 10);
+        assert!(!man(&["sort_by"]).unwrap().contains("quantity literal"));
+        assert!(man(&["5_km"]).unwrap().contains("quantity literal"));
+        assert!(man(&["1.5_km"]).unwrap().contains("quantity literal"));
+        assert!(man(&["1_000"]).unwrap().contains("digit grouping"));
+        // a near miss is told the alias too
+        let e = man(&["stdde"]).unwrap_err();
+        assert!(e.contains("stddev"), "{e}");
+        // the registry's listing carries the cell
+        let tsv = registry_tsv();
+        assert!(tsv.starts_with("name\taliases\tkind\t"), "{tsv}");
+        assert!(tsv.lines().any(|l| l.starts_with("mean\tavg\treducing\t")));
+        assert!(!tsv.lines().any(|l| l.starts_with("avg\t")));
     }
 
     #[test]
@@ -878,7 +1052,7 @@ mod tests {
         assert!(
             registry_tsv()
                 .lines()
-                .any(|l| l.starts_with("tree\tcontext\t| @|\tnode\t"))
+                .any(|l| l.starts_with("tree\t\tcontext\t| @|\tnode\t"))
         );
     }
 }

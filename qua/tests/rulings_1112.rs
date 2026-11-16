@@ -85,8 +85,8 @@ fn a_reducer_s_by_after_the_aggregation_pipe_is_refused() {
     );
     // every reducer that takes the option, and under a fold as well
     for reducer in [
-        "count", "sum", "product", "min", "max", "mean", "avg", "median", "std", "stddev", "var",
-        "variance",
+        "count", "sum", "prod", "product", "min", "max", "mean", "avg", "median", "std", "stddev",
+        "var", "variance",
     ] {
         let e = refused(&format!("/novels/* @| {reducer}(--by=::author)"));
         assert!(e.contains(WHY), "{reducer}: {e}");

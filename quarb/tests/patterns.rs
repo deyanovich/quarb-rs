@@ -121,12 +121,17 @@ fn group_predicates_round_trip() {
 #[test]
 fn pattern_pushes_round_trip() {
     for q in [
-        "/a(->e .($-::qty))+ | @. | product",
+        "/a(->e .($-::qty))+ | @. | prod",
         "/a(->e .w($-))+",
         "(/employees .($-))+?",
     ] {
         assert_eq!(canon(q), q, "not a fixpoint: {q}");
     }
+    // an alias is written back under the command's name
+    assert_eq!(
+        canon("/a(->e .($-::qty))+ | @. | product"),
+        "/a(->e .($-::qty))+ | @. | prod"
+    );
     // a glued named push after a named hop stays part of the name
     // (the /x.rs(...) rule): "e.q" becomes the matcher and the
     // parenthesized rest cannot parse as a group — the spaced form

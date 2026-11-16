@@ -731,16 +731,13 @@ pub fn scalar_names() -> Vec<&'static str> {
 /// are enumerated separately by [`keyed_names`]).
 pub fn aggregate_names() -> Vec<&'static str> {
     use crate::syntax::registry::Agg;
-    crate::syntax::registry::SPECS
-        .iter()
-        .filter(|s| {
-            matches!(
-                s.agg,
-                Some(Agg::Reducing | Agg::Context | Agg::Association { .. })
-            )
-        })
-        .map(|s| s.name)
-        .collect()
+    crate::syntax::registry::names_where(|s| {
+        matches!(
+            s.agg,
+            Some(Agg::Reducing | Agg::Context | Agg::Association { .. })
+        )
+    })
+    .collect()
 }
 
 /// The keyed-aggregate registry: `sort_by`, `group`, and friends.
@@ -942,14 +939,28 @@ pub fn apply_scalar(
 
 /// The numeric commands: what they do with a value that is no number
 /// is one rule ([`apply_scalar`]).
-const NUMERIC_COMMANDS: [&str; 10] = [
-    "round", "floor", "ceil", "abs", "log", "log2", "log10", "exp", "sqrt", "pow",
+const NUMERIC_COMMANDS: [&str; 13] = [
+    "round",
+    "floor",
+    "ceil",
+    "abs",
+    "neg",
+    "factorial",
+    "choose",
+    "log",
+    "log2",
+    "log10",
+    "exp",
+    "sqrt",
+    "pow",
 ];
 
 /// What a numeric command takes, for the warning.
 fn numeric_takes(name: &str) -> &'static str {
     match name {
-        "round" | "floor" | "ceil" | "abs" => "a number or a quantity",
+        "round" | "floor" | "ceil" | "abs" | "neg" => "a number or a quantity",
+        "factorial" => "a non-negative integer up to 20",
+        "choose" => "a non-negative integer",
         _ => "a number",
     }
 }
@@ -1273,15 +1284,15 @@ fn apply_scalar_inner(
         "rtrim" => vec![Value::Str(text.trim_end().to_string())],
         // `cc` counts codepoints (né `chars`, the pre-0.25 alias);
         // `bc` counts UTF-8 bytes; `wc` counts words.
-        // (each with its long alias, `char-count` for `gc`: what
+        // (each with its long alias, `charcount` for `gc`: what
         // the eye calls a character)
-        "cc" | "codepoint-count" => vec![Value::Int(text.chars().count() as i64)],
+        "cc" => vec![Value::Int(text.chars().count() as i64)],
         // `gc` counts grapheme clusters (UAX #29): what the eye
         // counts — a stressed vowel with its acute is one.
-        "gc" | "char-count" => vec![Value::Int(text.graphemes(true).count() as i64)],
-        "bc" | "byte-count" => vec![Value::Int(text.len() as i64)],
-        "wc" | "word-count" => vec![Value::Int(text.split_whitespace().count() as i64)],
-        "lc" | "line-count" => vec![Value::Int(text.lines().count() as i64)],
+        "gc" => vec![Value::Int(text.graphemes(true).count() as i64)],
+        "bc" => vec![Value::Int(text.len() as i64)],
+        "wc" => vec![Value::Int(text.split_whitespace().count() as i64)],
+        "lc" => vec![Value::Int(text.lines().count() as i64)],
         // UAX #29 sentence segmentation (unicode-segmentation):
         // `sentences` splits (each segment trimmed, empties
         // dropped), `sc` counts the same segments.
@@ -1289,7 +1300,7 @@ fn apply_scalar_inner(
             .into_iter()
             .map(|t| Value::Str(t.to_string()))
             .collect(),
-        "sc" | "sentence-count" => {
+        "sc" => {
             vec![Value::Int(sentences_of(&text).len() as i64)]
         }
         // `substr(a..b)` — the range predicate's spellings, on
@@ -1480,12 +1491,6 @@ fn apply_scalar_inner(
                 }
             }
         }
-        "strip" => {
-            if matches!(topic, Value::Null) {
-                return vec![Value::Null];
-            }
-            vec![Value::Str(crate::value::accents::strip(&text))]
-        }
         // `stem(LANG)` — the Snowball stem (the rust-stemmers
         // crate's algorithms); a language it does not ship is
         // refused naming the shipped ones.
@@ -1656,10 +1661,37 @@ fn apply_scalar_inner(
                 }
             }
         }
-        "split" => {
-            let sep = arg_str(call, 0, ",");
-            text.split(sep).map(|s| Value::Str(s.to_string())).collect()
-        }
+        // `split(sep)`: the pieces between a separator. With no
+        // separator the text is cut at its whitespace, as a shell
+        // cuts its arguments (the user's word of 2026-11-15: the
+        // bare `split` cut at commas, a default no page stated).
+        // With an empty one, the characters, a thread each
+        // (`split("")` answered an empty text before the first
+        // character and after the last).
+        "split" => match call.args.first() {
+            None => text
+                .split_whitespace()
+                .map(|s| Value::Str(s.to_string()))
+                .collect(),
+            Some(_) => {
+                let sep = arg_str(call, 0, "");
+                if sep.is_empty() {
+                    text.graphemes(true)
+                        .map(|g| Value::Str(g.to_string()))
+                        .collect()
+                } else {
+                    text.split(sep).map(|s| Value::Str(s.to_string())).collect()
+                }
+            }
+        },
+        // `chars`: the characters of the text as a list, each a
+        // grapheme cluster, what `gc` counts (the same word:
+        // `"test" | chars` is `@("t"; "e"; "s"; "t")`).
+        "chars" => vec![Value::list(
+            text.graphemes(true)
+                .map(|g| Value::Str(g.to_string()))
+                .collect(),
+        )],
 
         // Hashing and encodings (RFC 4648; SHA-256 per FIPS
         // 180-4), over the topic's text bytes.
@@ -1678,7 +1710,7 @@ fn apply_scalar_inner(
         // encodings: the parser validated the scheme, so a bad one
         // is unreachable here. Malformed input or bytes that are
         // not UTF-8 become null (propagating — strings are text).
-        "decode" | "dec" => {
+        "decode" => {
             let scheme = arg_str(call, 0, "");
             // Structured formats parse to a value (record/list/
             // scalar); the byte encodings decode to text. Malformed
@@ -2019,7 +2051,7 @@ fn apply_scalar_inner(
         // `strftime(fmt; LOCALE; CALENDAR)` — a third argument names
         // the calendar whose fields `%Y %m %d %B %b %j` write (spec:
         // Calendars); without it, the topic's own reading.
-        "strftime" | "tfmt" => {
+        "strftime" => {
             let fmt = arg_str(call, 0, "%Y-%m-%dT%H:%M:%S").to_string();
             let Some(names) = date_names(call) else {
                 return vec![Value::Null];
@@ -2096,7 +2128,7 @@ fn apply_scalar_inner(
         // precedes FROM; both take the instant coercion, null when
         // either does not. The topic fills FROM, the option names
         // TO: `::born | duration(--to=::died)`.
-        "duration" | "td"
+        "duration"
             if call.args.iter().any(
                 |a| matches!(a, Arg::Opt { name, .. } if name == "--to" || name == "--from"),
             ) =>
@@ -2142,7 +2174,7 @@ fn apply_scalar_inner(
         // (spec: Duration): a time quantity passes through, unit
         // text in a time unit keeps its written unit, ISO-8601 and
         // span text read in seconds, a number is seconds.
-        "duration" | "td" => vec![match &topic {
+        "duration" => vec![match &topic {
             q if q.is_duration() => q.clone(),
             Value::Str(s)
                 if let Some((value, base, wv, wu)) =
@@ -2230,7 +2262,7 @@ fn apply_scalar_inner(
         // `strptime(fmt; LOCALE; CALENDAR)` — the third argument names
         // the calendar the text's fields are in; the instant read
         // keeps that reading (spec: Calendars).
-        "strptime" | "tp" => {
+        "strptime" => {
             let fmt = arg_str(call, 0, "%Y-%m-%dT%H:%M:%S").to_string();
             let Some(names) = date_names(call) else {
                 return vec![Value::Null];
@@ -2428,6 +2460,114 @@ fn apply_scalar_inner(
             },
             other => numeric_or_same(other, |n| Value::Float(n.abs())),
         }],
+        // `neg`: the unary minus as a command (ruling 2026-11-15).
+        // A quantity keeps its written unit, as under `abs`; a
+        // number is negated in its own kind.
+        "neg" => vec![match topic {
+            q @ Value::Quantity { .. } => negated_quantity(q),
+            other => negated(other),
+        }],
+        // `factorial` (rulings 2026-11-15, int → int): 0 answers 1
+        // and 20 is the last whose factorial is an integer. A
+        // negative integer, a number that is no integer and a result
+        // past the integers answer null, in a cell as alone, and the
+        // run warns once naming the command and counting them (a
+        // value of another kind is the numeric commands' own
+        // warning, raised before this arm).
+        "factorial" => vec![match factorial_of(&topic) {
+            Some(n) => Value::Int(n),
+            None => {
+                crate::value::ambient::record_outside(
+                    "factorial",
+                    numeric_takes("factorial"),
+                    || crate::value::held_text(&topic),
+                );
+                Value::Null
+            }
+        }],
+        // `rnd()`, `rnd(a..b)`, `rnd(list)`, `rnd(record)` (alias
+        // `random`; rulings 2026-11-15; spec: Random Values): a
+        // float from 0 up to 1, an integer of the inclusive range,
+        // one member of the list, one value of the record (its key
+        // left behind). It reads no topic: the pipe before it only
+        // says how many threads draw, one draw each.
+        "rnd" => {
+            let position = crate::pipeline::random_at();
+            let mut stream = match crate::pipeline::random_stream(None, position) {
+                Ok(stream) => stream,
+                Err(why) => return vec![refusing(call, Err(why))],
+            };
+            vec![match call.args.first() {
+                None => Value::Float(stream.float()),
+                Some(Arg::Range(Some(from), Some(to))) if from <= to => {
+                    Value::Int(stream.between(*from, *to))
+                }
+                Some(Arg::Lit(list @ Value::List(_))) => {
+                    let items = list.clone().into_items().unwrap_or_default();
+                    match items.len() {
+                        0 => Value::Null,
+                        len => items[stream.below(len as u64) as usize].clone(),
+                    }
+                }
+                Some(Arg::Lit(Value::Record(fields))) => {
+                    let values: Vec<&Value> = fields.iter().map(|(_, v)| v).collect();
+                    match values.len() {
+                        0 => Value::Null,
+                        len => values[stream.below(len as u64) as usize].clone(),
+                    }
+                }
+                Some(_) => refusing(
+                    call,
+                    Err(
+                        "it takes nothing, a range of integers that rises, a list or a \
+                         record: rnd(), rnd(1..6), rnd(@(\"a\"; \"b\"))"
+                            .into(),
+                    ),
+                ),
+            }]
+        }
+        // `n | choose(k)` (alias `binomial`; ruling 2026-11-15): the
+        // number of ways to choose k of n, exact. A k above n has no
+        // way and answers 0. A negative integer, a number that is no
+        // integer and a result past the integers answer null, and
+        // the run warns naming the command, as under `factorial`.
+        "choose" => {
+            let Some(size) = call.args.first() else {
+                return vec![refusing(
+                    call,
+                    Err("it takes the size to choose: 52 | choose(5)".into()),
+                )];
+            };
+            let whole = |v: &Value| match v.numeric_reading() {
+                Some(Value::Int(n)) if n >= 0 => Some(n),
+                _ => None,
+            };
+            let k = match size {
+                Arg::Lit(v) => whole(v).ok_or_else(|| crate::value::held_text(v)),
+                other => Err(arg_kind(other).to_string()),
+            };
+            let answer = match (whole(&topic), k) {
+                (Some(n), Ok(k)) => {
+                    binomial(n, k).ok_or_else(|| format!("{n} choose {k}, past the integers"))
+                }
+                (None, _) => Err(crate::value::held_text(&topic)),
+                (_, Err(k)) => Err(format!("the size {k}")),
+            };
+            vec![match answer {
+                Ok(ways) => Value::Int(ways),
+                Err(shown) => {
+                    crate::value::ambient::record_outside(
+                        "choose",
+                        numeric_takes("choose"),
+                        || shown,
+                    );
+                    Value::Null
+                }
+            }]
+        }
+        // `not`: `!` as a command (the same ruling): the negation of
+        // the value's truth, so null, as every false value, is true.
+        "not" => vec![Value::Bool(!topic.is_truthy())],
         // The elementary functions over the numeric reading: an
         // undefined value (a logarithm of a non-positive, a root of
         // a negative, an overflow) is null. `log(base)` takes a base;
@@ -2496,9 +2636,7 @@ fn apply_scalar_inner(
         // The collocation measures: the topic is the pair's count,
         // the arguments the two words' counts and the corpus size
         // (`log_dice` needs no size).
-        "mi" | "t_score" | "log_dice" | "tscore" | "logdice" | "dice" => {
-            collocation_measure(call, topic.clone())
-        }
+        "mi" | "t_score" | "log_dice" | "dice" => collocation_measure(call, topic.clone()),
         // `s/pat/repl/mods` — regex substitution on the topic's
         // text. Sed semantics: first occurrence by default, `g`
         // global; `i m s x` are the pattern literal's flags; `$1`-style
@@ -2951,7 +3089,7 @@ fn round_quantity(
 /// `mi`, `t_score`, `log_dice` — the collocation measures. `apply_scalar`'s arm.
 fn collocation_measure(call: &FnCall, topic: Value) -> Vec<Value> {
     vec![{
-        let need = if matches!(call.name.as_str(), "log_dice" | "logdice" | "dice") {
+        let need = if matches!(call.name.as_str(), "log_dice" | "dice") {
             2
         } else {
             3
@@ -2965,7 +3103,7 @@ fn collocation_measure(call: &FnCall, topic: Value) -> Vec<Value> {
             (Some(fxy), Some(fx), Some(fy), n) if call.args.len() >= need => {
                 match call.name.as_str() {
                     "mi" => n.map_or(Value::Null, |n| mi(fxy, fx, fy, n)),
-                    "t_score" | "tscore" => n.map_or(Value::Null, |n| t_score(fxy, fx, fy, n)),
+                    "t_score" => n.map_or(Value::Null, |n| t_score(fxy, fx, fy, n)),
                     "dice" => dice(fxy, fx, fy),
                     _ => log_dice(fxy, fx, fy),
                 }
@@ -2987,6 +3125,72 @@ fn collocation_measure(call: &FnCall, topic: Value) -> Vec<Value> {
             _ => Value::Null,
         }
     }]
+}
+
+/// A value under the unary minus (`-x`, `x | neg`): the numeric
+/// reading negated in its own kind, an integer staying one
+/// (`i64::MIN` has no integer negation); a quantity with no numeric
+/// reading negated in its written unit, as `x * -1` answers it;
+/// null for a value that is neither.
+pub(crate) fn negated(v: Value) -> Value {
+    match v.numeric_reading() {
+        Some(Value::Int(n)) => n
+            .checked_neg()
+            .map(Value::Int)
+            .unwrap_or(Value::Float(-(n as f64))),
+        Some(Value::Float(f)) => Value::Float(-f),
+        _ => match v {
+            q @ Value::Quantity { .. } => negated_quantity(q),
+            _ => Value::Null,
+        },
+    }
+}
+
+/// The factorial of a value that reads as a non-negative integer
+/// whose factorial is an integer too (20! is the last under 2^63);
+/// `None` for every other value. Text of integer form reads as the
+/// integer; a float is no integer, a whole one included (`5.0`).
+fn factorial_of(v: &Value) -> Option<i64> {
+    match v.numeric_reading()? {
+        Value::Int(n) if (0..=20).contains(&n) => Some((1..=n).product()),
+        _ => None,
+    }
+}
+
+/// The number of ways to choose `k` of `n`, both zero or more:
+/// exact, 0 where `k` passes `n`, `None` where the count passes the
+/// integers. The product runs over the smaller of `k` and `n - k`
+/// and every partial product is itself a binomial coefficient, so
+/// one that passes the integers ends it.
+fn binomial(n: i64, k: i64) -> Option<i64> {
+    if k > n {
+        return Some(0);
+    }
+    let (n, k) = (n as u128, k.min(n - k) as u128);
+    let mut ways: u128 = 1;
+    for i in 1..=k {
+        ways = ways * (n - k + i) / i;
+        if ways > i64::MAX as u128 {
+            return None;
+        }
+    }
+    Some(ways as i64)
+}
+
+/// A quantity negated in its written unit; any other value as it is.
+fn negated_quantity(v: Value) -> Value {
+    match v {
+        Value::Quantity {
+            value,
+            base,
+            written,
+        } => Value::Quantity {
+            value: -value,
+            base,
+            written: written.map(|(v, u)| (-v, u)),
+        },
+        other => other,
+    }
 }
 
 /// Apply `f` to the topic's numeric value, or `Null` when it has
@@ -3051,7 +3255,9 @@ fn round_to(n: f64, d: i64) -> f64 {
 /// The table reshapers `stack` and `unstack` and `map` itself take
 /// `|` alone (the inventory's kind `scalar` since its 0.43.0 rows) and
 /// read the structure whole.
-const BROADCAST_EXEMPT: [&str; 20] = [
+const BROADCAST_EXEMPT: [&str; 21] = [
+    // `rnd` reads no topic: a list before it is one thread, one draw
+    "rnd",
     "map",
     "stack",
     "unstack",
@@ -3250,8 +3456,7 @@ fn apply_inner(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
         // A numeric reducer over lists and no number: each list is
         // a value it cannot coerce, so the answer is null — said,
         // not silent, with the two spellings that reduce the lists.
-        name @ ("sum" | "product" | "mean" | "avg" | "median" | "percentile" | "std" | "stddev"
-        | "var" | "variance")
+        name @ ("sum" | "prod" | "mean" | "median" | "percentile" | "std" | "var")
             if !input.iter().any(|v| v.numeric().is_some())
                 && input.iter().any(|v| matches!(v, Value::List(_))) =>
         {
@@ -3351,10 +3556,10 @@ fn apply_inner(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
             }
         }
         "sum" => vec![sum(&input, scale)],
-        "product" => vec![product(&input)],
+        "prod" => vec![product(&input, scale)],
         "min" => extreme(input, std::cmp::Ordering::Less, scale),
         "max" => extreme(input, std::cmp::Ordering::Greater, scale),
-        "mean" | "avg" => vec![mean(&input, scale)],
+        "mean" => vec![mean(&input, scale)],
         "describe" => vec![describe_values(&input, scale)],
         "median" => vec![median(&input, scale)],
         // `percentile(p)` — the p-th percentile, 0 ≤ p ≤ 100, by
@@ -3379,13 +3584,13 @@ fn apply_inner(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
         }
         // `std(sample)` / `var(sample)` divide by n − 1; `stddev` and
         // `variance` are the long aliases.
-        "std" | "stddev" => vec![spread(
+        "std" => vec![spread(
             &input,
             f64::sqrt,
             scale,
             usize::from(sample_flag(call)),
         )],
-        "var" | "variance" => vec![spread(&input, |v| v, scale, usize::from(sample_flag(call)))],
+        "var" => vec![spread(&input, |v| v, scale, usize::from(sample_flag(call)))],
         // Lexical diversity. `entropy` and `yule_k` read the stream
         // as counts (the output of `group | count`): Shannon entropy
         // in bits, Yule's characteristic K. `mtld(t)` reads it as
@@ -3682,19 +3887,68 @@ fn apply_inner(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
             binned(call, input, scale).map(|b| b.table()),
         )],
         "histogram" => vec![refusing(call, histogram(call, input, scale))],
-        "combinations" | "pairs" | "triples" => {
-            let n = match call.name.as_str() {
-                "pairs" => 2,
-                "triples" => 3,
-                _ => arg_int(call, 0).unwrap_or(2).max(0) as usize,
-            };
+        "combinations" | "pairs" | "triples" | "permutations" => {
             let mut seen = std::collections::HashSet::new();
             let mut items: Vec<Value> = input
                 .into_iter()
                 .filter(|v| !matches!(v, Value::Null) && seen.insert(v.sort_key_with(scale)))
                 .collect();
             items.sort_by(|a, b| a.compare_with(b, scale));
+            // `permutations`: every ordering of the distinct values,
+            // `permutations(n)` of every n of them (ruling
+            // 2026-11-15), in the order of the values: the first
+            // value first.
+            if call.name == "permutations" {
+                let n = match call.args.first() {
+                    None => items.len(),
+                    Some(_) => match arg_int(call, 0) {
+                        Some(n) if n >= 0 => n as usize,
+                        _ => {
+                            return vec![refusing(
+                                call,
+                                Err("the size is a whole number, zero or more".into()),
+                            )];
+                        }
+                    },
+                };
+                return match orderings(&items, n) {
+                    Ok(out) => out,
+                    Err(why) => vec![refusing(call, Err(why))],
+                };
+            }
+            let n = match call.name.as_str() {
+                "pairs" => 2,
+                "triples" => 3,
+                _ => match arg_int(call, 0) {
+                    Some(n) if n >= 0 => n as usize,
+                    _ => {
+                        return vec![refusing(
+                            call,
+                            Err("the size is a whole number, zero or more".into()),
+                        )];
+                    }
+                },
+            };
+            // The subsets are written out, and they grow as the
+            // binomial coefficient: past the bound the command says
+            // so, as `permutations` does (ruling 2026-11-15; thirty
+            // choose fifteen ran until the memory ended).
+            if binomial(items.len() as i64, n as i64).is_none_or(|c| c > WRITTEN_OUT_BOUND as i64) {
+                return vec![refusing(
+                    call,
+                    Err(format!(
+                        "{n} of {m} values have more than {WRITTEN_OUT_BOUND} subsets: choose \
+                         fewer of them, or count them ({m} | choose({n}))",
+                        m = items.len()
+                    )),
+                )];
+            }
             let mut out = Vec::new();
+            // the one subset of no member is the empty one (ruling
+            // 2026-11-15: `combinations(0)` answered none)
+            if n == 0 {
+                out.push(Value::list(Vec::new()));
+            }
             if n >= 1 && n <= items.len() {
                 let mut idx: Vec<usize> = (0..n).collect();
                 loop {
@@ -3711,6 +3965,16 @@ fn apply_inner(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
             }
             out
         }
+        // `shuffle`: the stream in a random order. `sample(n)`: n
+        // of its members at random, in the stream's own order;
+        // `--share=x` a share of it in place of a count; `--replace`
+        // draws with replacement, in the order drawn (ruling
+        // 2026-11-15; spec: Random Values). `--seed=n` gives the
+        // command a seed of its own.
+        "sample" | "shuffle" => match drawn_positions(call, input.len()) {
+            Ok(positions) => positions.into_iter().map(|i| input[i].clone()).collect(),
+            Err(why) => vec![refusing(call, Err(why))],
+        },
         // Distinct under the value comparison (the sort key), as
         // `unique_by` is: null and "" stay apart, 1 and 1.0 meet.
         "unique" => {
@@ -3735,6 +3999,172 @@ fn apply_inner(call: &FnCall, input: Vec<Value>, scale: Scale) -> Vec<Value> {
         }
         _ => input,
     }
+}
+
+/// The reducers that answer the list they were given, ordered or
+/// cut: over a list topic on the plain pipe their answer is a list,
+/// of one member as of several (ruling 2026-11-15: `@(5) | sort`
+/// is `@(5)`; it was handed over bare, as the one value of a `sum`
+/// is). `first` and `last` answer a list where a count asks for
+/// one (`first(1)` the list of one) and the one value where none
+/// is written. A topic that is no list is one value before and
+/// after.
+pub(crate) fn keeps_a_list(call: &FnCall) -> bool {
+    match call.name.as_str() {
+        "sort" | "unique" | "reverse" | "frequencies" => true,
+        "first" | "last" => call.args.iter().any(|a| !matches!(a, Arg::Opt { .. })),
+        _ => false,
+    }
+}
+
+/// The positions `sample` and `shuffle` draw of a stream of `len`
+/// members, in the order they are answered in: a shuffle's every
+/// position in its random order; a sample's without replacement in
+/// the stream's own order, with replacement in the order drawn.
+/// The count is the first operand, or `--share=x` of the stream
+/// rounded to the nearest whole member, or one where neither is
+/// written; a count past the stream is refused unless `--replace`.
+pub(crate) fn drawn_positions(call: &FnCall, len: usize) -> Result<Vec<usize>, String> {
+    let option = |name: &str| {
+        call.args.iter().find_map(|a| match a {
+            Arg::Opt { name: n, value } if n == name => Some(value.as_ref()),
+            _ => None,
+        })
+    };
+    let number = |name: &str| match option(name) {
+        Some(Some(crate::syntax::ast::Operand::Lit(v))) => Some(v.numeric()),
+        Some(_) => Some(None),
+        None => None,
+    };
+    let own = match number("--seed") {
+        None => None,
+        Some(Some(n)) if n >= 0.0 && n.fract() == 0.0 => Some(n as u64),
+        Some(_) => return Err("--seed takes a whole number, zero or more".into()),
+    };
+    let mut stream = crate::pipeline::random_stream(own, crate::pipeline::random_at())?;
+    if call.name == "shuffle" {
+        let mut positions: Vec<usize> = (0..len).collect();
+        stream.shuffle(&mut positions);
+        return Ok(positions);
+    }
+    let replace = option("--replace").is_some();
+    let count = match call.args.first() {
+        Some(Arg::Opt { .. }) | None => None,
+        Some(_) => Some(arg_int(call, 0)),
+    };
+    let n = match (count, number("--share")) {
+        (Some(_), Some(_)) => return Err("it takes a count or a share, not both".into()),
+        (Some(Some(n)), None) if n >= 0 => n as usize,
+        (Some(_), None) => return Err("the count is a whole number, zero or more".into()),
+        // the share of the stream, rounded to the nearest whole
+        // member
+        (None, Some(Some(share))) if share >= 0.0 && (replace || share <= 1.0) => {
+            (share * len as f64 + 0.5).floor() as usize
+        }
+        (None, Some(_)) => {
+            return Err("--share takes a number from 0 to 1 (past 1 under --replace)".into());
+        }
+        // one member, where neither is written
+        (None, None) => 1,
+    };
+    if replace {
+        if n > 0 && len == 0 {
+            return Err("there is nothing to draw from".into());
+        }
+        return Ok(stream.sample_replacing(len, n));
+    }
+    if n > len {
+        return Err(format!(
+            "{n} of {len} cannot be drawn without replacement: draw {len} or fewer, or write \
+             --replace"
+        ));
+    }
+    Ok(stream.sample(len, n))
+}
+
+/// The reducers whose answer is a list by nature, however many
+/// members it holds: on the plain pipe one result stays the list of
+/// one (`@("a"; "b") | pairs` is `@(@("a"; "b"))`; it was handed
+/// over bare, as the one value a `sum` answers is).
+pub(crate) fn answers_a_list(name: &str) -> bool {
+    matches!(
+        name,
+        "combinations"
+            | "pairs"
+            | "triples"
+            | "permutations"
+            | "ngrams"
+            | "bigrams"
+            | "trigrams"
+            | "skipgrams"
+            | "sample"
+            | "shuffle"
+    )
+}
+
+/// The most orderings `permutations` and subsets `combinations`
+/// write out: they grow as the factorial and the binomial
+/// coefficient (ten values have 3,628,800 orderings, thirty have
+/// 155,117,520 subsets of fifteen), and a query that asks for more
+/// is told so before the memory is.
+const WRITTEN_OUT_BOUND: usize = 1_000_000;
+
+/// Every ordering of `n` of the items, in the order of positions
+/// (the first item first); the one empty ordering for `n` = 0, none
+/// where `n` passes the items.
+fn orderings(items: &[Value], n: usize) -> Result<Vec<Value>, String> {
+    let m = items.len();
+    if n > m {
+        return Ok(Vec::new());
+    }
+    // m * (m - 1) * … over n factors
+    let count = (0..n).try_fold(1usize, |acc, i| acc.checked_mul(m - i));
+    if count.is_none_or(|c| c > WRITTEN_OUT_BOUND) {
+        return Err(format!(
+            "{} of {m} values have more than {WRITTEN_OUT_BOUND} orderings: order fewer \
+             of them (permutations(n)), or count them (| factorial)",
+            if n == m {
+                "all".to_string()
+            } else {
+                n.to_string()
+            }
+        ));
+    }
+    let mut out = Vec::new();
+    if n == 0 {
+        out.push(Value::list(Vec::new()));
+        return Ok(out);
+    }
+    // a depth-first walk over the positions not yet taken
+    let mut taken = vec![false; m];
+    let mut chosen: Vec<usize> = Vec::with_capacity(n);
+    let mut from = 0;
+    loop {
+        match (from..m).find(|&i| !taken[i]) {
+            Some(i) => {
+                taken[i] = true;
+                chosen.push(i);
+                if chosen.len() == n {
+                    out.push(Value::list(
+                        chosen.iter().map(|&j| items[j].clone()).collect(),
+                    ));
+                    taken[i] = false;
+                    chosen.pop();
+                    from = i + 1;
+                } else {
+                    from = 0;
+                }
+            }
+            None => match chosen.pop() {
+                Some(last) => {
+                    taken[last] = false;
+                    from = last + 1;
+                }
+                None => break,
+            },
+        }
+    }
+    Ok(out)
 }
 
 /// The sum of the numeric readings: values with no reading are
@@ -4006,18 +4436,19 @@ fn sum(input: &[Value], scale: Scale) -> Value {
     Value::Float(readings.iter().filter_map(Value::numeric).sum())
 }
 
-/// The product of the numeric readings: exact while every operand
-/// is an integer, promoting to float on overflow (as arithmetic
-/// does) rather than wrapping; float otherwise. An empty input
-/// multiplies to 1 (the fold identity).
-/// The product of the numeric readings. Empty input is the fold's
-/// identity, 1; input with no reading at all is null, as `sum`'s
-/// is. One quantity among numbers scales (`2 km` by 3 is `6 km`);
-/// two quantities would multiply their dimensions, which the
-/// unital fragment does not combine, so that is refused rather
-/// than answered on a dropped unit.
-fn product(input: &[Value]) -> Value {
-    if !input.is_empty() && !input.iter().any(|v| v.numeric().is_some()) {
+/// The product of the numeric readings (`prod`, alias `product`):
+/// exact while every operand is an integer, promoting to float on
+/// overflow (as arithmetic does) rather than wrapping; float
+/// otherwise. The product of nothing is null, as the sum of
+/// nothing is (ruling 2026-11-15): an empty input, and an input
+/// with no reading at all; it answered 1 for the first, the fold's
+/// start, and null for the second. One quantity among numbers
+/// scales (`2 km` by 3 is `6 km`); quantities multiply with their
+/// units, as `*` multiplies them (the user's word of the same day:
+/// `@(2_m; 3_m) | prod` is the area, `6_m^2`; two quantities were
+/// refused before it).
+fn product(input: &[Value], scale: Scale) -> Value {
+    if !input.iter().any(|v| v.numeric().is_some()) {
         return Value::Null;
     }
     let quantities: Vec<&Value> = input
@@ -4044,19 +4475,23 @@ fn product(input: &[Value]) -> Value {
                 written: written.as_ref().map(|(m, u)| (m * factor, u.clone())),
             };
         }
+        // two quantities and more: the factors folded by the
+        // operator itself, a quantity as it stands and any other
+        // value by its numeric reading
         _ => {
-            crate::value::ambient::record_refusal(
-                "product: two quantities would multiply their units, which the unital \
-                 fragment does not combine; take the magnitudes first"
-                    .into(),
-            );
-            return Value::Null;
+            let mut factors = input.iter().filter_map(|v| match v {
+                Value::Quantity { .. } => Some(v.clone()),
+                other => other.numeric_reading(),
+            });
+            let first = factors.next().unwrap_or(Value::Null);
+            return factors.fold(first, |acc, v| {
+                crate::stdlib::arith::arith(crate::syntax::ast::ArithOp::Mul, &acc, &v, scale)
+            });
         }
     }
     // the inputs read as `x` reads them: an integer-looking text is
     // an integer
     let readings: Vec<Value> = input.iter().filter_map(Value::numeric_reading).collect();
-    // the empty product is the fold's identity, 1
     if readings.iter().all(|v| matches!(v, Value::Int(_))) {
         let mut acc: i64 = 1;
         let mut overflowed = false;
@@ -6484,6 +6919,12 @@ pub(crate) fn table_order_reading(
                 .collect();
             rows_table(rows)
         }
+        // `sample`, `shuffle`: rows drawn, a table back, as
+        // `first(n)` answers one (spec: Random Values)
+        "sample" | "shuffle" => match drawn_positions(call, t.n_rows()) {
+            Ok(positions) => rows_table(positions.into_iter().map(|i| t.row_cells(i)).collect()),
+            Err(why) => refusing(call, Err(why)),
+        },
         "first" | "last" => {
             let from_end = call.name == "last";
             match call.args.first() {
@@ -9479,19 +9920,16 @@ fn word_args(call: &FnCall) -> Vec<&str> {
 /// record's fields and a table's rows. `None` for every other
 /// pairing, which reads the structure as one value.
 pub(crate) fn reduce_structure(call: &FnCall, topic: &Value, scale: Scale) -> Option<Value> {
-    const NUMERIC: [&str; 12] = [
+    const NUMERIC: [&str; 9] = [
         "sum",
-        "product",
+        "prod",
         "min",
         "max",
         "mean",
-        "avg",
         "median",
         "percentile",
         "std",
-        "stddev",
         "var",
-        "variance",
     ];
     let name = call.name.as_str();
     let one = |items: Vec<Value>| {
@@ -10256,8 +10694,10 @@ mod tests {
     #[test]
     fn mean_and_alias() {
         assert_eq!(agg("mean", ints(&[1, 2, 3, 4])), vec![Value::Float(2.5)]);
-        assert_eq!(agg("avg", ints(&[1, 2, 3, 4])), vec![Value::Float(2.5)]);
         assert_eq!(agg("mean", vec![]), vec![Value::Null]);
+        // the alias is the parser's: it spells the call `mean`, and
+        // the evaluator knows no second name
+        assert_eq!(crate::syntax::registry::canonical("avg"), "mean");
     }
 
     #[test]
@@ -10290,7 +10730,7 @@ mod tests {
                 written: Some((2.0, "km".into())),
             },
         ];
-        for f in ["sum", "mean", "median", "min", "max", "stddev"] {
+        for f in ["sum", "mean", "median", "min", "max", "std"] {
             assert_eq!(agg(f, bad.clone()), vec![Value::Null], "{f}");
         }
         // A dimensionless stowaway refuses too.
@@ -10344,7 +10784,7 @@ mod tests {
         );
         // Numeric text reads as a bare number does, and is refused
         // with it, under every fold of time.
-        for reducer in ["sum", "mean", "median", "stddev"] {
+        for reducer in ["sum", "mean", "median", "std"] {
             assert_eq!(
                 agg(reducer, vec![d(60), Value::Str("5".into())]),
                 vec![Value::Null],
@@ -10513,13 +10953,14 @@ mod tests {
     fn spread_measures() {
         // population variance of 2,4,4,4,5,5,7,9 is 4, stddev 2
         let data = ints(&[2, 4, 4, 4, 5, 5, 7, 9]);
-        assert_eq!(agg("variance", data.clone()), vec![Value::Float(4.0)]);
-        assert_eq!(agg("stddev", data.clone()), vec![Value::Float(2.0)]);
-        assert_eq!(agg("stddev", vec![]), vec![Value::Null]);
-        // The compact spellings are the same measures.
-        assert_eq!(agg("var", data.clone()), agg("variance", data.clone()));
-        assert_eq!(agg("std", data.clone()), agg("stddev", data));
+        assert_eq!(agg("var", data.clone()), vec![Value::Float(4.0)]);
+        assert_eq!(agg("std", data), vec![Value::Float(2.0)]);
+        assert_eq!(agg("std", vec![]), vec![Value::Null]);
+        // The long spellings are aliases, the parser's to respell.
+        assert_eq!(crate::syntax::registry::canonical("variance"), "var");
+        assert_eq!(crate::syntax::registry::canonical("stddev"), "std");
         assert!(known_agg("std") && known_agg("var"));
+        assert!(known_agg("stddev") && known_agg("variance"));
     }
 
     fn sample(name: &str) -> FnCall {
@@ -10537,21 +10978,21 @@ mod tests {
     fn sample_spread_uses_n_minus_one() {
         // 1,3,5,7: population variance 5, sample variance 20/3.
         let data = ints(&[1, 3, 5, 7]);
-        assert_eq!(agg("variance", data.clone()), vec![Value::Float(5.0)]);
-        let v = apply(&sample("variance"), data.clone(), &|_| None);
+        assert_eq!(agg("var", data.clone()), vec![Value::Float(5.0)]);
+        let v = apply(&sample("var"), data.clone(), &|_| None);
         assert_eq!(v, vec![Value::Float(20.0 / 3.0)]);
-        let s = apply(&sample("stddev"), data, &|_| None);
+        let s = apply(&sample("std"), data, &|_| None);
         assert_eq!(s, vec![Value::Float((20.0f64 / 3.0).sqrt())]);
         // One value has a population spread of 0 and no sample spread.
-        assert_eq!(agg("variance", ints(&[4])), vec![Value::Float(0.0)]);
+        assert_eq!(agg("var", ints(&[4])), vec![Value::Float(0.0)]);
         assert_eq!(
-            apply(&sample("variance"), ints(&[4]), &|_| None),
+            apply(&sample("var"), ints(&[4]), &|_| None),
             vec![Value::Null]
         );
-        assert!(sample_flag(&sample("stddev")));
+        assert!(sample_flag(&sample("std")));
         assert!(!sample_flag(&FnCall {
             headless: false,
-            name: "stddev".into(),
+            name: "std".into(),
             args: Vec::new(),
         }));
     }
@@ -11109,6 +11550,130 @@ mod tests {
     }
 
     #[test]
+    fn neg_is_the_unary_minus_as_a_command() {
+        // a number in its own kind, numeric text read as one
+        assert_eq!(sc("neg", Value::Int(4)), vec![Value::Int(-4)]);
+        assert_eq!(sc("neg", Value::Float(-1.5)), vec![Value::Float(1.5)]);
+        assert_eq!(sc("neg", Value::Str("7".into())), vec![Value::Int(-7)]);
+        // (`i64::MIN` has no integer negation)
+        assert_eq!(
+            sc("neg", Value::Int(i64::MIN)),
+            vec![Value::Float(-(i64::MIN as f64))]
+        );
+        assert_eq!(sc("neg", Value::Null), vec![Value::Null]);
+        // a quantity in its written unit, as under `abs`
+        let q = Value::Quantity {
+            value: 5000.0,
+            base: "m".into(),
+            written: Some((5.0, "km".into())),
+        };
+        let minus_q = Value::Quantity {
+            value: -5000.0,
+            base: "m".into(),
+            written: Some((-5.0, "km".into())),
+        };
+        assert_eq!(sc("neg", q.clone()), vec![minus_q.clone()]);
+        // the operator answers the same (it answered null)
+        assert_eq!(negated(q), minus_q);
+        assert_eq!(negated(Value::Int(3)), Value::Int(-3));
+        assert_eq!(negated(Value::Bool(true)), Value::Null);
+        // a list item by item, an item of another kind standing;
+        // alone such a value answers null
+        assert_eq!(
+            sc(
+                "neg",
+                Value::list(vec![Value::Int(1), Value::Int(-2), Value::Str("x".into())])
+            ),
+            vec![Value::list(vec![
+                Value::Int(-1),
+                Value::Int(2),
+                Value::Str("x".into())
+            ])]
+        );
+        assert_eq!(sc("neg", Value::Bool(true)), vec![Value::Null]);
+    }
+
+    #[test]
+    fn factorial_takes_the_integers_whose_factorial_is_one() {
+        assert_eq!(sc("factorial", Value::Int(0)), vec![Value::Int(1)]);
+        assert_eq!(sc("factorial", Value::Int(5)), vec![Value::Int(120)]);
+        assert_eq!(
+            sc("factorial", Value::Int(20)),
+            vec![Value::Int(2_432_902_008_176_640_000)]
+        );
+        // text of integer form reads as the integer
+        assert_eq!(
+            sc("factorial", Value::Str("5".into())),
+            vec![Value::Int(120)]
+        );
+        assert_eq!(sc("factorial", Value::Null), vec![Value::Null]);
+        // past the integers, below zero, no integer (a whole float
+        // is none either): null
+        for v in [
+            Value::Int(21),
+            Value::Int(-1),
+            Value::Float(2.5),
+            Value::Float(5.0),
+        ] {
+            assert_eq!(sc("factorial", v.clone()), vec![Value::Null], "{v:?}");
+        }
+        // in a list such a number is null in its place, and a value
+        // of another kind stays as it is
+        assert_eq!(
+            sc(
+                "factorial",
+                Value::list(vec![Value::Int(3), Value::Int(-1), Value::Str("x".into())])
+            ),
+            vec![Value::list(vec![
+                Value::Int(6),
+                Value::Null,
+                Value::Str("x".into())
+            ])]
+        );
+    }
+
+    #[test]
+    fn prod_and_its_alias_reduce_alike() {
+        let items = vec![Value::Int(2), Value::Int(3), Value::Int(4)];
+        assert_eq!(agg("prod", items), vec![Value::Int(24)]);
+        assert_eq!(agg("prod", vec![]), vec![Value::Null]);
+        assert_eq!(crate::syntax::registry::canonical("product"), "prod");
+    }
+
+    #[test]
+    fn not_is_the_negation_as_a_command() {
+        // the truth `!` reads: null and every false value are true
+        for (v, answer) in [
+            (Value::Null, true),
+            (Value::Bool(false), true),
+            (Value::Int(0), true),
+            (Value::Str(String::new()), true),
+            (Value::Bool(true), false),
+            (Value::Int(3), false),
+            (Value::Str("x".into()), false),
+        ] {
+            assert_eq!(sc("not", v.clone()), vec![Value::Bool(answer)], "{v:?}");
+        }
+        // a scalar command: a list is read item by item, where `!`
+        // before a list reads the truth of the list itself
+        assert_eq!(
+            sc(
+                "not",
+                Value::list(vec![Value::Bool(true), Value::Null, Value::Int(0)])
+            ),
+            vec![Value::list(vec![
+                Value::Bool(false),
+                Value::Bool(true),
+                Value::Bool(true)
+            ])]
+        );
+        assert_eq!(
+            sc("not", Value::list(Vec::new())),
+            vec![Value::list(Vec::new())]
+        );
+    }
+
+    #[test]
     fn a_null_topic_has_no_reading() {
         // a scalar reading a null topic answers null, an expander
         // nothing; the commands that read null on purpose keep theirs
@@ -11168,25 +11733,30 @@ mod tests {
         assert_eq!(agg("max", vec![]), vec![Value::Null]);
         // Wholly non-numeric input skips every value as missing.
         assert_eq!(agg("sum", vec![Value::Str("x".into())]), vec![Value::Null]);
-        // `product` keeps the spec's fold-from-1 identity.
-        assert_eq!(agg("product", vec![]), vec![Value::Int(1)]);
-        assert_eq!(
-            agg("product", vec![Value::Str("x".into())]),
-            vec![Value::Null]
-        );
+        // the product of nothing is null too (ruling 2026-11-15;
+        // it answered 1, the fold's start)
+        assert_eq!(agg("prod", vec![]), vec![Value::Null]);
+        assert_eq!(agg("prod", vec![Value::Null]), vec![Value::Null]);
+        assert_eq!(agg("prod", vec![Value::Str("x".into())]), vec![Value::Null]);
         // one quantity scales; two are refused, never answered bare
         let km = |v: f64| Value::Quantity {
             value: v * 1000.0,
             base: "m".into(),
             written: Some((v, "km".into())),
         };
-        assert_eq!(agg("product", vec![km(2.0), Value::Int(3)]), vec![km(6.0)]);
-        assert_eq!(agg("product", vec![km(2.0), km(3.0)]), vec![Value::Null]);
-        assert!(
-            crate::value::ambient::take_refusal()
-                .unwrap()
-                .contains("units")
+        assert_eq!(agg("prod", vec![km(2.0), Value::Int(3)]), vec![km(6.0)]);
+        // two quantities multiply with their units, as `*` does (the
+        // user's word of 2026-11-15; they were refused)
+        let scale: Scale = &crate::value::quantity::scale_expr;
+        let area = crate::stdlib::arith::arith(
+            crate::syntax::ast::ArithOp::Mul,
+            &km(2.0),
+            &km(3.0),
+            scale,
         );
+        assert!(matches!(area, Value::Quantity { .. }), "{area:?}");
+        assert_eq!(agg("prod", vec![km(2.0), km(3.0)]), vec![area.clone()]);
+        assert_eq!(agg("prod", vec![km(2.0), Value::Null, km(3.0)]), vec![area]);
     }
 
     #[test]
@@ -11221,7 +11791,7 @@ mod tests {
         );
         let m = 4_000_000_000i64;
         assert_eq!(
-            agg("product", vec![Value::Int(m), Value::Int(m)]),
+            agg("prod", vec![Value::Int(m), Value::Int(m)]),
             vec![Value::Float(m as f64 * m as f64)]
         );
     }

@@ -77,6 +77,11 @@ pub struct SessionStore {
     /// warning (the opening state) or info — what a host shows,
     /// never what the engine raises.
     pub diagnostics: crate::diagnostic::Severity,
+    /// The seed the session's random values are drawn from
+    /// (`session(--seed=n)`; spec: Random Values): every run of the
+    /// session after it answers as a run with that seed. `None`
+    /// (the opening state): each run draws its own.
+    pub seed: Option<u64>,
 }
 
 impl Default for SessionStore {
@@ -86,6 +91,7 @@ impl Default for SessionStore {
             pretty: PrettyMode::Off,
             precision: 6,
             diagnostics: crate::diagnostic::Severity::Warning,
+            seed: None,
         }
     }
 }
@@ -93,7 +99,7 @@ impl Default for SessionStore {
 impl SessionStore {
     /// The settings as the record `session` alone answers.
     pub fn settings(&self) -> Value {
-        Value::record(vec![
+        let mut fields = vec![
             (
                 "pretty".to_string(),
                 Value::Str(self.pretty.word().to_string()),
@@ -103,7 +109,13 @@ impl SessionStore {
                 "diagnostics".to_string(),
                 Value::Str(self.diagnostics.word().to_string()),
             ),
-        ])
+        ];
+        // the seed is a setting once it is set: a session that never
+        // pinned one answers the record it always answered
+        if let Some(seed) = self.seed {
+            fields.push(("seed".to_string(), Value::Int(seed as i64)));
+        }
+        Value::record(fields)
     }
 }
 
@@ -121,6 +133,13 @@ pub struct RunOptions {
     /// before evaluation (never a clock read during it); `None` when
     /// the runner bound none, and `now()` is null.
     pub now: Option<(i64, u32)>,
+    /// The seed the run's random values are drawn from (`random()`,
+    /// `sample`, `shuffle`; spec: Random Values), bound by the runner
+    /// (`qua --seed N`): a run with a seed answers the same on
+    /// every machine and in every release. `None`: the seed is
+    /// drawn from the invocation instant, and the run names it in
+    /// an info so that it can be repeated.
+    pub seed: Option<u64>,
     /// Whether the `sh(...)` command and backtick commands may run
     /// (`qua --allow-shell`). Off: query text stays inert data.
     pub allow_shell: bool,
@@ -289,6 +308,23 @@ pub(crate) struct RunState {
     /// Pipeline, the thread tree): on when the query holds the
     /// command, off — and free — otherwise.
     pub(crate) trail: bool,
+    /// The random draws made so far, counted by the place they were
+    /// made at: the top-level pipeline command and the thread's
+    /// position. The count is the third number a draw's stream is
+    /// derived by ([`random_stream`]).
+    pub(crate) random_draws: std::collections::HashMap<(u32, u64), u64>,
+    /// The top-level pipeline commands that drew a random value, in
+    /// the order they first drew (by their ordinal; zero is the
+    /// navigation before the first pipe): a command's place in it,
+    /// from one, is the first number its draws are derived by.
+    pub(crate) random_places: Vec<u32>,
+    /// The seed this run drew, where none was pinned: drawn once,
+    /// at the first random value.
+    pub(crate) random_seed: Option<u64>,
+    /// The position of the thread a reducing random command (`|
+    /// sample`, `| shuffle`) is now applied to, set by the pipeline
+    /// around the call; `None` where it reduces a whole context.
+    pub(crate) random_position: Option<u64>,
 }
 
 thread_local! {
@@ -378,6 +414,111 @@ pub(crate) fn begin_run(options: Option<RunOptions>) -> RunGuard {
             _ambient: crate::value::ambient::enter(ambient),
         }
     })
+}
+
+/// The position random draws are derived by, set until the guard
+/// drops: the thread a command is applied to, where the pipeline
+/// knows it.
+pub(crate) struct RandomPosition(Option<u64>);
+
+pub(crate) fn random_position(position: u64) -> RandomPosition {
+    RandomPosition(with_run(|s| s.random_position.replace(position)))
+}
+
+impl Drop for RandomPosition {
+    fn drop(&mut self) {
+        let before = self.0;
+        with_run(|s| s.random_position = before);
+    }
+}
+
+/// The position a random command draws at: the thread's, where the
+/// pipeline set it; under a fold the group's ordinal; none where
+/// the command reduces a whole context.
+pub(crate) fn random_at() -> Option<u64> {
+    with_run(|s| s.random_position.or(s.fold_ordinal.map(|g| g as u64)))
+}
+
+/// The stream a random draw is made from (spec: Random Values).
+/// The seed is the command's own (`--seed=n`), else the run's, else
+/// one drawn from the invocation instant and named in an info. The
+/// stream's seed is that seed derived by three numbers in turn: the
+/// place of the top-level pipeline command the draw is written in
+/// among the commands of the query that draw (from one, in the
+/// order they first draw; the navigation before the first pipe is
+/// one of them when a predicate there draws), the position of the
+/// thread (from one; zero where the draw belongs to no one
+/// thread), and the draw's count among the draws made at that
+/// place and position (from one). Nothing in it depends on the
+/// order threads are evaluated in, and a command that draws nothing
+/// takes no place: `/row @| sample(3)` and `/row | ::Name @|
+/// sample(3)` pick the same rows.
+pub(crate) fn random_stream(
+    own: Option<u64>,
+    position: Option<u64>,
+) -> Result<crate::stdlib::random::Stream, String> {
+    use crate::stdlib::random::{Stream, derive};
+    // the command's own, the run's, the session's, in that order
+    let pinned = own
+        .or_else(|| run_option(|o| o.seed))
+        .or_else(|| run_option(|o| o.session.as_ref().and_then(|memory| memory.borrow().seed)));
+    let seed = match pinned {
+        Some(seed) => seed,
+        None => {
+            // drawn once for the run, from the invocation instant
+            // and the count of the runs that drew one before it in
+            // this process: a session binds its instant once, and
+            // its runs must not all draw the same seed
+            static DRAWN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            if let Some(seed) = with_run(|s| s.random_seed) {
+                seed
+            } else {
+                let Some((secs, nanos)) = run_option(|o| o.now) else {
+                    return Err(
+                        "a random value needs a seed, and this run was given neither a seed \
+                         nor the instant one is drawn from"
+                            .into(),
+                    );
+                };
+                let nth = DRAWN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                // 63 bits, so that the seed the run names can be
+                // written back wherever a seed is written (an
+                // integer literal ends at 2^63 - 1)
+                let seed = derive(derive(secs as u64, u64::from(nanos)), nth) >> 1;
+                with_run(|s| s.random_seed = Some(seed));
+                seed
+            }
+        }
+    };
+    if pinned.is_none() {
+        crate::value::ambient::record_info_once(
+            crate::diagnostic::RANDOM_SEED,
+            "pipeline",
+            format!("the run drew the seed {seed}: --seed={seed} repeats it"),
+        );
+    }
+    let position = position.unwrap_or(0);
+    let (place, count) = with_run(|s| {
+        let command = s.command;
+        // the command's place among the commands that draw, in the
+        // order they first draw: a command that draws nothing takes
+        // no place, so a projection or a filter written before a
+        // sample does not move what the sample picks
+        let place = match s.random_places.iter().position(|c| *c == command) {
+            Some(at) => at + 1,
+            None => {
+                s.random_places.push(command);
+                s.random_places.len()
+            }
+        };
+        let count = s.random_draws.entry((command, position)).or_insert(0);
+        *count += 1;
+        (place as u64, *count)
+    });
+    Ok(Stream::seeded(derive(
+        derive(derive(seed, place), position),
+        count,
+    )))
 }
 
 /// Read the options of the run in progress (of the last finished

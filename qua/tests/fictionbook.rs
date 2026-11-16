@@ -89,8 +89,9 @@ fn every_door_reads_fictionbook() {
         // the prose and the chapter heading (headings are
         // sentences); the description's title and author are what
         // the book declares, not its text (ruling 2026-11-14): they
-        // were two sentences more
-        "8"
+        // were two sentences more. The declared title is no
+        // sentence either (ruling 2026-11-15): it was the eighth.
+        "7"
     );
     // the literary reading keeps the emphasis; the identity is the
     // document node's, in every reading

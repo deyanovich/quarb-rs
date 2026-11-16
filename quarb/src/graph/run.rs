@@ -18,6 +18,9 @@ pub struct Run {
     /// The session memory (`| ,name`, `$,name`, `%,`), the host's.
     pub session: Option<crate::pipeline::SessionMemory>,
     pub now: Option<(i64, u32)>,
+    /// The seed of the run's random values (`qua --seed N`); `None`
+    /// draws one from the invocation instant.
+    pub seed: Option<u64>,
     pub allow_shell: bool,
     pub quantifier_bound: Option<usize>,
     pub frontier_bound: Option<usize>,
@@ -52,6 +55,7 @@ impl Run {
         RunOptions {
             session: self.session.clone(),
             now: self.now,
+            seed: self.seed,
             allow_shell: self.allow_shell,
             quantifier_bound: self.quantifier_bound,
             frontier_bound: self.frontier_bound,

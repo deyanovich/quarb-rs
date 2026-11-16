@@ -385,6 +385,14 @@ struct Cli {
     #[arg(long, value_name = "ISO")]
     now: Option<String>,
 
+    /// Pin the seed of the run's random values (random(), sample,
+    /// shuffle): a whole number from 0. A run with a seed answers
+    /// the same on every machine and in every release, so a pinned
+    /// run replays exactly. Default: a seed drawn at startup, which
+    /// the run names in an info (--info) so that it can be repeated.
+    #[arg(long, value_name = "N")]
+    seed: Option<u64>,
+
     /// Resident session: reuse (or start) a background qua that
     /// keeps the materialized inputs alive, so repeated queries
     /// skip the parse. The first query pays materialization; later
@@ -1140,6 +1148,9 @@ fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
                     .map_err(|e| anyhow::anyhow!("--diagnostics: {e}"))?
             };
             memory.borrow_mut().diagnostics = level;
+            // --seed pins the seed of the session's random values;
+            // `session(--seed=n)` in a query may move it
+            memory.borrow_mut().seed = cli.seed;
             // the debug licence: debug notes are raised only when
             // the level asks for them
             DEBUG_NOTES.with(|d| d.set(level == quarb::Severity::Debug));

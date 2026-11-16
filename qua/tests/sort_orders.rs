@@ -72,8 +72,9 @@ fn a_record_sorts_by_key_and_by_value() {
         one(r#"= %(x = "ä"; y = "z"; w = "a"; n = 10; m = 9) | sort("de"; -v)"#),
         r#"%(m = 9; n = 10; w = "a"; x = "ä"; y = "z")"#
     );
-    // a list of one record stays the list: its item is the answer
-    assert_eq!(one("= @(%(b = 2; a = 1)) | sort"), "%(b = 2; a = 1)");
+    // a list of one record stays the list, and is answered as one
+    // (ruling 2026-11-15: its one item was handed over bare)
+    assert_eq!(one("= @(%(b = 2; a = 1)) | sort"), "@(%(b = 2; a = 1))");
 }
 
 /// `--of=` answers a list's sorted values and would lose a record's

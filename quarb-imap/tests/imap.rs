@@ -41,5 +41,11 @@ fn folders_messages_and_headers() {
     );
     assert_eq!(v("/INBOX/2::"), ["Friday works. Docs are ready.\n"]);
     assert_eq!(v("/INBOX/*[:::epoch > 1783410000] @| count"), ["2"]);
+    // a header that occurs more than once is the list of its
+    // occurrences, in the message's order; one that occurs once is
+    // the string it was
+    assert_eq!(v("/INBOX/1::received | ..."), ["by relay-b", "by relay-a"]);
+    assert_eq!(v("/INBOX/*[::received == (/relay-a/)] @| count"), ["3"]);
+    assert_eq!(v("/INBOX/1::subject"), ["Release plan"]);
     let _ = server.kill();
 }

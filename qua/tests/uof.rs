@@ -42,8 +42,9 @@ fn the_doors() {
         ok(&dir, &["^ | %(::title; ::author)", "text:emma.uot"]),
         "%(title = \"Emma\"; author = \"Jane Austen\")"
     );
-    // The title, the heading and two sentences.
-    assert_eq!(ok(&dir, &["//sentence @| count", "corpus:emma.uot"]), "4");
+    // The heading and two sentences; the title the file declares
+    // is none (ruling 2026-11-15; it was a fourth).
+    assert_eq!(ok(&dir, &["//sentence @| count", "corpus:emma.uot"]), "3");
     let (_, err, ok_) = qua(&dir, &["//paragraph @| count", "lit:emma.uot"]);
     assert!(
         !ok_ && err.contains("a Uniform Office Format text"),

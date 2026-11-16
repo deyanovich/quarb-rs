@@ -156,6 +156,14 @@ pub struct Branch {
     pub projection: Option<Projection>,
     /// Where the branch starts navigating (see [`Anchor`]).
     pub anchor: Anchor,
+    /// The fields read after the projection (`::head:year`: the
+    /// name and whether it was quoted), where the branch stands in a
+    /// union whose branches do not all read the same ones: each
+    /// branch's closing projection takes its own chain (spec: the
+    /// field of a record). Where every branch reads the same chain,
+    /// and for a branch alone, the parser reads it over the pipe
+    /// (`| :year`) and this is empty.
+    pub fields: Vec<(String, bool)>,
 }
 
 impl Branch {

@@ -332,6 +332,29 @@ pub(crate) fn navigate_from_level(
 /// carries no meaning for the cycle check), so two paths that cover
 /// the same ground — and pushed the same breadcrumbs — compare equal
 /// and dedup.
+/// Whether the paths in flight are past the frontier bound: more
+/// than `f_max` of them BEYOND one for each node they stand at
+/// (ruling 2026-11-15). The bound is there for routes that
+/// multiply, many paths to one node; a round that holds one path
+/// per node holds the document, however large (the 1.4 million if
+/// statements of a kernel tree are 1.4 million paths, and were
+/// refused). `Some(nodes)` with the count of the nodes stood at
+/// when the bound is passed. Called once the paths outnumber the
+/// bound: below it nothing is counted.
+fn past_the_frontier<'a>(
+    adapter: &impl AstAdapter,
+    paths: impl Iterator<Item = &'a GPath>,
+    f_max: usize,
+) -> Option<usize> {
+    let mut nodes = std::collections::HashSet::new();
+    let mut held = 0usize;
+    for p in paths {
+        held += 1;
+        nodes.insert(adapter.intrinsic(p.ext.node));
+    }
+    (held - nodes.len() > f_max).then_some(nodes.len())
+}
+
 #[derive(Clone)]
 pub(crate) struct GPath {
     /// The path's node and marks, as the attachment a scope borrows.
@@ -1280,15 +1303,19 @@ pub(crate) fn expand_group(
                         (p, at)
                     }),
             );
-            if pending.len() > f_max {
+            if pending.len() > f_max
+                && let Some(nodes) =
+                    past_the_frontier(adapter, pending.iter().map(|(p, _)| p), f_max)
+            {
                 record_refusal_coded(
                     FRONTIER_BOUND,
                     format!("round {rounds}"),
                     format!(
                         "the frontier bound ({f_max}) is exceeded at round {rounds}: {} \
-                         expansion paths in flight; give the quantifier a ceiling, \
-                         {{;M}}, or raise --frontier-bound",
-                        pending.len()
+                         expansion paths in flight over {nodes} node{}; give the quantifier \
+                         a ceiling, {{;M}}, or raise --frontier-bound",
+                        pending.len(),
+                        if nodes == 1 { "" } else { "s" }
                     ),
                 );
                 return Vec::new();
@@ -1331,18 +1358,22 @@ pub(crate) fn expand_group(
             break;
         }
         // The frontier bound: paths in flight after the round's
-        // merge. A set walk never nears it (at most one arrival per
-        // edge); an exact walk over data with many routes to a node
-        // does, and refuses by name.
-        if frontier.len() > f_max {
+        // merge, beyond one for each node they stand at. A set walk
+        // never nears it (at most one arrival per edge); an exact
+        // walk over data with many routes to a node does, and
+        // refuses by name.
+        if frontier.len() > f_max
+            && let Some(nodes) = past_the_frontier(adapter, frontier.iter(), f_max)
+        {
             record_refusal_coded(
                 FRONTIER_BOUND,
                 format!("round {count}"),
                 format!(
                     "the frontier bound ({f_max}) is exceeded at round {count}: {} \
-                     expansion paths in flight; give the quantifier a ceiling, \
-                     {{;M}}, or raise --frontier-bound",
-                    frontier.len()
+                     expansion paths in flight over {nodes} node{}; give the quantifier \
+                     a ceiling, {{;M}}, or raise --frontier-bound",
+                    frontier.len(),
+                    if nodes == 1 { "" } else { "s" }
                 ),
             );
             return Vec::new();

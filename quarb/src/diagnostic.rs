@@ -196,6 +196,9 @@ pub const RETIRED_KEY: &str = "RETIRED_KEY";
 /// type they agreed on (a declared index won, two undeclared were
 /// upcast to their common type, an integer met a float).
 pub const INDEX_CAST: &str = "INDEX_CAST";
+/// Info: the run drew its random seed (none was pinned), named so
+/// that the run can be repeated.
+pub const RANDOM_SEED: &str = "RANDOM_SEED";
 /// Info: a transposition brought the cells of columns of several
 /// kinds to their common type.
 pub const TRANSPOSE_CAST: &str = "TRANSPOSE_CAST";

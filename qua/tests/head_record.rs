@@ -33,8 +33,14 @@ fn ok(args: &[&str]) -> String {
     out
 }
 
+/// The fixture, in a directory of its own for every call: the
+/// tests of this file run side by side in one process, and one
+/// directory for all of them was removed by one test under the
+/// other's hands (a write found no directory, once in many runs).
 fn notes() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("qua-head-record-{}", std::process::id()));
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("qua-head-record-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     for (name, text) in [
@@ -152,14 +158,57 @@ fn a_field_of_the_head_ends_a_path() {
         ok(&["/iliad.md::head:year || /odyssey.md::head:year", &folder]),
         "-750\n-725"
     );
-    let (success, _, err) = run(&["/iliad.md::head:year || /odyssey.md::head:title", &folder]);
-    assert!(!success);
-    assert!(
-        err.contains(
-            "the branches of a union read different fields after their projections (':year' \
-             on one of them): read the field over the pipe ('… | :year'), or write two queries"
-        ),
-        "{err}"
+    // in a union each branch's closing projection takes its own
+    // chain (ruled for 0.65; 0.64 refused branches that differed)
+    assert_eq!(
+        ok(&["/iliad.md::head:year || /odyssey.md::head:title", &folder]),
+        "-750\nThe Odyssey"
+    );
+    // a chain on one branch, a plain projection on another, a core
+    // property on a third
+    assert_eq!(
+        ok(&[
+            "/iliad.md::head:edition:editor || /odyssey.md::title || /page.html:name",
+            &folder
+        ]),
+        "Monro\nThe Odyssey\npage.html"
+    );
+    // the pipeline after the union runs over every branch's value
+    assert_eq!(
+        ok(&[
+            "/iliad.md::head:author || /odyssey.md::head:title | upper",
+            &folder
+        ]),
+        "HOMER\nTHE ODYSSEY"
+    );
+    // one node, two fields: two threads; the same field twice: one
+    assert_eq!(
+        ok(&[
+            "/iliad.md::head:year || /iliad.md::head:author @| count",
+            &folder
+        ]),
+        "2"
+    );
+    assert_eq!(
+        ok(&[
+            "/iliad.md::head:year || /iliad.md::head:year @| count",
+            &folder
+        ]),
+        "1"
+    );
+    // a field no record of that branch has is told for that branch
+    let (success, out, err) = run(&["/iliad.md::head:isbn || /odyssey.md::head:year", &folder]);
+    assert!(success);
+    assert_eq!(out, "null\n-725");
+    assert!(err.contains("warning UNKNOWN_FIELD (:isbn)"), "{err}");
+    // the query is written back as it was read
+    assert_eq!(
+        ok(&[
+            "--expand",
+            r#"/iliad.md::head:year || /odyssey.md::head:"og:type" | upper"#,
+            &folder
+        ]),
+        r#"/iliad.md::head:year || /odyssey.md::head:"og:type" | upper"#
     );
     // a field no record has: null, told as after a pipe
     let (success, out, err) = run(&["/iliad.md::head:isbn", &folder]);

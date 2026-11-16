@@ -75,10 +75,16 @@ pub(crate) fn node_to_json_text(adapter: &impl AstAdapter, node: NodeId) -> Stri
             }
         }
         let text = if entries.is_empty() {
-            adapter
-                .default_value(done.node)
-                .unwrap_or(Value::Null)
-                .to_json()
+            // a container with nothing in it is written as what it
+            // is; a node that is no container is its own scalar
+            match empty_container(adapter, done.node) {
+                Some(true) => "{}".to_string(),
+                Some(false) => "[]".to_string(),
+                None => adapter
+                    .default_value(done.node)
+                    .unwrap_or(Value::Null)
+                    .to_json(),
+            }
         } else {
             if entries.len() > 1 && entries.iter().all(|(n, _)| n.parse::<usize>().is_ok()) {
                 entries.sort_by_key(|(n, _)| n.parse::<usize>().unwrap_or(usize::MAX));
@@ -124,13 +130,31 @@ pub(crate) fn says_record(adapter: &impl AstAdapter, node: NodeId) -> bool {
         .any(|t| t == "object" || t == "map")
 }
 
+/// What a node with no entries is, where its kind says it is a
+/// container: `Some(true)` a record (`{}`), `Some(false)` a list
+/// (`[]`), `None` a node that is no container and is its own
+/// scalar. An empty object and an empty array were both written
+/// null, so a document did not come back from `| json` as it was
+/// read.
+fn empty_container(adapter: &impl AstAdapter, node: NodeId) -> Option<bool> {
+    let traits = adapter.traits(node);
+    if traits.iter().any(|t| t == "object" || t == "map") {
+        Some(true)
+    } else if traits.iter().any(|t| t == "array") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 /// The value of a node whose children are already built: the
 /// entries (children, then the enumerated properties a child does
 /// not shadow — a reading that keeps scalars off the tree) as a
 /// list when every name is its item's position (from one, as a
 /// list item is named: ruling 2026-11-14) and the node does not say
 /// it is a record ([`says_record`]), else a record; a node with no
-/// entries is its own scalar.
+/// entries is the empty record or the empty list where its kind
+/// says it is a container, else its own scalar.
 #[cfg_attr(not(feature = "kaiv"), allow(dead_code))]
 pub(crate) fn node_value_from(
     adapter: &impl AstAdapter,
@@ -143,7 +167,11 @@ pub(crate) fn node_value_from(
         }
     }
     if entries.is_empty() {
-        return adapter.default_value(node).unwrap_or(Value::Null);
+        return match empty_container(adapter, node) {
+            Some(true) => Value::Record(Vec::new().into()),
+            Some(false) => Value::list(Vec::new()),
+            None => adapter.default_value(node).unwrap_or(Value::Null),
+        };
     }
     // Entries whose names are all indexes come in index order, so a
     // mixed array comes back in the source's order.

@@ -106,7 +106,7 @@ fn an_unmounted_alias_refuses_before_the_run() {
     let e = run_with("/w/* | :: | tr(a-z; A-Z)", vec![shell()])
         .unwrap_err()
         .to_string();
-    assert!(e.contains("pipeline command 'tr'"), "{e}");
+    assert!(e.contains("'tr' is not a command"), "{e}");
 }
 
 #[test]

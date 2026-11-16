@@ -243,11 +243,16 @@ impl Ambient {
     }
 }
 
-/// The lone values of a kind one numeric command does not take.
+/// The lone values of a kind one numeric command does not take, or
+/// the numbers outside what it takes.
 pub(crate) struct Untaken {
     command: String,
     /// What the command takes: "a number", "a number or a quantity".
     takes: &'static str,
+    /// Numbers of the right kind and outside the command's reach
+    /// (`-1 | factorial`), counted apart from the values of another
+    /// kind and said in their own words.
+    outside: bool,
     count: usize,
     /// The first of them, kind and value, as the warning shows it.
     first: String,
@@ -258,13 +263,23 @@ impl Untaken {
         let Untaken {
             command,
             takes,
+            outside,
             count,
             first,
         } = self;
         Diagnostic::warning(
             crate::diagnostic::NOT_NUMERIC,
             "pipeline",
-            if *count == 1 {
+            if *outside && *count == 1 {
+                format!(
+                    "{command} takes {takes}: 1 value is outside that ({first}) and answers null"
+                )
+            } else if *outside {
+                format!(
+                    "{command} takes {takes}: {count} values are outside that (the first: \
+                     {first}) and answer null"
+                )
+            } else if *count == 1 {
                 format!(
                     "{command} takes {takes}: 1 value is of another kind ({first}) and answers \
                      null"
@@ -564,17 +579,39 @@ pub(crate) fn in_cells() -> bool {
 /// answer is null, and the run warns once for the command when it
 /// ends, counting them and showing the first.
 pub(crate) fn record_untaken(command: &str, takes: &'static str, first: impl FnOnce() -> String) {
-    with_ambient(
-        |a| match a.untaken.iter_mut().find(|u| u.command == command) {
+    record_not_taken(command, takes, false, first);
+}
+
+/// A number the numeric command `command` takes the kind of and not
+/// the value (a negative under `factorial`): the answer is null,
+/// and the run warns once for the command, in the words of a value
+/// outside what it takes, counting them and showing the first.
+pub(crate) fn record_outside(command: &str, takes: &'static str, first: impl FnOnce() -> String) {
+    record_not_taken(command, takes, true, first);
+}
+
+fn record_not_taken(
+    command: &str,
+    takes: &'static str,
+    outside: bool,
+    first: impl FnOnce() -> String,
+) {
+    with_ambient(|a| {
+        match a
+            .untaken
+            .iter_mut()
+            .find(|u| u.command == command && u.outside == outside)
+        {
             Some(u) => u.count += 1,
             None => a.untaken.push(Untaken {
                 command: command.to_string(),
                 takes,
+                outside,
                 count: 1,
                 first: first(),
             }),
-        },
-    );
+        }
+    });
 }
 
 /// Whether `name` was already put to the declared surface of

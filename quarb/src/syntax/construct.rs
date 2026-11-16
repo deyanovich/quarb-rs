@@ -430,6 +430,7 @@ fn current_branch() -> Branch {
         steps: Vec::new(),
         projection: None,
         anchor: Anchor::Current,
+        fields: Vec::new(),
     }
 }
 
@@ -787,6 +788,7 @@ impl Form {
                     steps,
                     projection,
                     anchor: b.anchor,
+                    fields: b.fields,
                 })
             }
             Form::Query(mut q) => {
@@ -806,6 +808,7 @@ impl Form {
                                 steps: w.elems,
                                 projection: w.projection,
                                 anchor: Anchor::Current,
+                                fields: Vec::new(),
                             });
                         }
                     }
@@ -1053,6 +1056,7 @@ fn as_branch(c: Form) -> Result<Branch, Form> {
                 steps: w.elems,
                 projection: w.projection,
                 anchor: Anchor::Current,
+                fields: Vec::new(),
             }),
             _ => Err(other),
         },

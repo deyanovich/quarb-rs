@@ -180,6 +180,7 @@ impl Form {
                 steps: Vec::new(),
                 projection: Some(p),
                 anchor: Anchor::Current,
+                fields: Vec::new(),
             })],
             Form::Operand(Operand::Rel {
                 steps,
@@ -194,6 +195,7 @@ impl Form {
                 steps,
                 projection,
                 anchor,
+                fields: Vec::new(),
             })],
             Form::Operand(op) | Form::Arg(Arg::Expr(op)) => {
                 vec![if agg {
@@ -371,6 +373,7 @@ impl Form {
                 steps: vec![e.clone()],
                 projection: None,
                 anchor: Anchor::Current,
+                fields: Vec::new(),
             })],
             other => match other.clone().into_commands(false) {
                 Ok(cmds) => cmds,

@@ -48,7 +48,6 @@ fn folding_and_stripping() {
     assert_eq!(values("/ru | :: | deaccent"), ["елка подъем"]);
     // ё is a letter: the stress mark goes, the diaeresis stays
     assert_eq!(values("/ru | :: | deaccent(ru)"), ["ёлка подъём"]);
-    assert_eq!(values("/ru | :: | strip"), ["елка подъем"]);
     // the hyphenated table name is a bare word
     assert_eq!(values("= 'Љубљана' | translit(sr-latn)"), ["Ljubljana"]);
     assert_eq!(values("= 'Ljubljana' | translit('sr-cyrl')"), ["Љубљана"]);

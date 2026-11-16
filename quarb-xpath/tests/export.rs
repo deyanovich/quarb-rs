@@ -53,6 +53,9 @@ fn refusals() {
     assert!(err("/a <=> /b[::x = $$0::x]").contains("correlation"));
     assert!(err("//book | upper").contains("pipeline"));
     assert!(err("//book @| mean").contains("count() and sum()"));
+    // a branch's own chain of fields after its projection: the
+    // attribute would be answered for the field
+    assert!(err("/a::head:year || /b::title").contains("a field read after a projection"));
 }
 
 #[test]

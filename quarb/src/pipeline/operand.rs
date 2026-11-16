@@ -1175,6 +1175,12 @@ fn eval_operand_in<H: Host>(
             // the nested pipeline stands on lone values, or on the
             // cell `map` marked it with, whatever encloses it
             let _own_cells = crate::value::ambient::cells_ground();
+            // a random draw inside it belongs to the thread the
+            // expression is read on, where that thread's position
+            // is known (spec: Random Values)
+            let _position = scope
+                .ordinal
+                .map(|at| crate::pipeline::random_position(at as u64));
             // A capsa of the tail: this scope's register, captures,
             // marks, witness and arrivals, standing at `n` with
             // `topic` — or none, for a row that is a node, whose
@@ -1798,14 +1804,7 @@ fn eval_operand_in<H: Host>(
         Operand::Neg(inner) | Operand::Desc(inner) => {
             forking(eval_operand(host, ext, inner, trace, scope))
                 .into_iter()
-                .map(|v| match v.numeric_reading() {
-                    Some(Value::Int(n)) => n
-                        .checked_neg()
-                        .map(Value::Int)
-                        .unwrap_or(Value::Float(-(n as f64))),
-                    Some(Value::Float(f)) => Value::Float(-f),
-                    _ => Value::Null,
-                })
+                .map(crate::stdlib::functions::negated)
                 .collect()
         }
         // A reducing callee's first argument: the values it reaches

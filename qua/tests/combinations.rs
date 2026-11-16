@@ -72,8 +72,15 @@ fn an_operand_command_yields_every_value() {
 #[test]
 fn the_sizes_are_validated() {
     assert!(quarb::run("/scenes/0/who/* | :: @| combinations", &doc()).is_err());
-    assert!(quarb::run("/scenes/0/who/* | :: @| combinations(0)", &doc()).is_err());
+    assert!(quarb::run("/scenes/0/who/* | :: @| combinations(-1)", &doc()).is_err());
+    assert!(quarb::run("/scenes/0/who/* | :: @| combinations(\"two\")", &doc()).is_err());
     assert!(quarb::run("/scenes/0/who/* | :: @| pairs(2)", &doc()).is_err());
+    // zero is a size: the one subset of no member (ruling
+    // 2026-11-15; it was refused)
+    assert_eq!(
+        values("/scenes/0/who/* | :: @| combinations(0) @| count"),
+        ["1"]
+    );
 }
 
 /// `@| unique` tells nodes apart by identity: two rows that read

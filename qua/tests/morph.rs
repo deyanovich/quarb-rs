@@ -58,7 +58,7 @@ fn the_synopsis_is_checked_before_the_run() {
     );
     // The prefix is required: the bare name is no command.
     let e = refuse("/w/* | :: | lemma");
-    assert!(e.contains("pipeline command 'lemma'"), "{e}");
+    assert!(e.contains("'lemma' is not a command"), "{e}");
 }
 
 #[test]

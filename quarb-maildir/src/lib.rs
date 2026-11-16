@@ -17,7 +17,9 @@
 //! (`::subject`, `::from`, `::to`, `::date`, `::in-reply-to`,
 //! `::message-id`, ...), RFC 2047 encoded words decoded
 //! (`=?utf-8?B?…?=` reads as its text); `| %` is the record of
-//! them, a header that occurs twice read as its first occurrence.
+//! them. A header that occurs more than once (`Received`, several
+//! `Cc` lines) is the list of its occurrences in the message's
+//! order; one that occurs once is a string.
 //! The body is the node's value (`::`). For multipart messages the body is
 //! the raw MIME body — as stored, not pretty; a `text/plain` part
 //! extractor is a recorded refinement. `:::n-messages` on the
@@ -399,6 +401,19 @@ impl MaildirAdapter {
             .find(|(k, _)| k == name)
             .map(|(_, v)| v.as_str())
     }
+
+    /// Every occurrence of a header, in the message's own order.
+    fn header_all(&self, node: NodeId, name: &str) -> Vec<&str> {
+        self.msg(node)
+            .map(|m| {
+                m.headers
+                    .iter()
+                    .filter(|(k, _)| k == name)
+                    .map(|(_, v)| v.as_str())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 impl AstAdapter for MaildirAdapter {
@@ -437,16 +452,27 @@ impl AstAdapter for MaildirAdapter {
     }
 
     /// Headers, lowercased: `::subject`, `::from`,
-    /// `::in-reply-to`, ...
+    /// `::in-reply-to`, ... A header that occurs more than once
+    /// (`Received` on every hop, several `Cc` lines, an `X-` header
+    /// written twice) is the list of its occurrences, in the
+    /// message's own order; one that occurs once is the string it
+    /// is (ruling 2026-11-14 for 0.65: it read as its first
+    /// occurrence, and the later ones were in reach of no query).
     fn property(&self, node: NodeId, name: &str) -> Option<Value> {
-        self.header(node, name).map(|v| Value::Str(v.to_string()))
+        match self.header_all(node, name).as_slice() {
+            [] => None,
+            [one] => Some(Value::Str(one.to_string())),
+            many => Some(Value::list(
+                many.iter().map(|v| Value::Str(v.to_string())).collect(),
+            )),
+        }
     }
 
     /// The names of a message's headers, in the message's own
     /// order: what `| %` lists and `:props` names (they answered
     /// nothing, the headers answering by name alone). A header that
-    /// occurs more than once is one name, read as its first
-    /// occurrence, as `::received` reads it; `:::n-headers` counts
+    /// occurs more than once is one name, read as the list of its
+    /// occurrences, as `::received` reads it; `:::n-headers` counts
     /// them all. The serializers are untouched: a message is still
     /// its body to `| json`.
     fn property_names(&self, node: NodeId) -> Vec<String> {
@@ -530,10 +556,11 @@ impl AstAdapter for MaildirAdapter {
     /// `::in-reply-to-->` (or any header holding a message id)
     /// resolves through the Message-ID index.
     fn resolve(&self, node: NodeId, property: &str, _hint: Option<&str>) -> Option<NodeId> {
-        let v = self.header(node, property)?;
-        // In-Reply-To / References may hold several ids; the first
-        // resolvable one wins.
-        v.split_whitespace()
+        // In-Reply-To / References may hold several ids, on one line
+        // or on several; the first resolvable one wins.
+        self.header_all(node, property)
+            .into_iter()
+            .flat_map(str::split_whitespace)
             .filter_map(|id| self.by_id.get(id.trim_matches(['<', '>'])))
             .map(|&i| NodeId(i as u64 + 1))
             .next()

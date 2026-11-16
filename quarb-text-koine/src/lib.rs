@@ -308,7 +308,12 @@ fn import_from(mut doc: atrep::Document, lit: bool, header: bool) -> Result<Text
     kanonizo::tasso(&mut doc, &dial, Path::new("."))?;
     let head = head_meta(&doc, &dial);
     if header {
-        let hoisted = hoisted_header(&doc, &dial);
+        let mut hoisted = hoisted_header(&doc, &dial);
+        // the colophon is what the header's publication statement
+        // declares: the head's ([`head_meta`]), and no part of the
+        // text. A native document's colophon is a block of its text
+        // and stays there, as its title line does.
+        hoisted.extend(colophons(&doc).iter().map(|(at, _)| *at));
         let mut at = 0;
         doc.blocks.retain(|_| {
             at += 1;
@@ -344,6 +349,72 @@ fn hoisted_header(doc: &atrep::Document, dial: &Dialektos) -> Vec<usize> {
         }
     }
     out
+}
+
+/// The colophons of a document: every embedded `kolophon` block
+/// at its top level, by index, with its fields (atrep 0.3.11). An
+/// importer writes one, as the document's last block, from the
+/// publication statement of a TEI header (`publisher`, `pubPlace`,
+/// `date`) or a DocBook `info`: the fields `officina`, `locus` and
+/// `datum`, the bibliography's own campi. A field's name is
+/// canonicalized through the dialektos, so a colophon authored
+/// under any of its aliases lands on the same name; a name outside
+/// the vocabulary stands as written.
+fn colophons(doc: &atrep::Document) -> Vec<(usize, Vec<(String, String)>)> {
+    let kolophon = dialektos::resolve(Path::new("."), "kolophon").ok();
+    let canon = |term: &str| -> String {
+        kolophon
+            .as_ref()
+            .and_then(|d| d.vocabularies.get("campi"))
+            .map(|v| v.canonicalize(term).to_string())
+            .unwrap_or_else(|| term.to_string())
+    };
+    let mut out = Vec::new();
+    for (at, block) in doc.blocks.iter().enumerate() {
+        let ABlock::MonadEnglossis {
+            dialect, children, ..
+        } = block
+        else {
+            continue;
+        };
+        if dialect != "kolophon" {
+            continue;
+        }
+        let mut fields = Vec::new();
+        for field in children {
+            if let ABlock::Para {
+                lemma, children, ..
+            } = field
+            {
+                let name = canon(flat(lemma).trim());
+                let value = children
+                    .iter()
+                    .map(block_text)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if !name.is_empty() && !value.trim().is_empty() {
+                    fields.push((name, value));
+                }
+            }
+        }
+        out.push((at, fields));
+    }
+    out
+}
+
+/// A colophon's fields as declarations of the head: each under its
+/// own name in the record `::head` (`::head:officina`,
+/// `::head:locus`, `::head:datum`), and the first `datum` that
+/// reads as an ISO date or timestamp the curated `::published`, as
+/// a page's or a note's date is (a span such as "2015–2022" is no
+/// instant and stays the text it is).
+fn declare_colophon(head: &mut quarb_text::HeadMeta, colophons: &[(usize, Vec<(String, String)>)]) {
+    for (name, value) in colophons.iter().flat_map(|(_, fields)| fields) {
+        head.declare(name, value);
+        if name == "datum" && head.published.is_none() {
+            head.published = quarb_text::HeadMeta::instant(value);
+        }
+    }
 }
 
 /// The document's declared identity, as the html reading declares
@@ -425,6 +496,7 @@ fn head_meta(doc: &atrep::Document, dial: &Dialektos) -> quarb_text::HeadMeta {
             _ => {}
         }
     }
+    declare_colophon(&mut head, &colophons(doc));
     head
 }
 

@@ -546,11 +546,14 @@ pub(crate) fn apply_command_in<H: Host>(
                             );
                         }
                     },
+                    // the seed of the session's random values (spec:
+                    // Random Values): the runs after it draw from it
+                    ("--seed", Value::Int(n)) if n >= 0 => memory.borrow_mut().seed = Some(n as u64),
                     (n, v) => {
                         return refuse_all::<H>(
                             caps,
                             &format!(
-                                "session: '{n}' is no setting{}; the settings are '--pretty=always|structures|off', '--precision=n' and '--diagnostics=error|warning|info|debug'",
+                                "session: '{n}' is no setting{}; the settings are '--pretty=always|structures|off', '--precision=n', '--diagnostics=error|warning|info|debug' and '--seed=n'",
                                 if matches!(v, Value::Null) { String::new() } else { format!(" (given {})", crate::stdlib::kind_of(&v)) }
                             ),
                         );
@@ -825,6 +828,23 @@ pub(crate) fn apply_command_in<H: Host>(
                 c
             })
             .collect()
+        }
+        // `| ngrams(n)` on a list reads its items, as `| bigrams`
+        // does (it read the list as its text, "a, b, c,"); on a text
+        // it is the windows of the text's words, thread by thread.
+        Command::Func(call)
+            if call.name == "ngrams"
+                && caps.iter().any(|c| matches!(c.topic, Some(Value::List(_)))) =>
+        {
+            caps.into_iter()
+                .flat_map(|c| {
+                    if matches!(c.topic, Some(Value::List(_))) {
+                        agg_as_func_command(call, vec![c], host, trace, outer, peers)
+                    } else {
+                        func_command(call, vec![c], host, trace, outer, peers)
+                    }
+                })
+                .collect()
         }
         Command::Func(call)
             if stdlib::known_agg(&call.name)
@@ -1250,11 +1270,19 @@ pub(crate) fn apply_command_in<H: Host>(
         // ride along (making `@| sort_by(…) @| reverse | [..n]`
         // compose). The effective topic is baked in, keeping value
         // outputs identical to a plain reduction's.
+        // (`sample` and `shuffle` pick and reorder likewise: the
+        // threads drawn are the threads, nodes and registers with
+        // them, so `/row @| sample(5) | ::Name` reads the five rows;
+        // they answered the threads' values, null for a node)
         Command::Agg(call)
             if matches!(
                 call.name.as_str(),
-                "sort" | "unique" | "reverse" | "first" | "last"
-            ) =>
+                "sort" | "unique" | "reverse" | "first" | "last" | "sample" | "shuffle"
+            )
+                // a count written as an expression is read first, by
+                // the arm below
+                && !(call.name == "sample"
+                    && call.args.iter().any(|a| matches!(a, Arg::Expr(_)))) =>
         {
             order_command(call, caps, host)
         }
@@ -1300,8 +1328,13 @@ pub(crate) fn apply_command_in<H: Host>(
         // register holding a list, a sub-pipeline's values — read
         // once, against the first capsa's scope (every capsa of a
         // context shares the register the set was bound in).
+        // `combinations($.k)`, `permutations($.k)`: the size as an
+        // expression, read the same way (ruling 2026-11-15).
         Command::Agg(call)
-            if call.name == "jaccard" && call.args.iter().any(|a| matches!(a, Arg::Expr(_))) =>
+            if matches!(
+                call.name.as_str(),
+                "jaccard" | "combinations" | "permutations" | "sample"
+            ) && call.args.iter().any(|a| matches!(a, Arg::Expr(_))) =>
         {
             let resolved = match caps.first() {
                 Some(c) => FnCall {
@@ -1326,7 +1359,11 @@ pub(crate) fn apply_command_in<H: Host>(
                 },
                 None => call.clone(),
             };
-            agg_command(&resolved, caps, host)
+            if resolved.name == "sample" {
+                order_command(&resolved, caps, host)
+            } else {
+                agg_command(&resolved, caps, host)
+            }
         }
         // `@| #(-c=$.cols)`, `@| #(-i=$.levels)`: an option holding an
         // expression reads it once, against the first capsa's scope
@@ -1756,8 +1793,15 @@ pub(crate) fn agg_as_func_command<H: Host>(
         c.members = Vec::new();
         return vec![c];
     }
+    // `| sample`, `| shuffle` on each thread's list: a stream of its
+    // own per thread, by its position (spec: Random Values)
+    let positioned = matches!(call.name.as_str(), "sample" | "shuffle")
+        && (caps.len() > 1 || crate::pipeline::with_run(|s| s.random_position.is_none()));
     caps.into_iter()
-        .map(|mut c| {
+        .enumerate()
+        .map(|(at, mut c)| {
+            let _position =
+                positioned.then(|| crate::pipeline::random_position(at as u64 + 1));
             // `| mean(--by=:Sex)` — the grouped reduction (ruling
             // 2026-11-05): the table's rows grouped by the key
             // column(s), one row per distinct key in order of first
@@ -1845,6 +1889,9 @@ pub(crate) fn agg_as_func_command<H: Host>(
                 c.members = Vec::new();
                 return c;
             }
+            // whether the reducer stands on a list: its ordering
+            // and cutting commands then answer a list
+            let on_a_list = matches!(c.topic, Some(Value::List(_))) || !c.members.is_empty();
             let items = match of {
                 // `| sum(--of=:n)` after `group`: the expression is
                 // read on each member in turn (each its own capsa),
@@ -1982,9 +2029,65 @@ pub(crate) fn agg_as_func_command<H: Host>(
                     None => vec![crate::pipeline::effective_topic(&c, host)],
                 },
             };
+            // `combinations($.k)`: a size written as an expression
+            // is read in the thread's scope
+            let sized;
+            let unread = |a: &Arg| {
+                matches!(a, Arg::Expr(_))
+                    || matches!(a, Arg::Opt { value: Some(v), .. } if !matches!(v, Operand::Lit(_)))
+            };
+            let call = if matches!(
+                call.name.as_str(),
+                "combinations" | "permutations" | "sample" | "shuffle"
+            ) && call.args.iter().any(unread)
+            {
+                sized = FnCall {
+                    headless: call.headless,
+                    name: call.name.clone(),
+                    args: call
+                        .args
+                        .iter()
+                        .map(|a| match a {
+                            Arg::Expr(e) => Arg::Lit(operand_scalar(
+                                host,
+                                &c.ext,
+                                e,
+                                trace,
+                                c.scope(None, peers, outer),
+                            )),
+                            // `sample(--share=$.x)`, `shuffle(--seed=$.s)`
+                            Arg::Opt {
+                                name,
+                                value: Some(e),
+                            } if !matches!(e, Operand::Lit(_)) => Arg::Opt {
+                                name: name.clone(),
+                                value: Some(Operand::Lit(operand_scalar(
+                                    host,
+                                    &c.ext,
+                                    e,
+                                    trace,
+                                    c.scope(None, peers, outer),
+                                ))),
+                            },
+                            other => other.clone(),
+                        })
+                        .collect(),
+                };
+                &sized
+            } else {
+                call
+            };
             let mut out = stdlib::apply(call, items, &|e| host.scale_of(e));
             c.topic = Some(match out.len() {
-                1 => out.pop().expect("len checked"),
+                // a reducer that answers a list keeps it, of one
+                // member as of several; a table's rows drawn or
+                // ordered are the one table
+                1 if !(stdlib::answers_a_list(&call.name)
+                    || on_a_list && stdlib::keeps_a_list(call))
+                    || matches!(out[0], Value::Table(_)) =>
+                {
+                    out.pop().expect("len checked")
+                }
                 _ => Value::list(out),
             });
             c.prov = c.prov.flat();
@@ -3479,6 +3582,20 @@ pub(crate) fn order_command<H: Host>(
     }
     match call.name.as_str() {
         "reverse" => caps.reverse(),
+        // `sample`, `shuffle`: the threads at the positions drawn,
+        // whole (spec: Random Values). The positions are the ones a
+        // list of as many values would give, so the same seed picks
+        // the same places of nodes and of values. Under `--replace`
+        // a thread drawn twice stands twice.
+        "sample" | "shuffle" => match stdlib::drawn_positions(call, caps.len()) {
+            Ok(positions) => {
+                caps = positions.into_iter().map(|i| caps[i].clone()).collect();
+            }
+            Err(why) => {
+                record_refusal(format!("{}: {why}", call.name));
+                return Vec::new();
+            }
+        },
         "unique" => {
             // A dropped duplicate hands its origins to the
             // survivor: the value was read there too.
@@ -3573,8 +3690,17 @@ pub(crate) fn func_command<H: Host>(
     outer: Option<&Scope<'_, H::Ext>>,
     peers: Option<&Peers<H::Ext>>,
 ) -> Vec<Thread<H::Ext>> {
+    // `rnd` draws once per thread, from a stream derived by the
+    // thread's position, from one (spec: Random Values). One thread
+    // alone keeps the position its surroundings gave it: a call
+    // inside an expression stands on one thread of the enclosing
+    // context, whose position it is.
+    let positioned = call.name == "rnd"
+        && (caps.len() > 1 || crate::pipeline::with_run(|s| s.random_position.is_none()));
     caps.into_iter()
-        .flat_map(|c| {
+        .enumerate()
+        .flat_map(|(at, c)| {
+            let _position = positioned.then(|| crate::pipeline::random_position(at as u64 + 1));
             let topic = c.topic.clone().unwrap_or(Value::Null);
             let prov = c.prov.flat();
             // Expression arguments evaluate per capsa, against

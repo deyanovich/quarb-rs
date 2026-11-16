@@ -86,7 +86,9 @@ fn encoded_word_headers_decode() {
 /// `| %` on a message is the record of its headers, in the
 /// message's order (it answered the empty record: the headers
 /// answered by name and were not listed).
-/// A header that occurs twice is one field, its first occurrence.
+/// A header that occurs more than once is one field, the list of
+/// its occurrences in the message's order (ruling 2026-11-14 for
+/// 0.65; it read as the first occurrence alone).
 #[test]
 fn a_messages_record_is_its_headers() {
     let dir = std::env::temp_dir().join(format!("quarb-maildir-record-{}", std::process::id()));
@@ -96,6 +98,7 @@ fn a_messages_record_is_its_headers() {
     std::fs::write(
         dir.join("cur/100.a:2,S"),
         "Received: by relay-b\nReceived: by relay-a\nFrom: ada@x\n\
+         Cc: bo@x\nCc: cy@x\n\
          Subject: =?utf-8?B?VGhlIGVuZ2luZQ==?=\nMessage-ID: <p1@x>\n\nIt weaves.\n",
     )
     .unwrap();
@@ -103,10 +106,22 @@ fn a_messages_record_is_its_headers() {
     assert_eq!(
         values(&a, "/* | %"),
         [
-            r#"%(received = "by relay-b"; from = "ada@x"; subject = "The engine"; message-id = "<p1@x>")"#
+            r#"%(received = @("by relay-b"; "by relay-a"); from = "ada@x"; cc = @("bo@x"; "cy@x"); subject = "The engine"; message-id = "<p1@x>")"#
         ]
     );
-    assert_eq!(values(&a, "/* | :::n-headers"), ["5"]);
+    assert_eq!(values(&a, "/* | :::n-headers"), ["7"]);
+    // the list in the message's order; a header written once is the
+    // string it was
+    assert_eq!(
+        values(&a, "/*::received | ..."),
+        ["by relay-b", "by relay-a"]
+    );
+    assert_eq!(values(&a, "/*::from"), ["ada@x"]);
+    // every occurrence is in reach of a query: the second Cc line
+    // was read by none
+    assert_eq!(values(&a, r#"/*[::cc = "cy@x"]::subject"#), ["The engine"]);
+    assert_eq!(values(&a, "/*[::received == (/relay-a/)] | count"), ["1"]);
+    assert_eq!(values(&a, "/*::cc | count"), ["2"]);
     // the root has no headers; a message is still its body to a
     // serializer
     assert_eq!(values(&a, "^ | %"), ["%()"]);

@@ -90,6 +90,13 @@ struct Cli {
     #[arg(long, value_name = "ISO")]
     now: Option<String>,
 
+    /// Pin the seed of the session's random values (`random()`,
+    /// `sample`, `shuffle`): a whole number from 0. Every line then
+    /// answers as a run with that seed, on every machine and in
+    /// every release. Default: each line draws its own.
+    #[arg(long, value_name = "N")]
+    seed: Option<u64>,
+
     /// Seed the fragment table with definitions from a file
     /// before the session starts.
     #[arg(long, value_name = "FILE")]
@@ -155,6 +162,8 @@ struct Remount {
     /// The diagnostics level the command line seeded; a rebuilt
     /// executor starts from it again.
     diagnostics: quarb::Severity,
+    /// The seed `--seed` pinned, seeded into every executor too.
+    seed: Option<u64>,
     /// The environments mounted from the command line.
     environments: Vec<quarb::Environment>,
     /// The command libraries the session runs with: the linked ones
@@ -203,6 +212,7 @@ fn build_doc(spec: &MountSpec, opts: &Options) -> Result<(Doc, bool)> {
 fn seeded_memory(remount: &Remount) -> quarb::SessionMemory {
     let memory = quarb::session_memory();
     memory.borrow_mut().diagnostics = remount.diagnostics;
+    memory.borrow_mut().seed = remount.seed;
     memory
 }
 
@@ -514,6 +524,7 @@ fn main() -> Result<()> {
             now,
             allow_shell: cli.allow_shell,
             diagnostics: cli_level(&cli)?,
+            seed: cli.seed,
             environments,
             libraries,
             model: model.clone(),

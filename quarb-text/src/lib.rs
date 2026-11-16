@@ -3394,9 +3394,10 @@ impl TextModel {
     /// see it.
     /// A heading's sentence on a stored tier (a CoNLL-U sidecar's, a
     /// parsing pack's): headings are sentences under every
-    /// segmentation, so the title and each heading get one derived
-    /// sentence under their node, before its content, its tokens the
-    /// segmenter's as rows, counted in sequence with the rest.
+    /// segmentation, so each heading gets one derived sentence under
+    /// its node, before its content, its tokens the segmenter's as
+    /// rows, counted in sequence with the rest. (A title the
+    /// document only declares is none: [`TextModel::heading_text`].)
     fn push_heading_sentence(&mut self, block: usize, n: &mut u32, sentence: &mut u32) {
         use unicode_segmentation::UnicodeSegmentation;
         let Some(text) = self.heading_text(block).map(str::to_string) else {

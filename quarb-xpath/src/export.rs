@@ -158,6 +158,16 @@ impl Exporter {
         if let Some(p) = self.kid(b, "projection") {
             out.push_str(&self.projection(p)?);
         }
+        // a branch's own chain of fields after its projection
+        // (`/a::head:year || /b::title`): an attribute's value has no
+        // fields in XPath, and dropping the chain would answer the
+        // attribute for the field
+        if self.kid(b, "field").is_some() || self.kid(b, "value-meta").is_some() {
+            return Err(XPathError::Unsupported(
+                "a field read after a projection ('::head:year': XPath 1.0 reads no field of a value)"
+                    .into(),
+            ));
+        }
         if out.is_empty() {
             out.push('.');
         }

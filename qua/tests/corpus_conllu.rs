@@ -256,6 +256,42 @@ fn conllu_plus_columns() {
     assert_eq!(values(&m, "//token[::lemma] @| count"), ["0"]);
 }
 
+/// A given tier has no sentence for a title the document only
+/// declares, as the computed one has none (ruling 2026-11-15): the
+/// sidecar's sentences are the document's, numbered from one. (The
+/// title got a derived sentence before them.)
+#[test]
+fn a_declared_title_is_no_sentence_on_a_given_tier() {
+    let prose = "The old lady looked over them and she couldn't see.\n\nNo answer.\n";
+    let sidecar: String = TREEBANK
+        .split("\n\n")
+        .filter(|block| !block.contains("d1-2"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let mut m = quarb_text::TextModel::parse_plain(prose);
+    m.set_head_meta(quarb_text::HeadMeta {
+        title: Some("The Adventures of Tom Sawyer".into()),
+        ..Default::default()
+    });
+    m.annotate_conllu(&sidecar).unwrap();
+    assert_eq!(values(&m, "//sentence @| count"), ["2"]);
+    assert_eq!(values(&m, "/sentence @| count"), ["0"]);
+    assert_eq!(
+        values(&m, "//sentence[1]::"),
+        ["The old lady looked over them and she couldn't see."]
+    );
+    assert_eq!(values(&m, "//token[::lower = \"sawyer\"] @| count"), ["0"]);
+    // and the computed tier alike
+    let mut m = quarb_text::TextModel::parse_plain(prose);
+    m.set_head_meta(quarb_text::HeadMeta {
+        title: Some("The Adventures of Tom Sawyer".into()),
+        ..Default::default()
+    });
+    m.tokenize();
+    assert_eq!(values(&m, "//sentence @| count"), ["2"]);
+    assert_eq!(values(&m, "//token[::lower = \"sawyer\"] @| count"), ["0"]);
+}
+
 /// The sidecar over prose: the same annotation aligned to the
 /// document's text, tokens under the prose blocks, sentences an
 /// annotation on the token.

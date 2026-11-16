@@ -41,10 +41,10 @@ fn man_is_the_door_to_the_inventory() {
     assert!(!ok && missing.contains("no command 'uper'"), "{missing}");
     let (tsv, ok) = qua(&["--commands"]);
     assert!(
-        ok && tsv.starts_with("name\tkind\tpipes\tlayer\tonnull\tdoc\n"),
+        ok && tsv.starts_with("name\taliases\tkind\tpipes\tlayer\tonnull\tdoc\n"),
         "{tsv}"
     );
-    assert!(tsv.contains("\ntree\tcontext\t| @|\tnode\t"), "{tsv}");
+    assert!(tsv.contains("\ntree\t\tcontext\t| @|\tnode\t"), "{tsv}");
 }
 
 /// The symbolic syntax has its pages (the user, 2026-11-12: "qua man

@@ -10,7 +10,8 @@ import socket, sys, threading
 
 M = {}
 def msg(uid, frm, subj, mid, irt, date, body):
-    h = f"From: {frm}\r\nTo: crew@ship.dev\r\nSubject: {subj}\r\nMessage-ID: <{mid}>\r\n"
+    h = "Received: by relay-b\r\nReceived: by relay-a\r\n"
+    h += f"From: {frm}\r\nTo: crew@ship.dev\r\nSubject: {subj}\r\nMessage-ID: <{mid}>\r\n"
     if irt: h += f"In-Reply-To: <{irt}>\r\n"
     h += f"Date: {date}\r\n"
     return (h + "\r\n", body + "\r\n")

@@ -70,6 +70,7 @@ fn refusals() {
     assert!(err("/a <=> /b[::x = $$0::x]").contains("correlation"));
     assert!(err("/books/* | .t(/title::) | $.t").contains("command"));
     assert!(err("/books/*.rs/x::").contains("glob"));
+    assert!(err("/a::head:year || /b::title").contains("a field read after a projection"));
 }
 
 #[test]

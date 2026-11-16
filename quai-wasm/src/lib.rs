@@ -1532,8 +1532,10 @@ mod tests {
             );
             let corpus = format!("corpus-{kind}");
             let mut s = mount(&one("pinakes", &corpus, bytes, ""), now).unwrap();
+            // the title the file's properties declare is no token
+            // (ruling 2026-11-15; its two words were counted: 60)
             let r = read(s.run("/pinakes//token @| count"));
-            assert_eq!(lines(&r), ["60"], "{kind}: {r}");
+            assert_eq!(lines(&r), ["58"], "{kind}: {r}");
             // the literary reading has no vocabulary to read there
             let lit = format!("lit-{kind}");
             for options in ["", "notes=omit"] {

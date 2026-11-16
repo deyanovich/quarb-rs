@@ -6,6 +6,7 @@ pub(crate) mod functions;
 pub use crate::syntax::registry::{known_agg, known_keyed, known_scalar, names_columns};
 pub use functions::*;
 pub(crate) mod arith;
+pub(crate) mod random;
 pub(crate) use arith::UnitScale;
 pub(crate) mod compare;
 pub(crate) mod text;

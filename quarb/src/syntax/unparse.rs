@@ -163,6 +163,17 @@ pub(crate) fn branch(b: &Branch) -> String {
     if let Some(p) = &b.projection {
         out.push_str(&projection(p));
     }
+    // the branch's own chain of fields after its projection
+    // (`::head:year`); a provenance shape (`:%provenance`) is
+    // written bare, a field's name quoted where it needs it
+    for (name, quoted) in &b.fields {
+        out.push(':');
+        if !quoted && name.starts_with(['%', '@']) {
+            out.push_str(name);
+        } else {
+            out.push_str(&name_text(name));
+        }
+    }
     // A final mark (or named push) prints with a trailing space
     // for lexing; at the branch end the joiner supplies its own
     // spacing.
@@ -2142,9 +2153,8 @@ mod tests {
             rt("/x | ::n @| stddev(--sample)"),
             "/x | ::n @| std(--sample)"
         );
-        assert_eq!(rt("= 'é' | strip"), "= \"é\" | deaccent");
         assert_eq!(rt("= 'a' | td(--to='b')"), "= \"a\" | duration(--to=b)");
-        assert_eq!(rt("= 'a' | char-count"), "= \"a\" | gc");
+        assert_eq!(rt("= 'a' | charcount"), "= \"a\" | gc");
     }
 
     #[test]

@@ -48,9 +48,15 @@ fn number_is_the_locale_cast_alone() {
     // the outline numbering of `@| number` is retired (ruling
     // 2026-11-03): `number` rides the plain pipe only
     let e = refused("/toc/* @| number(::depth)");
-    assert!(e.contains("aggregate command 'number'"), "{e}");
+    assert!(
+        e.contains("'number' takes one value at a time: write '| number'"),
+        "{e}"
+    );
     let e = refused("/toc/* | ::depth @| number");
-    assert!(e.contains("aggregate command 'number'"), "{e}");
+    assert!(
+        e.contains("'number' takes one value at a time: write '| number'"),
+        "{e}"
+    );
     assert_eq!(values(r#"= "1 234,5" | number(fr)"#), ["1234.5"]);
     // the text is optional: a level alone under --style is the
     // number-only line `@| number` printed

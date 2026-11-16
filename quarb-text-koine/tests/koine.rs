@@ -1104,9 +1104,10 @@ Rome fell slowly @@.@>[(gibbon1776)ch. 15.@@ and Persia was vast \
 }
 
 /// Headings are sentences everywhere (the ruling of 2026-10-09):
-/// the title and every heading get one derived sentence under
-/// their node, before the content, counted in sequence; `:::at`
-/// and `:::end` are character coordinates in the block's text.
+/// every heading gets one derived sentence under its node, before
+/// the content, counted in sequence; `:::at` and `:::end` are
+/// character coordinates in the block's text. (A title the document
+/// only declares is none: ruling 2026-11-15.)
 #[test]
 fn headings_are_sentences_and_coordinates_survive_resegmentation() {
     let md = "# The Play\n\nA word here. Another one!\n\n## Act Two\n\nLast words.\n";

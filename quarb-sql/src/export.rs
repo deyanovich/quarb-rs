@@ -1979,7 +1979,7 @@ impl Exporter {
                         }
                         // A reducing aggregate on the plain pipe:
                         // the grouped reduction.
-                        "count" | "sum" | "mean" | "avg" | "min" | "max" => {
+                        "count" | "sum" | "mean" | "min" | "max" => {
                             let (key, _, _) = grouped.as_ref().ok_or_else(|| {
                                 SqlError::Unsupported(format!(
                                     "'| {name}' outside a group (use '@| {name}')"
@@ -2073,10 +2073,7 @@ impl Exporter {
                     // `@|{.k} agg`: the fold by the pushed key is the
                     // grouped reduction, GROUP BY key.
                     let name = self.prop_s(s, "name");
-                    if !matches!(
-                        name.as_str(),
-                        "count" | "sum" | "mean" | "avg" | "min" | "max"
-                    ) {
+                    if !matches!(name.as_str(), "count" | "sum" | "mean" | "min" | "max") {
                         return Err(SqlError::Unsupported(format!(
                             "the '{name}' command per group (GROUP BY reduces)"
                         )));
@@ -2114,7 +2111,7 @@ impl Exporter {
                 "agg" => {
                     let name = self.prop_s(s, "name");
                     match name.as_str() {
-                        "count" | "sum" | "mean" | "avg" | "min" | "max" => {
+                        "count" | "sum" | "mean" | "min" | "max" => {
                             // Quarb's count counts every row, nulls
                             // included: COUNT(*) regardless of a
                             // pending column.
@@ -2393,7 +2390,7 @@ fn sql_agg(name: &str, col: Option<String>) -> Result<String, SqlError> {
     let f = match name {
         "count" => "COUNT",
         "sum" => "SUM",
-        "mean" | "avg" => "AVG",
+        "mean" => "AVG",
         "min" => "MIN",
         "max" => "MAX",
         _ => unreachable!("checked by caller"),

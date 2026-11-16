@@ -1332,6 +1332,8 @@ pub(crate) fn union_branches(
 ) -> Vec<Capsa> {
     let mut caps = Vec::new();
     for branch in branches {
+        // the threads of this branch, before they join the union
+        let mut own: Vec<Capsa> = Vec::new();
         // A root-anchored branch (`^` / `()`) navigates from the
         // root — the same node at the top level, the reach-back
         // from inside a subcontext body. The mark anchors navigate
@@ -1362,7 +1364,7 @@ pub(crate) fn union_branches(
                 None,
             ) {
                 let walked = crate::pipeline::with_run(|s| s.walk_captures.get(&ext.node).cloned());
-                caps.push(Capsa {
+                own.push(Capsa {
                     prov: if branch.projection.is_some() {
                         Prov::at(ext.node.into(), command_now())
                     } else {
@@ -1394,6 +1396,30 @@ pub(crate) fn union_branches(
                 });
             }
         }
+        // `/a::head:year || /b::title` — in a union each branch's
+        // closing projection takes its own chain of fields: read on
+        // this branch's threads as over a pipe (`| :year`), before
+        // the union is made, so the threads of another branch keep
+        // what they projected.
+        if !branch.fields.is_empty() {
+            let reads: Vec<Command> = branch
+                .fields
+                .iter()
+                .cloned()
+                .map(crate::syntax::parser::field_of_topic)
+                .collect();
+            own = apply_commands(
+                &reads,
+                crate::syntax::parser::PipeMode::Value,
+                0,
+                false,
+                own,
+                adapter,
+                trace,
+                outer,
+            );
+        }
+        caps.extend(own);
     }
     // Dedup the indistinguishable alone (spec: Expansion paths):
     // the same node reached by the same edge with the same facts

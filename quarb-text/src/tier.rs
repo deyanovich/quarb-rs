@@ -170,23 +170,31 @@ impl TextModel {
             && !(self.notes_omitted && self.in_body(NodeId(block as u64)).is_some())
     }
 
-    /// A title or heading is a sentence too (the ruling of
-    /// 2026-10-09: so the computed tier and a given one agree, and
-    /// match the corpora that number headings): the document's
-    /// title and every section's heading get one sentence under
-    /// the node, before its content. The text the tier is built
-    /// from, for such a node.
+    /// A heading is a sentence too (the ruling of 2026-10-09: so
+    /// the computed tier and a given one agree, and match the
+    /// corpora that number headings): every section's heading gets
+    /// one sentence under the node, before its content. The text
+    /// the tier is built from, for such a node.
+    ///
+    /// A title the document only declares (an HTML head's, a
+    /// Markdown header's, a TEI header's, the properties of a Word
+    /// file) is none (ruling 2026-11-15; Text Readings, Corpus
+    /// Reading): the text level reads it as declared identity and
+    /// has no node for it, and the word level follows the text
+    /// level, so it leaves no sentence and no token and `::title`
+    /// answers it. It was a sentence under the document node: an
+    /// edition that declares its title and also prints it as the
+    /// heading of its outer division counted it twice.
     pub(super) fn heading_text(&self, block: usize) -> Option<&str> {
         let n = self.nodes.get(block)?;
         match n.kind {
             Kind::Section => n.lemma.as_deref().filter(|l| !l.is_empty()),
-            Kind::Document => self.head.title.as_deref().filter(|t| !t.is_empty()),
             _ => None,
         }
     }
 
     /// The text a block's tier is built from: a heading's own text
-    /// on a section or the titled document, else the block's prose.
+    /// on a section, else the block's prose.
     pub(super) fn tier_text(&self, block: usize) -> &str {
         self.heading_text(block)
             .unwrap_or_else(|| &self.nodes[block].prose)

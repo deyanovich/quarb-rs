@@ -81,8 +81,9 @@ fn the_text_level_and_the_corpus_reading() {
         ok(&dir, &["^ | %(::title; ::author)", "text:emma.hwpx"]),
         "%(title = \"Emma\"; author = \"Jane Austen\")"
     );
-    // The title and the heading are sentences too: 1 + 1 + 2 + 1.
-    assert_eq!(ok(&dir, &["//sentence @| count", "corpus:emma.hwpx"]), "5");
+    // The heading is a sentence too: 1 + 2 + 1. The title the
+    // file declares is none (ruling 2026-11-15; it was a fifth).
+    assert_eq!(ok(&dir, &["//sentence @| count", "corpus:emma.hwpx"]), "4");
 }
 
 #[test]

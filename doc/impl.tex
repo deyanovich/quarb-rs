@@ -281,7 +281,13 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   the header of an XML import (TEI, FictionBook, DocBook, JATS) is
   no part of the text. A field after a projection in path position
   (\texttt{::head:year}, \texttt{/a::head:year}) is parsed as the
-  pipe form (\texttt{::head | :year});
+  pipe form (\texttt{::head | :year}); in a union whose branches
+  do not all read the same fields each branch keeps its own chain
+  (\texttt{Branch::fields}, \texttt{/a::head:year || /b::title}),
+  read on that branch's threads before the union is made
+  (\texttt{union\_branches}), written back by the unparser and
+  reflected as \texttt{field} nodes under the branch, which the jq
+  and XPath exporters refuse;
   every node answers \texttt{::href} / \texttt{::anchor} /
   \texttt{::link}, and \texttt{| link} rides them),
   wrappers transparent, headings flat into the shared derivation, trailing
@@ -705,7 +711,9 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   \texttt{quarb-session} is the entry; the renderers read the
   kaiv document (quarbopsis: \texttt{quao trace}). \\
 \texttt{quarb-maildir} & Maildir (\texttt{cur/}+\texttt{new/})
-  and mbox mailboxes: headers as properties (lowercased), the
+  and mbox mailboxes: headers as properties (lowercased; a header
+  that occurs more than once is the list of its occurrences in the
+  message's order, 2026-11-14, here and in \texttt{quarb-imap}), the
   body as the value, \texttt{:::epoch} parsing the Date header
   for range predicates. The thread graph is reference fabric:
   \texttt{::in-reply-to\textasciitilde>} walks to the parent

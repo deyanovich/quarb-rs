@@ -183,6 +183,29 @@ fn list_query(a: &MaildirAdapter, q: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The query behind `qm grep`: a message whose subject or body
+/// holds the pattern as literal text, in either case. An ASCII
+/// character that is no letter, digit or space is escaped (the
+/// regex takes a backslash before every one of them) and a control
+/// character goes by its code; a character outside ASCII is never
+/// a regex operator and stays as written (an escaped letter is
+/// refused: `\é`).
+fn grep_query(pat: &str) -> String {
+    let esc: String = pat
+        .chars()
+        .map(|c| {
+            if c.is_ascii_control() {
+                format!("\\x{:02X}", c as u32)
+            } else if c.is_ascii() && !c.is_ascii_alphanumeric() && c != ' ' {
+                format!("\\{c}")
+            } else {
+                c.to_string()
+            }
+        })
+        .collect();
+    format!("/*[::subject == (/(?i){esc}/) || :: == (/(?i){esc}/)]")
+}
+
 /// Escape a user pattern into a quoted Quarb string literal.
 fn qstr(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
@@ -215,21 +238,7 @@ fn main() -> anyhow::Result<()> {
             list_query(&a, &format!("/*[::from *= {}]", qstr(&pat)))?;
         }
         Cmd::Grep { pat } => {
-            // Case-insensitive, pattern regex-escaped.
-            let esc: String = pat
-                .chars()
-                .map(|c| {
-                    if c.is_ascii_alphanumeric() || c == ' ' {
-                        c.to_string()
-                    } else {
-                        format!("\\{c}")
-                    }
-                })
-                .collect();
-            list_query(
-                &a,
-                &format!("/*[::subject =~ /(?i){esc}/ or :: =~ /(?i){esc}/]"),
-            )?;
+            list_query(&a, &grep_query(&pat))?;
         }
         Cmd::Unread => {
             list_query(&a, "/*[:::new]")?;

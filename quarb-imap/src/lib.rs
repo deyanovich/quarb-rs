@@ -497,13 +497,24 @@ impl AstAdapter for ImapAdapter {
         }
     }
 
-    /// Headers, lowercased (one fetch per message, cached).
+    /// Headers, lowercased (one fetch per message, cached). A
+    /// header that occurs more than once (`Received` on every hop,
+    /// several `Cc` lines) is the list of its occurrences, in the
+    /// message's own order, as in the Maildir adapter (ruling
+    /// 2026-11-14 for 0.65; it read as its first occurrence).
     fn property(&self, node: NodeId, name: &str) -> Option<Value> {
         let (folder, uid) = self.msg_ctx(node)?;
-        self.headers_of(&folder, uid)
+        let mut all: Vec<Value> = self
+            .headers_of(&folder, uid)
             .into_iter()
-            .find(|(k, _)| k == name)
+            .filter(|(k, _)| k == name)
             .map(|(_, v)| Value::Str(v))
+            .collect();
+        match all.len() {
+            0 => None,
+            1 => all.pop(),
+            _ => Some(Value::list(all)),
+        }
     }
 
     /// The message body (one fetch, cached).

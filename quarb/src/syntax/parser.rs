@@ -1652,19 +1652,20 @@ impl Parser<'_> {
         // 2026-11-14): read as over the pipe (`| :year` on the
         // projected value), so a record's field ends a path and,
         // the root assumed, heads an expression. The rule is per
-        // branch; the branches of a union share one pipeline, so
-        // this build reads the fields where every branch carries
-        // the same ones, and refuses the rest.
+        // branch: in a union each branch's closing projection takes
+        // its own chain. The branches share one pipeline, so where
+        // every branch reads the same fields (a branch alone, the
+        // usual case) they are the pipeline's first commands, and
+        // where the branches differ each keeps its own, read on
+        // its threads before the union is made.
         if let Some(fields) = chains.iter().find(|c| !c.is_empty()).cloned() {
-            if chains.iter().any(|c| *c != fields) {
-                return Err(QuarbError::parse(format!(
-                    "the branches of a union read different fields after their \
-                     projections (':{}' on one of them): read the field over the \
-                     pipe ('… | :{0}'), or write two queries",
-                    fields[0].0
-                )));
+            if chains.iter().all(|c| *c == fields) {
+                pipeline.splice(0..0, fields.into_iter().map(field_of_topic));
+            } else {
+                for (b, own) in branches.iter_mut().zip(chains) {
+                    b.fields = own;
+                }
             }
-            pipeline.splice(0..0, fields.into_iter().map(field_of_topic));
         }
 
         // Pipeline over the whole union. The entering mode is
@@ -1781,6 +1782,7 @@ impl Parser<'_> {
                 steps: Vec::new(),
                 projection: None,
                 anchor: Anchor::Root,
+                fields: Vec::new(),
             });
             pipeline.push(Command::Func(FnCall {
                 headless: false,
@@ -1814,6 +1816,7 @@ impl Parser<'_> {
                         steps: Vec::new(),
                         projection: None,
                         anchor: Anchor::Root,
+                        fields: Vec::new(),
                     });
                     pipeline.push(command);
                     return Ok(());
@@ -1822,14 +1825,20 @@ impl Parser<'_> {
             // the full expression: a comparison and a bare conditional
             // stand at the head (`= 1 = 1 ? "yes" : "no"`, draft 166);
             // a `||` after the operand is the union the head refuses
-            let left = self.additive()?;
-            if matches!(self.peek(), Some(Token::PipePipe)) || self.peek_word(OR_WORDS) {
-                return Err(QuarbError::parse(
-                    "an expression head stands alone; it cannot join a \
-                     union — pipe from it instead: '= expr | …'",
-                ));
-            }
-            let mut expr = self.expr_head_from(left)?;
+            // `= !true` — a negation opens a condition at the head
+            // as it does after a pipe (ruling 2026-11-15)
+            let mut expr = if matches!(self.peek(), Some(Token::Bang)) {
+                self.negated_head()?
+            } else {
+                let left = self.additive()?;
+                if matches!(self.peek(), Some(Token::PipePipe)) || self.peek_word(OR_WORDS) {
+                    return Err(QuarbError::parse(
+                        "an expression head stands alone; it cannot join a \
+                         union — pipe from it instead: '= expr | …'",
+                    ));
+                }
+                self.expr_head_from(left)?
+            };
             // the head has no cursor: a bare projection there, of
             // any rung, is a projector (draft 166), so
             // `= %(::Name; ::Fare)` stores two property projections
@@ -1853,6 +1862,7 @@ impl Parser<'_> {
                 steps: Vec::new(),
                 projection: None,
                 anchor: Anchor::Root,
+                fields: Vec::new(),
             });
             pipeline.push(Command::Expr(expr));
             if matches!(self.peek(), Some(Token::PipePipe)) || self.peek_word(OR_WORDS) {
@@ -1948,6 +1958,7 @@ impl Parser<'_> {
                     steps: Vec::new(),
                     projection: None,
                     anchor: Anchor::Root,
+                    fields: Vec::new(),
                 });
                 pipeline.push(Command::Expr(Operand::Projected {
                     base: Box::new(base),
@@ -2495,6 +2506,14 @@ impl Parser<'_> {
             let cond = self.coalesce_tail(cond)?;
             return Ok(Command::Expr(self.cond_expr_from(cond)?));
         }
+        // `| !::ok`, `| !$_ && ::n > 2` — a negation standing where
+        // a command stands opens a condition, whose truth value is
+        // the topic (ruling 2026-11-15). No operator of two sides is
+        // written `!`, so it takes nothing from the topic, where a
+        // minus there is the topic's own subtraction.
+        if matches!(self.peek(), Some(Token::Bang)) {
+            return Ok(Command::Expr(self.negated_head()?));
+        }
         // A command that starts like a path is a navigation command —
         // the pipeline spelling of a path continuation.
         if self.nav_command_ahead() {
@@ -3000,6 +3019,15 @@ impl Parser<'_> {
             {
                 Ok(Command::Expr(self.expr_head()?))
             }
+            // `| 1..5` — a range of integers stands there as it does
+            // in a parenthesis and at an expression's head (it was a
+            // lookup of a command named `1..5`); `| 1..(n)` its form
+            // with a computed end.
+            Some(Token::Name {
+                text,
+                quoted: false,
+                ..
+            }) if range_word(text) => Ok(Command::Expr(self.expr_head()?)),
             Some(Token::Name { quoted: true, .. }) => Ok(Command::Expr(self.expr_head()?)),
             // (`| date(2013-01-01)`, draft 166's reading of a lone operand
             // as the input after a pipe, is retired: after a pipe the
@@ -3703,6 +3731,7 @@ impl Parser<'_> {
                         steps: std::mem::take(steps),
                         projection: projection.take(),
                         anchor: Anchor::Current,
+                        fields: Vec::new(),
                     });
                 }
             };
@@ -3775,6 +3804,7 @@ impl Parser<'_> {
                                 steps: rs,
                                 projection: rp,
                                 anchor,
+                                fields: Vec::new(),
                             });
                             out.pipeline.extend(cmds);
                         }
@@ -3803,6 +3833,7 @@ impl Parser<'_> {
                         steps: rs,
                         projection: rp,
                         anchor,
+                        fields: Vec::new(),
                     });
                 }
                 other => {
@@ -3865,6 +3896,7 @@ impl Parser<'_> {
                     steps: Vec::new(),
                     projection: Some(p),
                     anchor: Anchor::Current,
+                    fields: Vec::new(),
                 })),
                 // a relative path after a pipe is the hop it is written as
                 Form::Operand(Operand::Rel {
@@ -3880,6 +3912,7 @@ impl Parser<'_> {
                     steps,
                     projection,
                     anchor,
+                    fields: Vec::new(),
                 })),
                 Form::Operand(op) | Form::Arg(Arg::Expr(op)) => out.push(Command::Expr(op)),
                 Form::Arg(Arg::Lit(v)) => out.push(Command::Expr(Operand::Lit(v))),
@@ -3965,6 +3998,7 @@ impl Parser<'_> {
                     steps: vec![e],
                     projection: None,
                     anchor: Anchor::Current,
+                    fields: Vec::new(),
                 }),
             )?,
             Form::Projection(p) => Operand::Rel {
@@ -4508,6 +4542,7 @@ impl Parser<'_> {
             steps,
             projection,
             anchor,
+            fields: Vec::new(),
         })
     }
 
@@ -6887,6 +6922,12 @@ impl Parser<'_> {
         if !environment && let Some(pointer) = retired_command(&name) {
             return Err(QuarbError::parse(pointer));
         }
+        // An alias is spelled canonical from here on (ruling
+        // 2026-11-03, draft 204): its operands are read, checked and
+        // refused under its command's name, and the evaluator meets
+        // one name a command. The aliases are the inventory's
+        // (ruling 2026-11-15).
+        let name = crate::syntax::registry::canonical(&name).to_string();
         let mut args = Vec::new();
         if matches!(self.peek(), Some(Token::LParen)) {
             self.pos += 1;
@@ -6910,8 +6951,6 @@ impl Parser<'_> {
             parsed?;
             self.expect(Token::RParen, "')' to close the command's operands")?;
         }
-        // An alias is spelled canonical from here on.
-        let name = crate::syntax::registry::canonical(&name).to_string();
         self.finish_call(name, args)
     }
 
@@ -7560,11 +7599,12 @@ impl Parser<'_> {
                 }));
             }
         }
-        // A range argument is `window`'s span, `substr`'s, or a rank
-        // range on the commands that select by rank.
+        // A range argument is `window`'s span, `substr`'s, a rank
+        // range on the commands that select by rank, or the range
+        // `rnd` draws an integer of.
         if !matches!(
             name.as_str(),
-            "window" | "substr" | "frequencies" | "top" | "bottom" | "first" | "last"
+            "window" | "substr" | "frequencies" | "top" | "bottom" | "first" | "last" | "rnd"
         ) && args.iter().any(|a| matches!(a, Arg::Range(_, _)))
         {
             return Err(QuarbError::parse(format!(
@@ -9135,6 +9175,10 @@ impl Parser<'_> {
             ..
         }) = self.peek()
             && let Some((w, sym)) = BARE_BOOL_WORDS.iter().find(|(w, _)| w == text)
+            // `not(x)` is the command `not` called on `x` (ruling
+            // 2026-11-15); the bare word before an operand stays
+            // retired
+            && !(*w == "not" && matches!(self.toks.get(self.pos + 1), Some(Token::LParen)))
         {
             return Err(QuarbError::parse(format!(
                 "the bare word '{w}' is retired: write '{sym}' (or the dotted '.{w}.')"
@@ -10602,6 +10646,14 @@ impl Parser<'_> {
                  quote a string \"{name}\""
             )));
         }
+        // A retired command is refused here as after a pipe, with its
+        // pointer (`%(a = strip)` reached the evaluator, which has
+        // none; `%(a = rec)` still answered the empty record).
+        if crate::syntax::registry::split_env(&name).is_none()
+            && let Some(pointer) = retired_command(&name)
+        {
+            return Err(QuarbError::parse(pointer));
+        }
         // A prefixed command keeps its own parentheses in a body
         // (`%(pos = morph:pos(--lang=ru))`): operands and options
         // of the command, the seed its input. A built-in with
@@ -10616,7 +10668,10 @@ impl Parser<'_> {
             self.call_with_name(name)?
         } else {
             FnCall {
-                name,
+                // an alias is spelled canonical here as after a pipe
+                // (`%(a = avg)` kept the alias: the one call
+                // the evaluator met under a second name)
+                name: crate::syntax::registry::canonical(&name).to_string(),
                 args: Vec::new(),
                 headless: false,
             }
@@ -11612,7 +11667,19 @@ impl Parser<'_> {
                 // `map(body)` rides the topic too: its first argument
                 // is the command it applies, never a topic to ride
                 // (finding 2026-11-05: `(x | map(datetime) | min)`).
-                if call.name == "map" || matches!(call.args.first(), None | Some(Arg::Opt { .. })) {
+                // `rnd(1..6)` (alias `random`) reads no topic at
+                // all: its operand is what it draws from, never a
+                // topic to ride (ruling 2026-11-15), so the call
+                // stands over the topic as a call with no operand
+                // does.
+                let draws = call.name == "rnd";
+                if call.name == "map"
+                    || draws
+                    || matches!(call.args.first(), None | Some(Arg::Opt { .. }))
+                {
+                    if draws {
+                        validate_window_shift(&call)?;
+                    }
                     return Ok(Operand::Piped {
                         expr: Box::new(Operand::Topic),
                         commands: vec![Command::Func(call)],
@@ -12604,6 +12671,18 @@ impl Parser<'_> {
         shape
     }
 
+    /// A negation heading an expression (`| !::ok`, `= !true`): the
+    /// condition it opens, with the connectives, the null default
+    /// and the conditional that may follow it as after any first
+    /// operand. The same tree as the parenthesized `(!::ok)`.
+    fn negated_head(&mut self) -> Result<Operand> {
+        let first = self.pred_not()?;
+        let first = self.pred_and_from(first)?;
+        let cond = self.pred_or_from(first)?;
+        let cond = self.coalesce_tail(cond)?;
+        self.cond_expr_from(cond)
+    }
+
     /// An expression heading a command (`| $_ + 1`, `| :n ?? 0`):
     /// the additive expression with a null-default tail.
     fn expr_head(&mut self) -> Result<Operand> {
@@ -13209,6 +13288,34 @@ fn trait_cnf(e: TExpr) -> Result<Vec<TraitClause>> {
 /// Interpret a name token as a predicate literal. A quoted name is
 /// always a string; a bare name is a number, `true`/`false`/`null`, or
 /// else a string.
+/// Whether a bare word is a range of integers as an operand reads
+/// one: `1..5`, `0..8..2`, and `1..` before a parenthesized bound.
+fn range_word(text: &str) -> bool {
+    let mut parts = text.split("..");
+    let whole = |p: &str| p.parse::<i64>().is_ok();
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    let rest: Vec<&str> = parts.collect();
+    whole(first) && (1..=2).contains(&rest.len()) && rest.iter().all(|p| p.is_empty() || whole(p))
+}
+
+/// The refusal of a word that names no command: it says so, and
+/// names the nearest commands where there are any. (It read "not
+/// yet supported: pipeline command 'prod'", the words of a feature
+/// on its way, and named nothing: `product` was there.)
+fn no_such_command(name: &str, agg_only: bool) -> QuarbError {
+    let near = crate::syntax::registry::nearest(name, agg_only);
+    QuarbError::parse(if near.is_empty() {
+        format!("'{name}' is not a command ('man' lists the commands)")
+    } else {
+        format!(
+            "'{name}' is not a command; the nearest: {}",
+            near.join(", ")
+        )
+    })
+}
+
 /// An `@|` command: the name must be an aggregate (any family), and
 /// its arguments pass the registry's check.
 fn agg_command(call: FnCall) -> Result<Command> {
@@ -13217,10 +13324,16 @@ fn agg_command(call: FnCall) -> Result<Command> {
         return Ok(Command::Agg(call));
     }
     let Some(spec) = crate::syntax::registry::spec(&call.name).filter(|s| s.agg.is_some()) else {
-        return Err(QuarbError::unsupported(format!(
-            "aggregate command '{}'",
-            call.name
-        )));
+        // A command of one value after `@|`: it exists, and the
+        // refusal says where it is written, as a command of the
+        // whole context says after `|`.
+        if crate::syntax::registry::known_scalar(&call.name) {
+            return Err(QuarbError::parse(format!(
+                "'{0}' takes one value at a time: write '| {0}'",
+                call.name
+            )));
+        }
+        return Err(no_such_command(&call.name, true));
     };
     if call.name == "ungroup" && !call.args.is_empty() {
         return Err(QuarbError::parse("'ungroup' takes no operand"));
@@ -13489,7 +13602,7 @@ fn retired_word_pointer(call: &FnCall) -> Option<String> {
 /// `duration` / `td` take `--from` or `--to`, one instant beside the
 /// topic, never both (draft 203).
 fn duration_takes_one_end(call: &FnCall) -> Option<String> {
-    if !matches!(call.name.as_str(), "duration" | "td") {
+    if call.name != "duration" {
         return None;
     }
     let has = |which: &str| {
@@ -13529,7 +13642,6 @@ fn func_command_at(call: FnCall, nested: bool) -> Result<Command> {
         if let Some(pointer) = retired_command(&call.name) {
             return Err(QuarbError::parse(pointer));
         }
-        let err = QuarbError::unsupported(format!("pipeline command '{}'", call.name));
         // `| 12h`: a number glued to a unit is a bare word, a
         // command lookup; the quantity literal takes the underscore.
         let digits: String = call
@@ -13547,9 +13659,9 @@ fn func_command_at(call: FnCall, nested: bool) -> Result<Command> {
                 Value::Str(_)
             )
         {
-            return Err(err.with_hint(format!(
-                " (a bare word after a pipe names a command; the quantity literal is written \
-                 {digits}_{unit}, the text \"{}\")",
+            return Err(QuarbError::parse(format!(
+                "'{0}' is not a command (a bare word after a pipe names a command; the \
+                 quantity literal is written {digits}_{unit}, the text \"{0}\")",
                 call.name
             )));
         }
@@ -13561,7 +13673,7 @@ fn func_command_at(call: FnCall, nested: bool) -> Result<Command> {
                 call.name
             )));
         }
-        return Err(err);
+        return Err(no_such_command(&call.name, false));
     }
     // The shape checks see the operands; `--of=expr` is read apart.
     let shaped = if crate::syntax::registry::takes_of(&call.name) {
@@ -13583,7 +13695,7 @@ fn func_command_at(call: FnCall, nested: bool) -> Result<Command> {
 fn validate_record(call: &FnCall) -> Result<()> {
     // `decode`/`dec` take one argument: a bare scheme name that
     // must be reversible (`sha256` is one-way, so it is refused).
-    if call.name == "decode" || call.name == "dec" {
+    if call.name == "decode" {
         match call.args.as_slice() {
             [Arg::Lit(v)]
                 if crate::value::encoding::is_decodable(&v.to_string())
@@ -13642,7 +13754,15 @@ pub(crate) fn retired_command(name: &str) -> Option<String> {
              ('@| group(k) | f' is '| .k(k) @|{.k} f'; the members as one list, '@|{.k} (@@_)')"
                 .into(),
         ),
-        "chars" => Some("'chars' is retired: write 'cc'".into()),
+        // retired 2026-11-15 (it was an alias of `deaccent`, kept one
+        // release on 2026-11-03): the name is Python's `strip` to one
+        // reader and the old alias to another, so the pointer names
+        // both commands
+        "strip" => Some(
+            "'strip' is retired: 'deaccent' without an operand removes every combining \
+             mark, and 'trim' removes surrounding whitespace"
+                .into(),
+        ),
         "types" => Some("'types' is retired: the type of a table's columns is 'type'".into()),
         "table" => Some("'table' is retired: the table is '@| pretty'".into()),
         // retired 2026-10-31 (spec: The graph library): the rank is
@@ -13952,11 +14072,51 @@ fn validate_window_shift(call: &FnCall) -> Result<()> {
                  frequencies(10), frequencies(11..20), frequencies(-10)",
             )),
         },
-        // `combinations(n)`, and its two named sizes.
+        // `combinations(n)`, and its two named sizes. The size may
+        // be an expression, read where the command runs
+        // (`combinations($.k)`), and zero asks for the one empty
+        // subset (rulings 2026-11-15).
         "combinations" => match call.args.as_slice() {
-            [Arg::Lit(Value::Int(n))] if *n >= 1 => Ok(()),
+            [Arg::Lit(Value::Int(n))] if *n >= 0 => Ok(()),
+            [Arg::Expr(_)] => Ok(()),
             _ => Err(QuarbError::parse(
                 "combinations takes the size of the subset: combinations(2)",
+            )),
+        },
+        // `permutations` orders every value, `permutations(n)` every
+        // n of them; the size may be an expression too.
+        "permutations" => match call.args.as_slice() {
+            [] => Ok(()),
+            [Arg::Lit(Value::Int(n))] if *n >= 0 => Ok(()),
+            [Arg::Expr(_)] => Ok(()),
+            _ => Err(QuarbError::parse(
+                "permutations takes the size of the ordering, or none for every value: \
+                 permutations, permutations(2)",
+            )),
+        },
+        // `rnd()`, `rnd(a..b)`, `rnd(list)`, `rnd(record)`; `random`
+        // the alias.
+        "rnd" => match call.args.as_slice() {
+            [] | [Arg::Expr(_)] | [Arg::Lit(Value::List(_) | Value::Record(_))] => Ok(()),
+            [Arg::Range(Some(a), Some(b))] if a <= b => Ok(()),
+            _ => Err(QuarbError::parse(
+                "rnd takes nothing, a range of integers that rises, a list or a record: \
+                 rnd(), rnd(1..6), rnd(@(\"a\"; \"b\"))",
+            )),
+        },
+        // `sample`, `sample(n)`, with its options beside the count.
+        "sample" => match call
+            .args
+            .iter()
+            .filter(|a| !matches!(a, Arg::Opt { .. }))
+            .collect::<Vec<_>>()
+            .as_slice()
+        {
+            [] | [Arg::Expr(_)] => Ok(()),
+            [Arg::Lit(Value::Int(n))] if *n >= 0 => Ok(()),
+            _ => Err(QuarbError::parse(
+                "sample takes the count to draw, or a share of the stream: sample(3), \
+                 sample(--share=0.1)",
             )),
         },
         "pairs" | "triples" => {
@@ -14156,7 +14316,7 @@ fn validate_window_shift(call: &FnCall) -> Result<()> {
 /// value expressions.
 fn validate_stat_args(call: &FnCall) -> Result<()> {
     match call.name.as_str() {
-        "std" | "var" | "stddev" | "variance" => {
+        "std" | "var" => {
             // The options (`--of=expr`) are not the word; a leading
             // expression is left to the operand bound's refusal.
             let operands: Vec<&Arg> = call
@@ -16149,7 +16309,7 @@ fn validate_correlation_refs(q: &Query) -> Result<()> {
 /// (`/x::head:year` is `/x::head | :year`). `:%provenance` and
 /// `:@origin` are the value's provenance, as after any value; a
 /// quoted name is a field so named.
-fn field_of_topic((name, quoted): (String, bool)) -> Command {
+pub(crate) fn field_of_topic((name, quoted): (String, bool)) -> Command {
     let base = Box::new(Operand::Topic);
     Command::Expr(if !quoted && name.starts_with(['%', '@']) {
         Operand::ValueMeta { base, key: name }

@@ -171,6 +171,38 @@ fn a_record_keyed_like_a_list_keeps_its_keys() {
     assert_eq!(ok(&["/list | json", y]), r#"["Homer", "Hesiod"]"#);
 }
 
+/// A container with nothing in it is written as what it is: an
+/// empty object `{}`, an empty array `[]`. Both were written null,
+/// so a document did not come back from `| json` as it was read.
+/// How a value reads does not move: an empty array is still `@()`
+/// as a property, and an object, empty or not, is no property.
+#[test]
+fn an_empty_container_is_written_as_what_it_is() {
+    let doc = r#"{"e": {}, "f": [], "g": {"x": 1}, "h": [1, 2], "s": {"e": {}, "f": []}}"#;
+    let d = fixture(
+        "empty",
+        &[
+            ("empty.json", doc),
+            ("none.yaml", "shelf: {}\nscrolls: []\n"),
+        ],
+    );
+    let f = d.join("empty.json");
+    let f = f.to_str().unwrap();
+    assert_eq!(ok(&["/e | json", f]), "{}");
+    assert_eq!(ok(&["/f | json", f]), "[]");
+    assert_eq!(ok(&["/s | json", f]), r#"{"e": {}, "f": []}"#);
+    assert_eq!(ok(&["^ | json", f]), doc);
+    // a scalar is its own value, as before
+    assert_eq!(ok(&["/g/x | json", f]), "1");
+    // the readings are untouched
+    assert_eq!(ok(&["^::f", f]), "@()");
+    assert_eq!(ok(&["^::e", f]), "null");
+    assert_eq!(ok(&["/s | %", f]), "%(e = null; f = @())");
+    let y = d.join("none.yaml");
+    let y = y.to_str().unwrap();
+    assert_eq!(ok(&["^ | json", y]), r#"{"shelf": {}, "scrolls": []}"#);
+}
+
 /// A mount no name can be had for (a target with no stem, `..`) is
 /// named by its place among the inputs, counted from one: `doc1`,
 /// `doc2` (ruling 2026-11-14; it was `doc0`, `doc1`).

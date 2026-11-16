@@ -228,14 +228,6 @@ pub const SPECS: &[FnSpec] = &[
     scalar("wc", "the count of words"),
     scalar("lc", "the count of lines"),
     scalar("sc", "the count of sentences"),
-    // The counters' long spellings (ruling 2026-11-03): the
-    // two-letter forms stay canonical.
-    scalar("codepoint-count", "cc, alias"),
-    scalar("byte-count", "bc, alias"),
-    scalar("word-count", "wc, alias"),
-    scalar("line-count", "lc, alias"),
-    scalar("sentence-count", "sc, alias"),
-    scalar("char-count", "gc, alias"),
     with_null(
         scalar("lines", "the lines of the text, one capsa each"),
         OnNull::Nothing,
@@ -272,9 +264,15 @@ pub const SPECS: &[FnSpec] = &[
     scalar(
         "deaccent",
         "the text without the accents of a language, its letters kept: \
-         deaccent(fr); bare, every combining mark off (= strip)",
+         deaccent(fr); bare, every combining mark off",
     ),
-    scalar("strip", "deaccent, alias (deprecated; one release)"),
+    // retired 2026-11-15 (the user: "Retire strip in 0.65"): it was
+    // an alias of `deaccent`, kept one release on 2026-11-03.
+    // Registered for its pointer alone, as `record` is.
+    scalar(
+        "strip",
+        "retired: deaccent without an operand removes every combining mark, and trim removes surrounding whitespace",
+    ),
     scalar(
         "stem",
         "the Snowball stem under a language: stem(en), stem(ru), …",
@@ -286,10 +284,11 @@ pub const SPECS: &[FnSpec] = &[
     with_null(
         scalar(
             "split",
-            "the pieces between a separator (whitespace unless given)",
+            "the pieces between a separator, or between whitespace with none",
         ),
         OnNull::Nothing,
     ),
+    scalar("chars", "the characters of the text, as a list"),
     scalar("substr", "the codepoints of a range: substr(a..b)"),
     scalar("pad", "the text padded on the right to a width"),
     scalar("lpad", "the text padded on the left to a width"),
@@ -352,6 +351,26 @@ pub const SPECS: &[FnSpec] = &[
     scalar("floor", "the number rounded down"),
     scalar("ceil", "the number rounded up"),
     scalar("abs", "the absolute value"),
+    scalar("neg", "the number negated"),
+    scalar("factorial", "the factorial of a non-negative integer"),
+    // it reads no topic, null included: the pipe before it says how
+    // many threads draw
+    with_null(
+        with_check(
+            scalar(
+                "rnd",
+                "a random float, integer of a range, or member of a list",
+            ),
+            Check::Command,
+        ),
+        OnNull::Keep,
+    ),
+    scalar("choose", "the number of ways to choose K of the number"),
+    // null is false, and its negation true: `not` reads it
+    with_null(
+        scalar("not", "the negation of the value's truth"),
+        OnNull::Keep,
+    ),
     scalar("log", "the natural logarithm"),
     scalar("log2", "the base-2 logarithm"),
     scalar("log10", "the base-10 logarithm"),
@@ -369,8 +388,6 @@ pub const SPECS: &[FnSpec] = &[
     scalar("mi", "the mutual-information collocation measure"),
     scalar("t_score", "the t-score collocation measure"),
     scalar("log_dice", "the logDice collocation measure"),
-    scalar("logdice", "log_dice, alias"),
-    scalar("tscore", "t_score, alias"),
     scalar("dice", "the Dice coefficient of a collocation"),
     scalar("haversine", "the great-circle distance to a point"),
     scalar("quantity", "the text read as a quantity with a unit"),
@@ -557,7 +574,6 @@ pub const SPECS: &[FnSpec] = &[
         "duration",
         "the duration read from text, or from one instant to another with (FROM; TO)",
     ),
-    scalar("td", "duration, short"),
     scalar(
         "calendar",
         "the instant or period read in a calendar with (NAME); bare, the name of its reading",
@@ -570,12 +586,10 @@ pub const SPECS: &[FnSpec] = &[
         "strptime",
         "the instant read under a format, a locale and a calendar",
     ),
-    scalar("tp", "strptime, short"),
     scalar(
         "strftime",
         "the instant written under a format and a locale",
     ),
-    scalar("tfmt", "strftime, short"),
     with_null(
         scalar("timex", "the time expressions of the text"),
         OnNull::Nothing,
@@ -597,7 +611,6 @@ pub const SPECS: &[FnSpec] = &[
         scalar("decode", "the text decoded from a scheme"),
         Check::Decode,
     ),
-    with_check(scalar("dec", "decode, short"), Check::Decode),
     // (`sh(cmd)` is retired, 2026-11-02: the shell is the environment
     // mount `sh=shell:`, its programs the commands `sh:tr(…)`.)
     // Reductions.
@@ -614,7 +627,7 @@ pub const SPECS: &[FnSpec] = &[
         "all",
         "true when every element is true (true on an empty list; null counts false)",
     ),
-    reducing("product", "the product"),
+    reducing("prod", "the product"),
     reducing("min", "the least"),
     reducing("max", "the greatest"),
     reducing("mean", "the arithmetic mean"),
@@ -653,7 +666,6 @@ pub const SPECS: &[FnSpec] = &[
         "correlate",
         "the foreign-key join: the topic's rows with the operand table's columns appended where the topic's key (--on=:col, or its own index) matches the operand's index as = matches; the topic's order and index kept, an unmatched row keeping nulls (--inner drops it), a clashing title landing as title_2; a label repeated in the argument's index refuses unless --first-wins or --last-wins take one row or --many every one",
     ),
-    reducing("avg", "mean, alias"),
     reducing("median", "the median"),
     reducing("percentile", "the Nth percentile"),
     with_check(
@@ -667,8 +679,6 @@ pub const SPECS: &[FnSpec] = &[
         reducing("var", "the variance (n − 1 with --sample)"),
         Check::Stat,
     ),
-    with_check(reducing("stddev", "std, alias"), Check::Stat),
-    with_check(reducing("variance", "var, alias"), Check::Stat),
     reducing(
         "entropy",
         "the Shannon entropy, bits: of a stream of counts, or of the \
@@ -734,7 +744,19 @@ pub const SPECS: &[FnSpec] = &[
         reducing("combinations", "every combination of N capsae"),
         Check::Command,
     ),
+    with_check(
+        reducing(
+            "permutations",
+            "every ordering of the capsae, or of N of them",
+        ),
+        Check::Command,
+    ),
     with_check(reducing("pairs", "every pair of capsae"), Check::Command),
+    with_check(
+        reducing("sample", "N of the capsae at random, in their order"),
+        Check::Command,
+    ),
+    reducing("shuffle", "the capsae in a random order"),
     with_check(
         reducing("triples", "every triple of capsae"),
         Check::Command,
@@ -874,36 +896,34 @@ pub const SPECS: &[FnSpec] = &[
     keyed("bottom", "the N capsae with the least key"),
 ];
 
-/// The registered command called `name`.
-/// The canonical name of a command written by an alias (the
-/// inventory's `alias of` rows), the name itself otherwise. The
-/// parser spells every call canonical (ruling 2026-11-03, draft
-/// 204), so the reflection's `::form`, the unparser and the refusals
-/// name one command.
+/// The canonical name of a command written by an alias, the name
+/// itself otherwise. The parser spells every call canonical (ruling
+/// 2026-11-03, draft 204), so the reflection's `::form`, the
+/// unparser, the refusals and the evaluator name one command.
+///
+/// An alias is declared in one place, the `aliases` cell of its
+/// command's row in the inventory (ruling 2026-11-15): this table
+/// held a second list, and the inventory a row per alias that had
+/// drifted from its command's. No name is spelled by hand.
 pub fn canonical(name: &str) -> &str {
-    match name {
-        "codepoint-count" => "cc",
-        "char-count" => "gc",
-        "byte-count" => "bc",
-        "word-count" => "wc",
-        "line-count" => "lc",
-        "sentence-count" => "sc",
-        "strip" => "deaccent",
-        "tscore" => "t_score",
-        "logdice" => "log_dice",
-        "dec" => "decode",
-        "td" => "duration",
-        "tfmt" => "strftime",
-        "tp" => "strptime",
-        "avg" => "mean",
-        "stddev" => "std",
-        "variance" => "var",
-        other => other,
-    }
+    crate::syntax::man::alias_of(name).unwrap_or(name)
 }
 
+/// The registered command called `name`; an alias answers with its
+/// command's entry.
 pub fn spec(name: &str) -> Option<&'static FnSpec> {
-    SPECS.iter().find(|s| s.name == name)
+    let own = |name: &str| SPECS.iter().find(|s| s.name == name);
+    own(name).or_else(|| own(crate::syntax::man::alias_of(name)?))
+}
+
+/// A command's name and its aliases after it, as the inventory
+/// declares them: the names a position offers.
+fn with_aliases(spec: &'static FnSpec) -> impl Iterator<Item = &'static str> {
+    std::iter::once(spec.name).chain(
+        crate::syntax::man::aliases_of(spec.name)
+            .iter()
+            .map(String::as_str),
+    )
 }
 
 /// The commands that may stand in a position, for enumeration
@@ -912,7 +932,14 @@ pub fn names(scalar: bool, agg: Option<Agg>) -> impl Iterator<Item = &'static st
     SPECS
         .iter()
         .filter(move |s| (scalar && s.scalar) || (agg.is_some() && s.agg == agg))
-        .map(|s| s.name)
+        .flat_map(with_aliases)
+}
+
+/// The names of the commands a test keeps, aliases after their
+/// command: the enumerations outside this module (the aggregates of
+/// completion).
+pub fn names_where(keep: impl Fn(&FnSpec) -> bool) -> impl Iterator<Item = &'static str> {
+    SPECS.iter().filter(move |s| keep(s)).flat_map(with_aliases)
 }
 
 /// The parser's argument check for a call, by name.
@@ -932,6 +959,43 @@ mod tests {
             assert!(s.scalar || s.agg.is_some(), "{} stands nowhere", s.name);
             assert!(!s.doc.is_empty(), "{} has no doc", s.name);
         }
+        // an alias is no entry of its own and names one command
+        for s in SPECS {
+            for alias in crate::syntax::man::aliases_of(s.name) {
+                assert!(
+                    seen.insert(alias.as_str()),
+                    "{alias} is a command and an alias"
+                );
+                assert_eq!(canonical(alias), s.name);
+                assert_eq!(spec(alias).map(|a| a.name), Some(s.name));
+            }
+        }
+        assert_eq!(canonical("mean"), "mean");
+        assert_eq!(canonical("no-such-word"), "no-such-word");
+    }
+
+    #[test]
+    fn the_nearest_names_of_a_word_that_names_none() {
+        // part of a name, or a name part of it
+        assert_eq!(nearest("summ", false), ["sum"]);
+        assert!(nearest("produ", false).starts_with(&["prod", "product"]));
+        // one slip, and two for a longer word
+        assert_eq!(nearest("uper", false), ["upper"]);
+        assert_eq!(nearest("cuont", true), ["count"]);
+        // a short word and a far one are near nothing
+        assert!(nearest("tr", false).is_empty());
+        assert!(nearest("frobnicate", false).is_empty());
+        // after `@|` only its own commands are near
+        assert!(!nearest("uper", true).contains(&"upper"));
+        // an alias is near, a retired command is not
+        assert_eq!(nearest("stdde", false), ["std", "stddev"]);
+        assert!(!nearest("recc", false).contains(&"rec"));
+        assert!(!nearest("stri", false).contains(&"strip"));
+        // the word with its hyphens or underscores dropped
+        assert_eq!(nearest("word-count", false), ["wordcount"]);
+        assert_eq!(nearest("sortby", true), ["sort_by"]);
+        assert_eq!(edits("kitten", "sitting"), 3);
+        assert_eq!(edits("prod", "prod"), 0);
     }
 }
 
@@ -953,7 +1017,7 @@ pub fn names_of_layer(layer: Layer) -> impl Iterator<Item = &'static str> {
     SPECS
         .iter()
         .filter(move |s| s.layer == layer)
-        .map(|s| s.name)
+        .flat_map(with_aliases)
 }
 
 pub fn known_keyed(name: &str) -> bool {
@@ -975,6 +1039,85 @@ pub fn names_columns(command: &str, arg: &crate::syntax::ast::Arg) -> bool {
         }
         _ => false,
     }
+}
+
+/// The command names nearest to a word that names none (`produt`
+/// is near `prod` and `product`, `uper` near `upper`): the names
+/// the word is part of or that are part of it, then the names one
+/// slip away (two for a word of five letters or more); nearest
+/// first, three at most. A word of fewer than three letters is
+/// near nothing. `agg_only` keeps to the commands of `@|`.
+pub fn nearest(word: &str, agg_only: bool) -> Vec<&'static str> {
+    let word = word.to_lowercase();
+    let letters = word.chars().count();
+    if letters < 3 {
+        return Vec::new();
+    }
+    let reach = if letters >= 5 { 2 } else { 1 };
+    let names: Vec<&'static str> = SPECS
+        .iter()
+        .filter(|s| !agg_only || s.agg.is_some())
+        // a retired command is no advice (`recc` was told `rec`)
+        .filter(|s| !s.doc.starts_with("retired:"))
+        .flat_map(with_aliases)
+        // (the sigil commands, `@`, `%`, `#`, `[]`, are no words)
+        .filter(|name| name.chars().any(char::is_alphabetic))
+        .collect();
+    // a name the word is, its hyphens and underscores aside, is the
+    // answer alone (`word-count` is `wordcount`, not `count`)
+    let bare = |s: &str| -> String {
+        s.chars()
+            .filter(|c| !matches!(c, '-' | '_'))
+            .collect::<String>()
+            .to_lowercase()
+    };
+    let same: Vec<&'static str> = names
+        .iter()
+        .copied()
+        .filter(|name| bare(name) == bare(&word))
+        .take(3)
+        .collect();
+    if !same.is_empty() {
+        return same;
+    }
+    let mut near: Vec<(usize, &'static str)> = names
+        .into_iter()
+        .filter_map(|name| {
+            let lower = name.to_lowercase();
+            if lower.contains(&word) || (lower.chars().count() >= 3 && word.contains(&lower)) {
+                return Some((0, name));
+            }
+            let slips = edits(&word, &lower);
+            (slips <= reach).then_some((slips, name))
+        })
+        .collect();
+    near.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(a.1.len().cmp(&b.1.len()))
+            .then(a.1.cmp(b.1))
+    });
+    near.dedup();
+    near.into_iter().map(|(_, name)| name).take(3).collect()
+}
+
+/// The edit distance of two words: a letter added, dropped or
+/// changed counts one.
+fn edits(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, x) in a.iter().enumerate() {
+        let mut left_above = row[0];
+        row[0] = i + 1;
+        for (j, y) in b.iter().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = (left_above + usize::from(x != y))
+                .min(above + 1)
+                .min(row[j] + 1);
+            left_above = above;
+        }
+    }
+    row[b.len()]
 }
 
 /// Whether `name` is a per-capsa scalar command (for `|`).

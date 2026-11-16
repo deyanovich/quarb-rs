@@ -116,6 +116,14 @@ impl Exporter {
         for step in self.kids(b, "step") {
             out.push_str(&self.step(step)?);
         }
+        // a branch's own chain of fields after its projection
+        // (`/a::head:year || /b::title`) has no translation here
+        if self.kid(b, "field").is_some() || self.kid(b, "value-meta").is_some() {
+            return Err(JqError::Unsupported(
+                "a field read after a projection ('::head:year'; JSON fields are child hops: '/head/year::')"
+                    .into(),
+            ));
+        }
         if let Some(p) = self.kid(b, "projection") {
             match self.prop_s(p, "kind").as_str() {
                 // The bare value projection: jq values are already

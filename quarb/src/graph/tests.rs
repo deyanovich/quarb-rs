@@ -1551,10 +1551,12 @@ fn the_acyclic_promise_expands_by_node_and_round() {
     // an unpromised label among them keeps the histories, and the
     // bound refuses even the node-level reading — the wildcard too,
     // from the first unpromised edge
+    // (the bound counts the paths beyond one per node: round 5 holds
+    // 32 over 6 nodes, 26 beyond; round 6 holds 64 over 7)
     let half = Promised(MockTree::lattice(12), &["r"]);
-    assert!(run("/c1(->r|->d){5} @| collapse", &half).is_empty());
+    assert!(run("/c1(->r|->d){6} @| collapse", &half).is_empty());
     assert!(take_refusal().unwrap().contains("frontier bound (30)"));
-    assert!(run("/c1(->*){5} @| collapse", &half).is_empty());
+    assert!(run("/c1(->*){6} @| collapse", &half).is_empty());
     assert!(take_refusal().unwrap().contains("frontier bound (30)"));
     assert_eq!(run("/c1(->r){11}", &half), vec![12]);
     assert!(take_refusal().is_none());
@@ -1606,14 +1608,23 @@ fn frontier_bound_refuses_out_loud() {
         }
     }
     let t = Narrow(MockTree::lattice(6));
-    // An exact walk holds 2^4 = 16 paths at round 4: refused,
-    // naming the bound and the round — recording or not.
-    for q in ["/c1(->r .(1)|->d .(1)){4}", "/c1(->r|->d){4}"] {
+    // The bound counts the paths in flight beyond one for each node
+    // they stand at (ruling 2026-11-15): routes that multiply, not
+    // the size of a round. An exact walk holds 2^4 = 16 paths over
+    // the 5 nodes of round 4, 11 beyond: taken. At round 5 it holds
+    // 32 over 6 nodes, 26 beyond: refused, naming the bound, the
+    // round and both counts — recording or not.
+    assert_eq!(run("/c1(->r|->d){4}", &t).len(), 16);
+    assert!(take_refusal().is_none());
+    for q in ["/c1(->r .(1)|->d .(1)){5}", "/c1(->r|->d){5}"] {
         let out = run(q, &t);
         let msg = take_refusal().unwrap();
         assert!(out.is_empty());
         assert!(
-            msg.contains("frontier bound (12) is exceeded at round 4"),
+            msg.contains(
+                "frontier bound (12) is exceeded at round 5: 32 expansion paths in flight \
+                 over 6 nodes"
+            ),
             "{msg}"
         );
         assert!(msg.contains("--frontier-bound"));

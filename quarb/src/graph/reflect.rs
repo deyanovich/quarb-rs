@@ -239,6 +239,13 @@ impl QueryArbor {
         if let Some(p) = &b.projection {
             self.walk_projection(p, id);
         }
+        // the branch's own chain of fields: each a `field` (or a
+        // `value-meta`) of the topic, as the same read is over a pipe
+        for f in &b.fields {
+            if let Command::Expr(op) = crate::syntax::parser::field_of_topic(f.clone()) {
+                self.walk_operand(&op, id);
+            }
+        }
     }
 
     fn walk_elem(&mut self, e: &PathElem, parent: usize) {
