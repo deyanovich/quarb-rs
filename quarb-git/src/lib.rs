@@ -137,6 +137,10 @@ pub struct GitAdapter {
     /// process per blob.
     blobs: RefCell<Option<Batch>>,
     sizes: RefCell<Option<Batch>>,
+    /// HEAD and every ref with its object, as the last look at them
+    /// answered (see [`GitAdapter::refresh`]); `None` before the
+    /// first look.
+    refs_seen: RefCell<Option<String>>,
 }
 
 /// A `git cat-file --batch[-check]` child on a pipe.
@@ -259,10 +263,70 @@ impl GitAdapter {
             children_of: RefCell::new(None),
             blobs: RefCell::new(None),
             sizes: RefCell::new(None),
+            refs_seen: RefCell::new(None),
         };
         // Probe: is this a repository at all?
         adapter.git(&["rev-parse", "--git-dir"])?;
         Ok(adapter)
+    }
+
+    /// Look at the refs again, as a standing session does before
+    /// each query (the ruling of 2026-11-17: a session over a
+    /// repository answers it as it stands, always): one
+    /// `git show-ref --head`, HEAD and every ref with its object and
+    /// nothing peeled, held against the answer of the look before.
+    /// Where a ref moved, appeared or went, what was read off the
+    /// refs is forgotten and reads again when asked: the HEAD node,
+    /// the listings of `/branches`, `/tags` and `/commits`, the tag
+    /// map, the children index, the sweep's order. Commits, trees
+    /// and changed paths stay: a hash names them. Returns whether
+    /// anything moved.
+    ///
+    /// The look costs 3 ms on a repository of 466 refs and grows
+    /// with them (the Linux mainline has 956; 20,000 take 27 ms).
+    /// Before it a session kept each listing from its first read:
+    /// after a commit `/HEAD` and `/commits/*` answered the old
+    /// state and `/commits/HEAD` the new.
+    ///
+    /// The nodes of the forgotten refs stay in the arena, unreached
+    /// (some hundred a look that finds a change on a repository of
+    /// some hundred refs): ids a caller holds from an earlier query
+    /// keep their meaning.
+    pub fn refresh(&self) -> bool {
+        // no ref at all (a repository before its first commit) is
+        // git's exit 1: an empty answer here
+        let seen = self.git(&["show-ref", "--head"]).unwrap_or_default();
+        let mut last = self.refs_seen.borrow_mut();
+        match last.as_deref() {
+            Some(prev) if prev == seen => false,
+            // the first look: nothing it could differ from, and what
+            // was read before it reads again
+            _ => {
+                let moved = last.is_some();
+                *last = Some(seen);
+                drop(last);
+                self.forget_refs();
+                moved
+            }
+        }
+    }
+
+    /// Forget what was read off the refs (see [`refresh`]).
+    ///
+    /// [`refresh`]: Self::refresh
+    fn forget_refs(&self) {
+        {
+            let nodes = self.nodes.borrow();
+            for dir in [ROOT, BRANCHES, TAGS, COMMITS] {
+                *nodes[dir.0 as usize].children.borrow_mut() = None;
+            }
+        }
+        *self.enumerated.borrow_mut() = false;
+        *self.tag_map.borrow_mut() = None;
+        *self.children_of.borrow_mut() = None;
+        self.tips.borrow_mut().clear();
+        self.tip_at.borrow_mut().clear();
+        self.tips_ahead.set(1);
     }
 
     /// A human-readable locator: `/commits/<short>/path`,
@@ -864,6 +928,10 @@ fn parse_info(body: &str) -> Option<CommitInfo> {
 impl AstAdapter for GitAdapter {
     fn root(&self) -> NodeId {
         ROOT
+    }
+
+    fn refresh(&self) {
+        GitAdapter::refresh(self);
     }
 
     /// `/commits/* @| [..k]` before the history is enumerated walks

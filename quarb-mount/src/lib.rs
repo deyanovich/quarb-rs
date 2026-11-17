@@ -988,6 +988,16 @@ impl AstAdapter for MountAdapter {
         }
     }
 
+    /// Every mount open so far looks again; one not opened yet has
+    /// read nothing.
+    fn refresh(&self) {
+        for e in &self.mounts {
+            if let Some(a) = e.cell.get() {
+                a.refresh();
+            }
+        }
+    }
+
     fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
         let mut by_mount: Vec<Vec<NodeId>> = vec![Vec::new(); self.mounts.len()];
         for &n in nodes {

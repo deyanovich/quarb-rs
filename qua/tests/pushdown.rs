@@ -240,3 +240,128 @@ fn a_json_property_pushes_as_the_scan_answers() {
     let (_, err) = pushed("/orders/*[/data/a:: = '[1,2]']::id");
     assert!(err.contains("PUSHED (prefilter)"), "{err}");
 }
+
+/// Under `?graft=json2` (ruling 2026-11-17) a JSON scalar is a
+/// property of its container and no child node: the child form
+/// `/col/key::` answers nothing on the scan, so its whole plan is
+/// not used (pushed, it would answer by the default reading's
+/// spelling); the property form `/col::key` answers the same on
+/// both roads and stays pushed.
+#[test]
+fn the_property_reading_keeps_a_child_form_plan_off() {
+    let dir = fixture("json2-graft");
+    let db = rusqlite::Connection::open(dir.join("lib.db")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, doc JSON);
+         INSERT INTO t VALUES (1, '{\"tag\":\"gold\"}'), (2, '{\"tag\":\"lead\"}');",
+    )
+    .unwrap();
+    let run = |flags: &[&str], q: &str, target: &str| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_qua"))
+            .env("QUARB_LOCALE", "C")
+            .current_dir(&dir)
+            .args(flags)
+            .args([q, target])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(out.status.success(), "{q} on {target}: {err}");
+        (
+            String::from_utf8(out.stdout).unwrap().trim().to_string(),
+            err,
+        )
+    };
+    let info = ["--diagnostics=info"];
+    let scan = ["--no-pushdown"];
+    let child = "/t/*[/doc/tag:: = \"gold\"]::id";
+    let property = "/t/*[/doc::tag = \"gold\"]::id";
+
+    // the default reading: both spellings answer, both pushed
+    assert_eq!(run(&info, child, "lib.db").0, "1");
+    assert_eq!(run(&info, property, "lib.db").0, "1");
+
+    // json2: the child form is empty on both roads, its plan unused
+    let (out, err) = run(&info, child, "lib.db?graft=json2");
+    assert_eq!(out, "");
+    assert_eq!(run(&scan, child, "lib.db?graft=json2").0, "");
+    assert!(
+        err.contains("under ?graft=json2 a scalar is a property"),
+        "{err}"
+    );
+    // json2: the property form answers, pushed and scanned alike
+    let (out, err) = run(&info, property, "lib.db?graft=json2");
+    assert_eq!(out, "1");
+    assert_eq!(run(&scan, property, "lib.db?graft=json2").0, "1");
+    assert!(err.contains("PUSHED (query)"), "{err}");
+    // the cell itself, read through the mount's choice
+    assert_eq!(run(&scan, "/t/1/doc::tag", "lib.db?graft=json2").0, "gold");
+    assert_eq!(
+        run(&scan, "/t/1/doc/* @| count", "lib.db?graft=json2").0,
+        "0"
+    );
+    assert_eq!(run(&scan, "/t/1/doc/* @| count", "lib.db").0, "1");
+
+    // a word that names no property reading is refused at the open
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_qua"))
+        .current_dir(&dir)
+        .args(["/t/1/doc::tag", "lib.db?graft=json3"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        err.contains("\"json3\" names no reading a graft takes (one of json2, yaml2, toml2)"),
+        "{err}"
+    );
+}
+
+/// A reducer after a glued projection (`/loans/*::days @| max`) is
+/// pushed as the piped spelling is (`/loans/* | ::days @| max`), and
+/// both answer as the scan does, over a column that holds a NULL.
+/// The glued spelling was refused as a reducer "over row nodes".
+#[test]
+fn a_reducer_after_a_glued_projection_is_pushed() {
+    let dir = fixture("glued-reducer");
+    let db = rusqlite::Connection::open(dir.join("lib.db")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE loans (id INTEGER PRIMARY KEY, book_id INTEGER, days INTEGER);
+         INSERT INTO loans VALUES (1, 3, 14), (2, 7, 21), (3, 3, NULL), (4, 1, 7), (5, 7, 21);",
+    )
+    .unwrap();
+    let scan = |q: &str| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_qua"))
+            .env("QUARB_LOCALE", "C")
+            .current_dir(&dir)
+            .args(["--no-pushdown", q, "lib.db"])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    for (reducer, sql) in [
+        ("sum", "SELECT SUM(days) FROM loans"),
+        ("mean", "SELECT AVG(days) FROM loans"),
+        ("min", "SELECT MIN(days) FROM loans"),
+        ("max", "SELECT MAX(days) FROM loans"),
+        ("count", "SELECT COUNT(*) FROM loans"),
+    ] {
+        let glued = format!("/loans/*::days @| {reducer}");
+        let piped = format!("/loans/* | ::days @| {reducer}");
+        let (out, err) = qua(&dir, &glued);
+        assert!(err.contains(&format!("pushdown: {sql}")), "{glued}: {err}");
+        assert_eq!(out, scan(&glued), "{glued}");
+        assert_eq!(out, qua(&dir, &piped).0, "{glued}");
+        assert_eq!(out, scan(&piped), "{piped}");
+    }
+    // a condition before the projection goes with it
+    let q = "/loans/*[::book_id = 7]::days @| max";
+    let (out, err) = qua(&dir, q);
+    assert!(
+        err.contains("pushdown: SELECT MAX(days) FROM loans WHERE"),
+        "{err}"
+    );
+    assert_eq!(out, "21");
+    assert_eq!(out, scan(q));
+}

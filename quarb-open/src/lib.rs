@@ -96,6 +96,18 @@ pub struct SourceCtx {
     /// The `?format=NOTATION` of a plain mount: every leaf beneath
     /// reads as it (spec: Grafting).
     format: std::cell::RefCell<Option<String>>,
+    /// The `?graft=json2` of a plain mount: the property readings
+    /// its grafts take (leaves, members, cells).
+    graft: std::cell::RefCell<quarb_compose::DataGraft>,
+    /// Whether a composing layer asked for it: a source that grafts
+    /// nothing never does, and its `?graft=` is refused.
+    graft_taken: std::cell::Cell<bool>,
+    /// The `?crosslinks=order,customer` of a database file: the
+    /// labels of the references it holds in memory.
+    crosslinks: std::cell::RefCell<Vec<String>>,
+    /// Whether a database took them: another source has no
+    /// reference to hold, and its `?crosslinks=` is refused.
+    crosslinks_taken: std::cell::Cell<bool>,
     csv: std::cell::RefCell<quarb_csv::CsvOptions>,
     references: std::cell::RefCell<Option<String>>,
     record: std::cell::RefCell<Option<(String, usize)>>,
@@ -110,6 +122,31 @@ impl SourceCtx {
     /// The `?format=NOTATION` in force for a plain mount, if given.
     pub fn format(&self) -> Option<String> {
         self.format.borrow().clone()
+    }
+
+    /// The `?graft=` in force for a plain mount: the readings its
+    /// data grafts take (none named: scalars as child nodes).
+    pub fn data_graft(&self) -> quarb_compose::DataGraft {
+        self.graft_taken.set(true);
+        *self.graft.borrow()
+    }
+
+    /// The `?crosslinks=` in force for a database file: the labels
+    /// of the references it holds in memory (none named: none).
+    pub fn crosslinks(&self) -> Vec<String> {
+        self.crosslinks_taken.set(true);
+        self.crosslinks.borrow().clone()
+    }
+
+    /// Whether a `?crosslinks=` was given and no database took it.
+    pub fn crosslinks_untaken(&self) -> bool {
+        !self.crosslinks.borrow().is_empty() && !self.crosslinks_taken.get()
+    }
+
+    /// Whether a `?graft=` was given and no composing layer took it:
+    /// the source is one document and grafts none.
+    pub fn graft_untaken(&self) -> bool {
+        *self.graft.borrow() != quarb_compose::DataGraft::default() && !self.graft_taken.get()
     }
 
     fn set_encoding(&self, label: &str) {
@@ -1387,6 +1424,17 @@ pub fn read_prose(target: &Path, ctx: &SourceCtx) -> anyhow::Result<String> {
     Ok(decoded.text)
 }
 
+/// The refusal of `?graft=` on a source that grafts nothing.
+pub fn refuse_untaken_graft(p: &Path) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{}: graft= selects the reading of the documents a mount grafts (the leaves of a \
+         folder or an archive, the cells of a database); this source is one document and \
+         grafts none — read it under the property reading with its prefix, json2:FILE \
+         (yaml2:, toml2:)",
+        p.display()
+    )
+}
+
 /// Take `?encoding=LABEL` off a plain target (one that is not a
 /// path as written): the one option a file or directory mount
 /// takes. The label is validated here, before anything is read.
@@ -1395,6 +1443,10 @@ pub fn read_prose(target: &Path, ctx: &SourceCtx) -> anyhow::Result<String> {
 pub fn take_encoding_option(p: &Path, ctx: &SourceCtx) -> anyhow::Result<PathBuf> {
     ctx.clear_encoding();
     *ctx.format.borrow_mut() = None;
+    *ctx.graft.borrow_mut() = quarb_compose::DataGraft::default();
+    ctx.graft_taken.set(false);
+    ctx.crosslinks.borrow_mut().clear();
+    ctx.crosslinks_taken.set(false);
     ctx.set_csv(quarb_csv::CsvOptions::default());
     let Some(s) = p.to_str() else {
         return Ok(p.to_path_buf());
@@ -1431,6 +1483,31 @@ pub fn take_encoding_option(p: &Path, ctx: &SourceCtx) -> anyhow::Result<PathBuf
                 }
                 *ctx.format.borrow_mut() = Some(notation.to_string());
             }
+            // `?graft=json2`: the mount's data grafts (a leaf, a
+            // member, a cell declared JSON) read under the property
+            // reading (ruling 2026-11-17)
+            Some(("graft", label)) => {
+                *ctx.graft.borrow_mut() = quarb_compose::DataGraft::parse(label)
+                    .map_err(|e| anyhow::anyhow!("{}: {e}", p.display()))?;
+            }
+            // `?crosslinks=order,customer`: the references of these
+            // labels are held in memory (ruling 2026-11-17; a name
+            // is the link's label, as in `<-order`)
+            Some(("crosslinks", labels)) => {
+                let labels: Vec<String> = labels
+                    .split(',')
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect();
+                if labels.is_empty() {
+                    anyhow::bail!(
+                        "{}: crosslinks= names the references to hold in memory by their \
+                         labels, as in ?crosslinks=order,customer",
+                        p.display()
+                    );
+                }
+                *ctx.crosslinks.borrow_mut() = labels;
+            }
             Some(("delimiter", label)) => set_csv_option(|c| c.with_delimiter_label(label), ctx)?,
             Some(("decimal", label)) => set_csv_option(|c| c.with_decimal_label(label), ctx)?,
             // `?null=NA,n/a`: the cell texts a CSV reads as null
@@ -1438,7 +1515,7 @@ pub fn take_encoding_option(p: &Path, ctx: &SourceCtx) -> anyhow::Result<PathBuf
             Some(("null", label)) => set_csv_option(|c| c.with_null_label(label), ctx)?,
             _ => anyhow::bail!(
                 "unknown option {pair:?} on {path} — a file or folder takes encoding=, \
-                 format=, delimiter=, decimal=, null="
+                 format=, graft=, crosslinks=, delimiter=, decimal=, null="
             ),
         }
     }
@@ -1541,6 +1618,7 @@ pub fn document_folder(
         .with_document_reader(reader)
         .with_decoding(current_decoding(ctx)?)
         .with_csv_options(ctx.csv())
+        .with_data_graft(ctx.data_graft())
         .with_string_reader(string_reader(ctx)),
     )
 }
@@ -1843,6 +1921,7 @@ pub fn family_of<A: 'static>() -> &'static str {
 /// both flows skip the wrap.
 pub fn mounted_relational<A: AstAdapter + 'static>(
     no_graft: bool,
+    graft: quarb_compose::DataGraft,
     inner: A,
     outer_loc: impl Fn(&A, NodeId) -> String + 'static,
 ) -> Mounted {
@@ -1852,7 +1931,9 @@ pub fn mounted_relational<A: AstAdapter + 'static>(
         return Mounted::of(a, Box::new(move |n| outer_loc(&r, n)));
     }
     let a = Rc::new(
-        ComposeAdapter::new(inner).with_string_reader(string_reader(&SourceCtx::default())),
+        ComposeAdapter::new(inner)
+            .with_data_graft(graft)
+            .with_string_reader(string_reader(&SourceCtx::default())),
     );
     let r = a.clone();
     Mounted::of(
@@ -2292,6 +2373,16 @@ fn open_mount_as_written(p: &Path, cli: &OpenOpts) -> anyhow::Result<Mounted> {
     let p = take_encoding_option(&p, ctx)?;
     let _ = ctx.take_record();
     let m = open_mount_inner(&p, cli, ctx)?;
+    if ctx.graft_untaken() {
+        return Err(refuse_untaken_graft(&p));
+    }
+    if ctx.crosslinks_untaken() {
+        anyhow::bail!(
+            "{}: crosslinks= holds the named references of a database in memory (a SQLite \
+             or DuckDB file); this source declares none",
+            p.display()
+        );
+    }
     let m = if sci {
         Mounted {
             adapter: Box::new(quarb::Scientific { inner: m.adapter }),
@@ -2625,6 +2716,7 @@ fn documents_at(
                 .with_document_nodes(reader)
                 .with_decoding(current_decoding(ctx)?)
                 .with_csv_options(ctx.csv())
+                .with_data_graft(ctx.data_graft())
                 .with_string_reader(string_reader(ctx)),
         );
         let r = a.clone();
@@ -2648,6 +2740,7 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
                 })
                 .with_decoding(current_decoding(ctx)?)
                 .with_csv_options(ctx.csv())
+                .with_data_graft(ctx.data_graft())
                 .with_default_notation(ctx.format()),
             );
             let r = a.clone();
@@ -2859,6 +2952,7 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
                 .with_source_bytes(quarb_compose::archive_member_bytes)
                 .with_decoding(current_decoding(ctx)?)
                 .with_csv_options(ctx.csv())
+                .with_data_graft(ctx.data_graft())
                 .with_document_graft(DocumentGraft::Text)
                 .with_string_reader(string_reader(ctx)),
             );
@@ -2974,7 +3068,8 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
                 )
                 .with_source_graft(SourceGraft::Code)
                 .with_decoding(current_decoding(ctx)?)
-                .with_csv_options(ctx.csv()),
+                .with_csv_options(ctx.csv())
+                .with_data_graft(ctx.data_graft()),
             );
             let r = a.clone();
             return Ok(Mounted::of(
@@ -3009,6 +3104,7 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
     {
         return Ok(mounted_relational(
             cli.no_graft,
+            ctx.data_graft(),
             MssqlAdapter::connect(s).context("connecting to SQL Server")?,
             |a, n| a.locator(n),
         ));
@@ -3019,6 +3115,7 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
     {
         return Ok(mounted_relational(
             cli.no_graft,
+            ctx.data_graft(),
             OracleAdapter::connect(s).context("connecting to Oracle")?,
             |a, n| a.locator(n),
         ));
@@ -3192,6 +3289,7 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
     {
         return Ok(mounted_relational(
             cli.no_graft,
+            ctx.data_graft(),
             AthenaAdapter::connect(s).context("connecting to Athena")?,
             |a, n| a.locator(n),
         ));
@@ -3253,6 +3351,7 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
     {
         return Ok(mounted_relational(
             cli.no_graft,
+            ctx.data_graft(),
             BigqueryAdapter::connect(s).context("connecting to BigQuery")?,
             |a, n| a.locator(n),
         ));
@@ -3263,6 +3362,7 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
     {
         return Ok(mounted_relational(
             cli.no_graft,
+            ctx.data_graft(),
             MysqlAdapter::connect(s).context("connecting to MySQL")?,
             |a, n| a.locator(n),
         ));
@@ -3272,6 +3372,7 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
     {
         return Ok(mounted_relational(
             cli.no_graft,
+            ctx.data_graft(),
             PostgresAdapter::connect(s).context("connecting to PostgreSQL")?,
             |a, n| a.locator(n),
         ));
@@ -3305,6 +3406,7 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
             ComposeAdapter::new(ObjstoreAdapter::connect(t).context("connecting to bucket")?)
                 .with_decoding(current_decoding(ctx)?)
                 .with_csv_options(ctx.csv())
+                .with_data_graft(ctx.data_graft())
                 .with_string_reader(string_reader(ctx)),
         );
         let r = a.clone();
@@ -3353,9 +3455,13 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("duckdb") || e.eq_ignore_ascii_case("ddb"))
     {
+        let mut a = DuckdbAdapter::open(p).context("opening DuckDB database")?;
+        a.hold_crosslinks(&ctx.crosslinks())
+            .map_err(|e| anyhow::anyhow!("{}: {e}", p.display()))?;
         return Ok(mounted_relational(
             cli.no_graft,
-            DuckdbAdapter::open(p).context("opening DuckDB database")?,
+            ctx.data_graft(),
+            a,
             |a, n| a.locator(n),
         ));
     }
@@ -3395,6 +3501,7 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
             .with_source_bytes(quarb_compose::archive_member_bytes)
             .with_decoding(current_decoding(ctx)?)
             .with_csv_options(ctx.csv())
+            .with_data_graft(ctx.data_graft())
             .with_string_reader(string_reader(ctx)),
         );
         let r = a.clone();
@@ -3416,9 +3523,13 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
     }
     if is_sqlite(p) {
         let refs = relational_refs(&cli.refs)?;
+        let mut a = SqliteAdapter::open_with_refs(p, &refs).context("opening SQLite database")?;
+        a.hold_crosslinks(&ctx.crosslinks())
+            .map_err(|e| anyhow::anyhow!("{}: {e}", p.display()))?;
         return Ok(mounted_relational(
             cli.no_graft,
-            SqliteAdapter::open_with_refs(p, &refs).context("opening SQLite database")?,
+            ctx.data_graft(),
+            a,
             |a, n| a.locator(n),
         ));
     }

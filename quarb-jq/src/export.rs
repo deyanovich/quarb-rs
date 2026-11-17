@@ -39,6 +39,7 @@ pub fn export(quarb: &str) -> Result<Translation, JqError> {
     Ok(Translation {
         query,
         notes: ex.notes,
+        warnings: Vec::new(),
     })
 }
 

@@ -2008,6 +2008,9 @@ impl<A: AstAdapter> AstAdapter for PriorView<'_, A> {
     fn whole_listings(&self) {
         self.base.whole_listings()
     }
+    fn refresh(&self) {
+        self.base.refresh()
+    }
 
     fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
         let base: Vec<NodeId> = nodes
@@ -3079,6 +3082,9 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
 
     fn whole_listings(&self) {
         self.base.whole_listings()
+    }
+    fn refresh(&self) {
+        self.base.refresh()
     }
 
     fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {

@@ -47,7 +47,7 @@ const READINGS: [&str; 4] = ["text", "corpus", "lit", "koine"];
 
 /// The options every source takes, as [`OPTIONS`] lists them in a
 /// refusal.
-const OPTIONS: &str = "format=, delimiter=, decimal=, null=, autounits, autounit=, units=, \
+const OPTIONS: &str = "format=, graft=, delimiter=, decimal=, null=, autounits, autounit=, units=, \
                        slugs, sci, root=, base=; a corpus: or lit: reading takes conllu=, \
                        sentences=, cast=, places=, desm=, modernize=, notes= as well, lit: \
                        scheme= too";
@@ -84,6 +84,9 @@ struct Options<'a> {
     /// that is no CSV.
     csv_named: Option<&'a str>,
     base: Option<&'a str>,
+    /// `graft=json2`: the pair as written and its value, the
+    /// reading of the documents the mount grafts of its own.
+    graft: Option<(&'a str, &'a str)>,
     reading: Reading<'a>,
 }
 
@@ -111,6 +114,7 @@ impl<'a> Options<'a> {
                      superscript digit after a number an exponent, K the kelvin)"
                 ),
                 Some(("format", v)) => o.format = Some(v),
+                Some(("graft", label)) => o.graft = Some((pair, label)),
                 Some(("delimiter", label)) => {
                     o.csv = std::mem::take(&mut o.csv)
                         .with_delimiter_label(label)
@@ -206,6 +210,32 @@ impl Doc {
         {
             bail!("\"base={base}\" is a site's option, and this source is read as {format}");
         }
+        // `graft=json2` (ruling 2026-11-17) selects the reading of
+        // the documents a mount grafts of its own: an archive's
+        // members, a database's cells. A source that is one document
+        // grafts none, and reads under the property reading by its
+        // format word.
+        if let Some((named, _)) = opts.graft
+            && !matches!(format, "sqlite" | "db" | "zip" | "tar" | "archive")
+        {
+            bail!(
+                "{named:?} selects the reading of the documents a mount grafts (the members \
+                 of an archive, the cells of a database), and this source is read as \
+                 {format}: read it under the property reading by its format word, json2 \
+                 (yaml2, toml2)"
+            );
+        }
+        #[cfg(feature = "compose")]
+        let data_graft = match opts.graft {
+            Some((_, label)) => {
+                quarb_compose::DataGraft::parse(label).map_err(anyhow::Error::msg)?
+            }
+            None => quarb_compose::DataGraft::default(),
+        };
+        #[cfg(not(feature = "compose"))]
+        if let Some((named, _)) = opts.graft {
+            bail!("{named:?}: this build grafts no documents");
+        }
         let reading = match format.split_once('-') {
             Some((r @ ("corpus" | "lit"), notation)) => Some((r, notation)),
             None if matches!(format, "corpus" | "lit") => Some((format, "")),
@@ -256,6 +286,7 @@ impl Doc {
                 let a = Rc::new(
                     quarb_compose::ComposeAdapter::new(archive)
                         .with_source_bytes(quarb_compose::archive_member_bytes)
+                        .with_data_graft(data_graft)
                         .with_string_reader(string_reader()),
                 );
                 let r = a.clone();
@@ -305,6 +336,9 @@ impl Doc {
         // subtree (an archive came with its own, above)
         let relational = family == "sqlite";
         let (adapter, render) = doc.into_mounted()?;
+        #[cfg(feature = "compose")]
+        let (adapter, render) = composed(adapter, render, relational, data_graft);
+        #[cfg(not(feature = "compose"))]
         let (adapter, render) = composed(adapter, render, relational);
         let (adapter, render): (Box<dyn quarb::AstAdapter>, Render) = if opts.sci {
             (Box::new(quarb::Scientific { inner: adapter }), render)
@@ -433,12 +467,15 @@ fn composed(
     adapter: Box<dyn quarb::AstAdapter>,
     render: Render,
     relational: bool,
+    data_graft: quarb_compose::DataGraft,
 ) -> (Box<dyn quarb::AstAdapter>, Render) {
     use quarb_compose::ComposeAdapter;
     if quarb::AstAdapter::grafts_on_demand(&adapter) {
         return (adapter, render);
     }
-    let layer = ComposeAdapter::new(Dyn(adapter)).with_string_reader(string_reader());
+    let layer = ComposeAdapter::new(Dyn(adapter))
+        .with_data_graft(data_graft)
+        .with_string_reader(string_reader());
     let layer = if relational {
         layer
     } else {

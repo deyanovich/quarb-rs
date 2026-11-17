@@ -645,6 +645,14 @@ pub fn record_warning(code: &str, site: &str, message: String) {
     record_warning_once(code, site, message);
 }
 
+/// Raise an info beside the answer from an adapter, once per run for
+/// one text: what a read cost and how it could cost less, where the
+/// answer is what was asked for (a warning is for an answer that is
+/// not: [`record_warning`]).
+pub fn record_info(code: &str, site: &str, message: String) {
+    record_info_once(code, site, message);
+}
+
 /// Raise a warning beside the answer, once per run for one text.
 pub(crate) fn record_warning_once(code: &str, site: &str, message: String) {
     with_ambient(|a| {

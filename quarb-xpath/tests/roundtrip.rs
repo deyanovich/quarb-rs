@@ -206,3 +206,76 @@ fn text_is_the_immediate_text_runs() {
     );
     assert_eq!(run("count(//p/text())"), ["2"]);
 }
+
+/// `--lenient` (the rulings of 2026-11-17): the two constructs the
+/// strict translator refuses for want of an exact counterpart are
+/// translated to the nearest one, each with its warning; strictly
+/// they are refused, the refusal naming the flag; an expression
+/// that needs no leniency translates as before.
+#[test]
+fn lenient_reads_a_relative_path_and_node() {
+    let lenient = |x: &str| quarb_xpath::translate_lenient(x).unwrap();
+    let run = |query: &str| -> Vec<String> {
+        let adapter = XmlAdapter::parse(DOC).unwrap();
+        match quarb::run(query, &adapter).unwrap() {
+            quarb::QueryResult::Nodes(ns) => ns.into_iter().map(|n| adapter.locator(n)).collect(),
+            quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect(),
+        }
+    };
+    // a relative path: from the document root
+    let tr = lenient("EXAMPLE/chapter/title");
+    assert_eq!(tr.query, "/EXAMPLE/chapter/title");
+    assert_eq!(
+        tr.warnings,
+        [
+            "a relative path is read from the document root, where XPath reads it from the \
+          caller's context node"
+        ]
+    );
+    assert_eq!(run(&tr.query).len(), 3);
+    assert_eq!(
+        tr.query,
+        quarb_xpath::translate("/EXAMPLE/chapter/title")
+            .unwrap()
+            .query
+    );
+    // node(): the elements of the step
+    let tr = lenient("/EXAMPLE/chapter[1]/node()");
+    assert_eq!(tr.query, "/EXAMPLE/chapter[1]/*");
+    assert_eq!(
+        tr.warnings,
+        [
+            "node(): the elements alone, where XPath selects text, comment and \
+          processing-instruction nodes too"
+        ]
+    );
+    assert_eq!(run(&tr.query).len(), 4);
+    // both at once, each said once
+    let tr = lenient("EXAMPLE/head/node()");
+    assert_eq!(tr.query, "/EXAMPLE/head/*");
+    assert_eq!(tr.warnings.len(), 2);
+
+    // strictly: refused, naming the flag
+    let refused = |x: &str| quarb_xpath::translate(x).unwrap_err().to_string();
+    assert_eq!(
+        refused("EXAMPLE/chapter"),
+        "unsupported XPath construct: relative paths (Quarb queries are root-anchored; start \
+         with / or //); --lenient reads one from the document root, with a warning"
+    );
+    assert_eq!(
+        refused("/EXAMPLE/node()"),
+        "unsupported XPath construct: node() (Quarb navigates elements only); --lenient \
+         selects the elements, with a warning"
+    );
+    // no leniency needed: the strict translation, no warning
+    let tr = lenient("//chapter[@id = 'chapter2']/title");
+    assert_eq!(
+        tr.query,
+        quarb_xpath::translate("//chapter[@id = 'chapter2']/title")
+            .unwrap()
+            .query
+    );
+    assert!(tr.warnings.is_empty());
+    // what has no near construct stays refused under the flag
+    assert!(quarb_xpath::translate_lenient("/EXAMPLE/following::p").is_err());
+}

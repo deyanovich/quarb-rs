@@ -61,16 +61,41 @@ pub enum XPathError {
 pub struct Translation {
     pub query: String,
     pub notes: Vec<String>,
+    /// What a lenient translation gives up: one line for each place
+    /// where the Quarb construct chosen answers differently from
+    /// XPath. Empty for a strict translation, and for a lenient one
+    /// of an expression that needed no leniency.
+    pub warnings: Vec<String>,
 }
 
 /// Translate an XPath 1.0 expression to a Quarb query.
 pub fn translate(xpath: &str) -> Result<Translation, XPathError> {
+    translate_inner(xpath, false)
+}
+
+/// [`translate`] under `--lenient` (the rulings of 2026-11-17): a
+/// construct with no exact Quarb counterpart is translated to the
+/// nearest one, and each divergence is named in
+/// [`Translation::warnings`]. Two today: a relative location path
+/// is read from the document root (`chapter/title` as
+/// `/chapter/title`), where XPath reads it from the caller's context
+/// node; `node()` on the child and descendant axes selects the
+/// elements (`*`), where XPath's selects text, comment and
+/// processing-instruction nodes too. An expression that needs no
+/// leniency translates as it does strictly.
+pub fn translate_lenient(xpath: &str) -> Result<Translation, XPathError> {
+    translate_inner(xpath, true)
+}
+
+fn translate_inner(xpath: &str, lenient: bool) -> Result<Translation, XPathError> {
     let tokens = lex(xpath)?;
     let mut parser = Parser {
         tokens,
         pos: 0,
         notes: Vec::new(),
         texts: false,
+        lenient,
+        warnings: Vec::new(),
     };
     let query = parser.top()?;
     if parser.pos < parser.tokens.len() {
@@ -81,7 +106,13 @@ pub fn translate(xpath: &str) -> Result<Translation, XPathError> {
     }
     let mut notes = parser.notes;
     notes.dedup();
-    Ok(Translation { query, notes })
+    let mut warnings = parser.warnings;
+    warnings.dedup();
+    Ok(Translation {
+        query,
+        notes,
+        warnings,
+    })
 }
 
 // ---------------------------------------------------------------- lexer
@@ -324,6 +355,9 @@ struct Parser {
     /// A path of the union being read ends in `text()`: its
     /// `:::texts` lists are spread where the union ends.
     texts: bool,
+    /// `--lenient`: translate to the nearest construct and warn.
+    lenient: bool,
+    warnings: Vec<String>,
 }
 
 impl Parser {
@@ -437,15 +471,38 @@ impl Parser {
         let mut projection: Option<String> = None;
 
         let mut sep = match self.peek() {
-            Some(Tok::Slash) => "/",
-            Some(Tok::SlashSlash) => "//",
+            Some(Tok::Slash) => {
+                self.pos += 1;
+                "/"
+            }
+            Some(Tok::SlashSlash) => {
+                self.pos += 1;
+                "//"
+            }
+            // A relative path under `--lenient`: read from the
+            // document root, the context a query over a document
+            // starts from.
+            Some(Tok::Name(..) | Tok::Star | Tok::At | Tok::Dot | Tok::DotDot | Tok::Axis(_))
+                if self.lenient =>
+            {
+                self.warnings.push(
+                    "a relative path is read from the document root, where XPath reads it \
+                     from the caller's context node"
+                        .into(),
+                );
+                "/"
+            }
             _ => {
-                return Err(XPathError::Unsupported(
-                    "relative paths (Quarb queries are root-anchored; start with / or //)".into(),
-                ));
+                let flag = if self.lenient {
+                    ""
+                } else {
+                    "; --lenient reads one from the document root, with a warning"
+                };
+                return Err(XPathError::Unsupported(format!(
+                    "relative paths (Quarb queries are root-anchored; start with / or //){flag}"
+                )));
             }
         };
-        self.pos += 1;
 
         // A bare `/` selects the document root.
         if self.peek().is_none() || self.peek() == Some(&Tok::Union) {
@@ -593,9 +650,23 @@ impl Parser {
                 self.note_texts();
                 return Ok(StepOut::Projection(":::texts".into()));
             }
+            // `node()` under `--lenient`: the elements, the nodes
+            // Quarb navigates (the other axes read it so already)
+            Some(Tok::Name(n, true)) if n == "node" && self.lenient => {
+                self.expect(Tok::LParen, "'('")?;
+                self.expect(Tok::RParen, "')'")?;
+                write!(out, "{sep}*").unwrap();
+                self.warnings.push(
+                    "node(): the elements alone, where XPath selects text, comment and \
+                     processing-instruction nodes too"
+                        .into(),
+                );
+            }
             Some(Tok::Name(n, true)) if n == "node" => {
                 return Err(XPathError::Unsupported(
-                    "node() (Quarb navigates elements only)".into(),
+                    "node() (Quarb navigates elements only); --lenient selects the elements, \
+                     with a warning"
+                        .into(),
                 ));
             }
             Some(Tok::Name(n, true)) => {

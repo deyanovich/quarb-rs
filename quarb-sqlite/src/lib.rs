@@ -230,6 +230,43 @@ fn fetch_rows_where(
 /// matches by text afterwards. A WITHOUT ROWID table is declined
 /// (its rows carry positional ids, which a keyed read cannot
 /// assign).
+/// Whether an index leads with column `col` of `spec`'s table: the
+/// primary key (the rowid's alias has no entry in the index list),
+/// or the first column of an index, a declared one or the one
+/// behind a UNIQUE or PRIMARY KEY constraint. `None` where the
+/// catalog does not answer.
+fn leads_an_index(conn: &Connection, spec: &TableSpec, col: usize) -> Option<bool> {
+    if spec.pk == Some(col) {
+        return Some(true);
+    }
+    let column = spec.columns.get(col)?;
+    let names: Vec<String> = {
+        let mut list = conn
+            .prepare(&format!("PRAGMA index_list({})", quote_ident(&spec.name)))
+            .ok()?;
+        list.query_map([], |r| r.get::<_, String>(1))
+            .ok()?
+            .collect::<Result<_, _>>()
+            .ok()?
+    };
+    for name in names {
+        // the rows come by their place in the index: the first is
+        // its leading column (no name for an expression)
+        let leading: Option<String> = conn
+            .query_row(
+                &format!("PRAGMA index_info({})", quote_ident(&name)),
+                [],
+                |r| r.get::<_, Option<String>>(2),
+            )
+            .ok()
+            .flatten();
+        if leading.is_some_and(|c| c.eq_ignore_ascii_case(column)) {
+            return Some(true);
+        }
+    }
+    Some(false)
+}
+
 fn fetch_rows_keyed(
     conn: &Connection,
     spec: &TableSpec,
@@ -343,6 +380,13 @@ fn index_rows_per_key(conn: &Connection, table: &str, column: &str) -> Result<u6
 }
 
 impl SqliteAdapter {
+    /// Hold the crosslinks of these labels in memory (the mount's
+    /// `?crosslinks=order,customer`): see
+    /// [`RelationalModel::hold_crosslinks`].
+    pub fn hold_crosslinks(&mut self, labels: &[String]) -> Result<(), String> {
+        self.model.hold_crosslinks(labels)
+    }
+
     /// Open a database file (read-only): the catalog now, each
     /// table's rows on first touch (the connection stays owned by
     /// the adapter).
@@ -390,7 +434,8 @@ impl SqliteAdapter {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?);
         let specs = specs(&conn, refs)?;
-        let (whole, keyed, stats, prefix, counting, listed) = (
+        let (whole, keyed, stats, prefix, counting, indexes, listed) = (
+            conn.clone(),
             conn.clone(),
             conn.clone(),
             conn.clone(),
@@ -407,6 +452,11 @@ impl SqliteAdapter {
         // A step reads the rows it lands on, by key.
         .with_key_fetcher(Box::new(move |_, spec, col, values| {
             fetch_rows_keyed(&keyed, spec, None, col, values)
+        }))
+        // What the catalog says of a column's index: a step that
+        // reads a table by a column no index leads says so.
+        .with_index_probe(Box::new(move |spec, col| {
+            leads_an_index(&indexes, spec, col)
         }))
         // the first k rows by rowid for a step that keeps a prefix, and
         // the exact count of a table not read (the pushdown scanning

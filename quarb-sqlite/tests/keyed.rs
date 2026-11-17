@@ -189,3 +189,176 @@ fn a_column_with_no_key_resolves_only_under_a_label() {
     assert!(show(&l, "/books/1::nosuch-->").is_empty());
     let _ = std::fs::remove_file(path);
 }
+
+/// A sweep of the backward resolution is read as a sweep of the
+/// incoming link step is: the referrers of the whole context in
+/// statements of some hundred keys. A row at a time, a table's
+/// keyed statements were spent after 64 rows and the table was then
+/// read whole.
+#[test]
+fn a_backward_sweep_reads_its_referrers_together() {
+    let path = std::env::temp_dir().join(format!("quarb-keyed-{}-sweep.db", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE cantos (id INTEGER PRIMARY KEY, title TEXT);
+             CREATE TABLE lines (id INTEGER PRIMARY KEY,
+                 canto_id INTEGER REFERENCES cantos(id), text TEXT);",
+        )
+        .unwrap();
+        for n in 1..=100 {
+            conn.execute(
+                "INSERT INTO cantos VALUES (?1, ?2)",
+                (n, format!("canto {n}")),
+            )
+            .unwrap();
+            conn.execute("INSERT INTO lines VALUES (?1, ?2, 'a line')", (n, n))
+                .unwrap();
+        }
+        // lines of no canto: what a whole read would bring in
+        for n in 101..=150 {
+            conn.execute("INSERT INTO lines VALUES (?1, NULL, 'a stray line')", (n,))
+                .unwrap();
+        }
+    }
+    let read = "| %(n = $_; whole = (^/lines:::loaded); read = (^/lines:::\"n-loaded\"))";
+    let a = SqliteAdapter::open(&path).unwrap();
+    assert_eq!(
+        show(&a, &format!("/cantos/*<--(::canto_id) @| count {read}")),
+        [r#"%(n = 100; whole = false; read = 100)"#]
+    );
+    // the incoming link step: the same rows, read the same way
+    let b = SqliteAdapter::open(&path).unwrap();
+    assert_eq!(
+        show(&b, &format!("/cantos/*<-canto @| count {read}")),
+        [r#"%(n = 100; whole = false; read = 100)"#]
+    );
+    let _ = std::fs::remove_file(path);
+}
+
+/// A step that reads a table by a column no index leads says so,
+/// once a run, as an info beside the answer (the user's word of
+/// 2026-11-17 on the backward step); with an index on the column,
+/// or where the column is a key, it says nothing.
+#[test]
+fn a_step_over_a_column_without_an_index_says_so() {
+    let path = std::env::temp_dir().join(format!("quarb-keyed-{}-index.db", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE cantos (id INTEGER PRIMARY KEY, title TEXT);
+         CREATE TABLE lines (id INTEGER PRIMARY KEY,
+             canto_id INTEGER REFERENCES cantos(id), text TEXT);
+         INSERT INTO cantos VALUES (1, 'canto 1'), (2, 'canto 2'), (3, 'canto 3');
+         INSERT INTO lines VALUES (1, 1, 'a'), (2, 1, 'b'), (3, 2, 'c'), (4, 3, 'd');",
+    )
+    .unwrap();
+    let said = |q: &str| -> (Vec<String>, Vec<String>) {
+        let a = SqliteAdapter::open(&path).unwrap();
+        let out = quarb::Query::parse(q, &a)
+            .unwrap()
+            .run(&a, &quarb::Run::ambient())
+            .unwrap();
+        let values = match out.result {
+            QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect(),
+            QueryResult::Nodes(ns) => ns.into_iter().map(|n| a.locator(n)).collect(),
+        };
+        let infos = out
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "UNINDEXED")
+            .map(|d| format!("{} ({}): {}", d.code, d.site, d.message))
+            .collect();
+        (values, infos)
+    };
+    const TOLD: &str = "UNINDEXED (lines.canto_id): lines is read by canto_id, which has no \
+                        index, so each statement of the step scans the table; CREATE INDEX \
+                        lines_canto_id ON lines(canto_id) lets the database answer by key, or \
+                        mount with ?crosslinks=canto to hold the reference in memory";
+    // the backward resolution and the incoming link step, each
+    // once for the whole sweep
+    let (values, infos) = said("/cantos/*<--(::canto_id) @| count");
+    assert_eq!(values, ["4"]);
+    assert_eq!(infos, [TOLD]);
+    let (values, infos) = said("/cantos/1<-canto @| count");
+    assert_eq!(values, ["2"]);
+    assert_eq!(infos, [TOLD]);
+    // forward, by the key: nothing to say
+    let (values, infos) = said("/lines/*->canto @| unique @| count");
+    assert_eq!(values, ["3"]);
+    assert!(infos.is_empty(), "{infos:?}");
+    // with an index on the column the step says nothing
+    conn.execute_batch("CREATE INDEX lines_by_canto ON lines(canto_id);")
+        .unwrap();
+    let (values, infos) = said("/cantos/*<--(::canto_id) @| count");
+    assert_eq!(values, ["4"]);
+    assert!(infos.is_empty(), "{infos:?}");
+    let _ = std::fs::remove_file(path);
+}
+
+/// `?crosslinks=LABEL` (the user's ruling of 2026-11-17: a name is
+/// the link's label, as in `<-canto`): the reference of that label
+/// is held in memory. The first step along it reads the referring
+/// table whole, the steps after send no statement, and nothing is
+/// said of a scan; a label the database does not carry is refused
+/// by name.
+#[test]
+fn a_held_crosslink_reads_its_table_whole_once() {
+    let path = std::env::temp_dir().join(format!("quarb-keyed-{}-held.db", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE cantos (id INTEGER PRIMARY KEY, title TEXT);
+             CREATE TABLE lines (id INTEGER PRIMARY KEY,
+                 canto_id INTEGER REFERENCES cantos(id), text TEXT);
+             INSERT INTO cantos VALUES (1, 'canto 1'), (2, 'canto 2');
+             INSERT INTO lines VALUES (1, 1, 'a'), (2, 1, 'b'), (3, 2, 'c'), (4, NULL, 'd');",
+        )
+        .unwrap();
+    }
+    let read = "| %(n = $_; whole = (^/lines:::loaded); read = (^/lines:::\"n-loaded\"))";
+    let held = || {
+        let mut a = SqliteAdapter::open(&path).unwrap();
+        a.hold_crosslinks(&["canto".to_string()]).unwrap();
+        a
+    };
+    // unheld: one canto's lines by key, the table not whole
+    let a = SqliteAdapter::open(&path).unwrap();
+    assert_eq!(
+        show(&a, &format!("/cantos/1<-canto @| count {read}")),
+        [r#"%(n = 2; whole = false; read = 2)"#]
+    );
+    // held: the table whole at the first step, by either arrow
+    assert_eq!(
+        show(&held(), &format!("/cantos/1<-canto @| count {read}")),
+        [r#"%(n = 2; whole = true; read = 4)"#]
+    );
+    assert_eq!(
+        show(
+            &held(),
+            &format!("/cantos/2<--(::canto_id) @| count {read}")
+        ),
+        [r#"%(n = 1; whole = true; read = 4)"#]
+    );
+    // and nothing is said of a scan: the reference is in memory
+    let a = held();
+    let out = quarb::Query::parse("/cantos/*<-canto @| count", &a)
+        .unwrap()
+        .run(&a, &quarb::Run::ambient())
+        .unwrap();
+    assert!(
+        out.diagnostics.iter().all(|d| d.code != "UNINDEXED"),
+        "{:?}",
+        out.diagnostics
+    );
+    // a label the database does not carry
+    let mut a = SqliteAdapter::open(&path).unwrap();
+    assert_eq!(
+        a.hold_crosslinks(&["verse".to_string()]).unwrap_err(),
+        "crosslinks=\"verse\": no reference of this database is labelled \"verse\" (its \
+         labels: canto)"
+    );
+    let _ = std::fs::remove_file(path);
+}

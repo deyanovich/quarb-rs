@@ -44,6 +44,7 @@ pub fn export(quarb: &str) -> Result<Translation, XPathError> {
     Ok(Translation {
         query,
         notes: ex.notes,
+        warnings: Vec::new(),
     })
 }
 

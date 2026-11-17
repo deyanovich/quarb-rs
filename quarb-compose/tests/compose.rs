@@ -315,3 +315,120 @@ fn a_tarball_of_pages_at_the_text_level() {
     let dom = ComposeAdapter::new(ArchiveAdapter::from_tar_bytes(&bytes).unwrap());
     assert_eq!(values(&dom, "/capsa.html//h2::"), vec!["The register"]);
 }
+
+/// The data level is per-mount (`?graft=json2`, the ruling of
+/// 2026-11-17): JSON, YAML and TOML leaves graft with their scalars
+/// as child nodes by default, as properties where the mount asks,
+/// reading by reading.
+#[test]
+fn data_graft_level_is_per_mount() {
+    use quarb_compose::DataGraft;
+    let dir = fixture("data-graft");
+    std::fs::write(
+        dir.join("order.json"),
+        r#"{"total": 31, "ship": {"city": "Lyon"}}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("order.yaml"), "total: 31\nship:\n  city: Lyon\n").unwrap();
+    std::fs::write(
+        dir.join("order.toml"),
+        "total = 31\n[ship]\ncity = \"Lyon\"\n",
+    )
+    .unwrap();
+    let open = || FsAdapter::with_options(&dir, FsOptions::default()).unwrap();
+
+    // Default: a scalar is a child node.
+    let a = ComposeAdapter::new(open());
+    assert_eq!(values(&a, "/order.json/* @| count"), ["2"]);
+    assert_eq!(values(&a, "/order.json/ship/city::"), ["Lyon"]);
+
+    // json2: the JSON leaf lists its structural children alone and
+    // answers its scalars as properties; the YAML leaf as before.
+    let a = ComposeAdapter::new(open()).with_data_graft(DataGraft::parse("json2").unwrap());
+    assert_eq!(values(&a, "/order.json/* @| count"), ["1"]);
+    assert_eq!(values(&a, "/order.json::total"), ["31"]);
+    assert_eq!(values(&a, "/order.json/ship::city"), ["Lyon"]);
+    assert_eq!(values(&a, "/order.yaml/* @| count"), ["2"]);
+
+    // a list names several
+    let a = ComposeAdapter::new(open())
+        .with_data_graft(DataGraft::parse("json2, yaml2,toml2").unwrap());
+    assert_eq!(values(&a, "/order.yaml/* @| count"), ["1"]);
+    assert_eq!(values(&a, "/order.yaml/ship::city"), ["Lyon"]);
+    assert_eq!(values(&a, "/order.toml/* @| count"), ["1"]);
+    assert_eq!(values(&a, "/order.toml::total"), ["31"]);
+
+    // a word that names no property reading is refused by name
+    let e = DataGraft::parse("json2,xml2").unwrap_err();
+    assert!(
+        e.contains(r#""xml2" names no reading a graft takes (one of json2, yaml2, toml2)"#),
+        "{e}"
+    );
+}
+
+/// The command takes the property readings by the option's words:
+/// `graft(json2)` is JSON with its scalars as properties (JSON
+/// lines where the text is no one document), `yaml2` and `toml2`
+/// alike. The mount's own choice does not reach the command, and a
+/// word that names nothing is refused with spellings that answer.
+#[test]
+fn graft_command_takes_the_property_readings() {
+    use quarb::AstAdapter;
+    use quarb_compose::DataGraft;
+    let dir = fixture("data-graft-command");
+    let a = ComposeAdapter::new(FsAdapter::with_options(&dir, FsOptions::default()).unwrap());
+    let json = r#"{"total": 31, "ship": {"city": "Lyon"}}"#;
+
+    let node = a.graft_text(json, Some("json")).unwrap();
+    assert_eq!(a.children(node).len(), 2);
+    let node = a.graft_text(json, Some("json2")).unwrap();
+    assert_eq!(a.children(node).len(), 1);
+    assert_eq!(
+        a.property(node, "total").map(|v| v.to_string()),
+        Some("31".to_string())
+    );
+    assert!(
+        a.locator(node, |_| String::new())
+            .starts_with("graft(json2)!"),
+        "{}",
+        a.locator(node, |_| String::new())
+    );
+    // JSON lines under the same word, as the `json2:` mount reads
+    let node = a
+        .graft_text("{\"total\": 31}\n{\"total\": 7}\n", Some("json2"))
+        .unwrap();
+    assert_eq!(a.children(node).len(), 2);
+    let node = a
+        .graft_text("total: 31\nship:\n  city: Lyon\n", Some("yaml2"))
+        .unwrap();
+    assert_eq!(a.children(node).len(), 1);
+    let node = a
+        .graft_text("total = 31\n[ship]\ncity = \"Lyon\"\n", Some("toml2"))
+        .unwrap();
+    assert_eq!(a.children(node).len(), 1);
+
+    // the mount's choice is for its own leaves: the command's bare
+    // `json` stays the node reading under it
+    let b = ComposeAdapter::new(FsAdapter::with_options(&dir, FsOptions::default()).unwrap())
+        .with_data_graft(DataGraft::parse("json2").unwrap());
+    let node = b.graft_text(json, Some("json")).unwrap();
+    assert_eq!(b.children(node).len(), 2);
+
+    // refusals: the text that is not the notation; a word that names
+    // nothing, with spellings that answer (the hint once offered
+    // `graft(text:json3)`, itself refused)
+    let e = a.graft_text("not json", Some("json2")).unwrap_err();
+    assert_eq!(e, "graft(json2): the text does not parse as json");
+    let e = a.graft_text(json, Some("json3")).unwrap_err();
+    assert!(
+        e.starts_with("graft(json3): 'json3' names no notation; one of json, "),
+        "{e}"
+    );
+    assert!(
+        e.ends_with(
+            "a property reading, json2, yaml2, toml2, or a reading over a notation, \
+             graft(text:markdown)"
+        ),
+        "{e}"
+    );
+}

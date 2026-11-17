@@ -121,6 +121,19 @@ struct Cli {
     #[arg(long, conflicts_with_all = ["xpath", "jq"])]
     sql: bool,
 
+    /// With --jq, --xpath or --sql: translate a construct that has
+    /// no exact Quarb counterpart to the nearest one, and warn of
+    /// each place the answer can differ from the source language's
+    /// (LENIENT_TRANSLATION). Without it such a construct is
+    /// refused, and the refusal names this flag. The lenient forms
+    /// today: in jq, sort_by, min_by, max_by, unique_by, and
+    /// group_by(KEY) | map(length); in XPath, a relative path (read
+    /// from the document root) and node() (the elements). A query
+    /// that needs no leniency translates as it does without the
+    /// flag.
+    #[arg(long)]
+    lenient: bool,
+
     /// Emit results as canonical kaiv: one typed leaf per value
     /// under /@results/N, with provenance recording the source
     /// document and each value's origin node.
@@ -402,7 +415,11 @@ struct Cli {
     /// and exit after --resident-ttl idle seconds. The session
     /// serves the inputs as they were when it started: edits to
     /// the files (or to --refs/--defs content) are not seen until
-    /// the session expires or is killed.
+    /// the session expires or is killed. A git repository is the
+    /// exception: the session looks at its refs before each query
+    /// and answers the repository as it stands (a new commit, a
+    /// moved branch, a new tag); what it has read of the commits
+    /// themselves it keeps.
     #[arg(long)]
     resident: bool,
 
@@ -923,9 +940,26 @@ fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
         cli.query = query.to_string();
     }
 
+    // `--lenient` is the translators' switch (the ruling of
+    // 2026-11-17): alone it has nothing to be lenient about.
+    if cli.lenient && !(cli.xpath || cli.jq || cli.sql) {
+        anyhow::bail!(
+            "--lenient goes with a translator (--jq, --xpath or --sql): it lets the \
+             translation take the nearest Quarb construct where there is no exact one, \
+             and warns of the difference"
+        );
+    }
     #[cfg(feature = "adapters")]
     if cli.xpath {
-        let translation = quarb_xpath::translate(&cli.query).context("translating XPath")?;
+        let translation = if cli.lenient {
+            quarb_xpath::translate_lenient(&cli.query)
+        } else {
+            quarb_xpath::translate(&cli.query)
+        }
+        .context("translating XPath")?;
+        for warning in &translation.warnings {
+            note_warning(LENIENT_TRANSLATION, "xpath", warning.clone());
+        }
         for note in &translation.notes {
             eprintln!("note: {note}");
         }
@@ -933,7 +967,16 @@ fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
     }
     #[cfg(feature = "adapters")]
     if cli.jq {
-        let translation = quarb_jq::translate(&cli.query).context("translating jq")?;
+        let translation = if cli.lenient {
+            quarb_jq::translate_lenient(&cli.query)
+        } else {
+            quarb_jq::translate(&cli.query)
+        }
+        .context("translating jq")?;
+        // What the lenient translation gave up, one warning each.
+        for warning in &translation.warnings {
+            note_warning(LENIENT_TRANSLATION, "jq", warning.clone());
+        }
         for note in &translation.notes {
             eprintln!("note: {note}");
         }
@@ -1905,6 +1948,10 @@ fn resident_serve_loop<A: AstAdapter>(
                         continue;
                     }
                 };
+                // A source that can move under the session looks
+                // again before each query (a git repository at its
+                // refs): the query answers it as it stands.
+                adapter.refresh();
                 // Each query is its own invocation instant unless
                 // the session was pinned with --now.
                 let mut now = oc.now;
@@ -1977,6 +2024,10 @@ const LOCALE_UNKNOWN: &str = "LOCALE_UNKNOWN";
 /// reference the run left unresolved, a reading a mount declined.
 const UNRESOLVED: &str = "UNRESOLVED";
 const READING: &str = "READING";
+/// A warning of `--lenient`: a translator took the nearest Quarb
+/// construct for one with no exact counterpart, and the answer can
+/// differ from the source language's in the way the message names.
+const LENIENT_TRANSLATION: &str = "LENIENT_TRANSLATION";
 /// Debug codes: the plan a source was handed, the mount a query ran
 /// over (content the implementation's own).
 const PLAN: &str = "PLAN";
@@ -2887,7 +2938,10 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                 }
             }
         }
-        let adapter = DuckdbAdapter::open(p).context("opening DuckDB database")?;
+        let mut adapter = DuckdbAdapter::open(p).context("opening DuckDB database")?;
+        adapter
+            .hold_crosslinks(&ctx.crosslinks())
+            .map_err(|e| anyhow::anyhow!("{}: {e}", p.display()))?;
         let src = p.display().to_string();
         return run_relational(
             adapter,
@@ -2966,6 +3020,10 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
             }
             None => SqliteAdapter::open_with_refs(p, &refs).context("opening SQLite database")?,
         };
+        let mut adapter = adapter;
+        adapter
+            .hold_crosslinks(&ctx.crosslinks())
+            .map_err(|e| anyhow::anyhow!("{}: {e}", p.display()))?;
         let src = p.display().to_string();
         return run_relational(
             adapter,
@@ -3291,6 +3349,27 @@ fn partial_plan_with(
     }
 }
 
+/// Whether the target's grafts read JSON under the property reading
+/// (`?graft=json2` on the first target, a path as written taken as
+/// is, as `take_encoding_option` takes it).
+#[cfg(feature = "adapters")]
+fn target_grafts_json2(cli: &Cli) -> bool {
+    let Some(p) = cli.paths.first() else {
+        return false;
+    };
+    if p.exists() {
+        return false;
+    }
+    p.to_str()
+        .and_then(|s| s.rsplit_once('?'))
+        .is_some_and(|(_, query)| {
+            query
+                .split('&')
+                .filter_map(|pair| pair.strip_prefix("graft="))
+                .any(|label| quarb_compose::DataGraft::parse(label).is_ok_and(|g| g.json))
+        })
+}
+
 /// The pushdown plan for a database input, with --diagnostics=info
 /// commentary on stderr either way.
 #[cfg(feature = "adapters")]
@@ -3310,6 +3389,25 @@ fn pushdown_plan(
             // ORDER BY key from the catalog), and the plan itself
             // is named where it does not run — the refusal branches.
             note_debug(PLAN, "query", || format!("pushdown plan: {}", plan.sql));
+            // A plan that reads a JSON value as a child node of its
+            // column (`/col/key::`) answers by the default reading's
+            // spelling; under `?graft=json2` the scan lists no scalar
+            // as a child and answers nothing there, so the plan is
+            // not the scan's. (A prefilter is checked again by the
+            // scan and stays.)
+            if plan.column_types.json_children && target_grafts_json2(cli) {
+                note_info(
+                    NOT_PUSHED,
+                    "query",
+                    format!(
+                        "pushdown: not used (the plan reads a JSON value as a child node of \
+                         its column, and under ?graft=json2 a scalar is a property: write \
+                         /col::key); scanning — the plan: {}",
+                        plan.sql
+                    ),
+                );
+                return None;
+            }
             // An every-witness JOIN (`<=>*`) owes the joined table's
             // order within each driver's rows: the SQLite driver
             // keeps it; a driver that orders by one key only would
@@ -3808,6 +3906,7 @@ fn run_relational<A: AstAdapter>(
     let adapter = ComposeAdapter::new(inner)
         .with_decoding(current_decoding(ctx)?)
         .with_csv_options(ctx.csv())
+        .with_data_graft(ctx.data_graft())
         .with_string_reader(quarb_open::string_reader(ctx));
     run(
         query,

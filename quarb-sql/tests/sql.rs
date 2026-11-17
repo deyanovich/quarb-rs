@@ -657,6 +657,28 @@ fn a_plan_records_the_column_types_it_assumes() {
     // count assumes nothing of a column
     let plan = quarb_sql::pushdown("/books/* @| count", None).unwrap();
     assert!(plan.column_types.is_empty());
+    // the glued projection plans as the piped one (the planner's
+    // first exact edge, 2026-11-17): the same statement, the same
+    // assumption; it was refused as a reducer "over row nodes"
+    for (glued, piped) in [
+        ("/books/*::pages @| sum", "/books/* | ::pages @| sum"),
+        ("/books/*::pages @| mean", "/books/* | ::pages @| mean"),
+        ("/books/*::pages @| min", "/books/* | ::pages @| min"),
+        ("/books/*::pages @| max", "/books/* | ::pages @| max"),
+        ("/books/*::pages @| count", "/books/* | ::pages @| count"),
+        (
+            "/books/*[::genre = 'epic']::pages @| max",
+            "/books/*[::genre = 'epic'] | ::pages @| max",
+        ),
+    ] {
+        let g = quarb_sql::pushdown(glued, None).unwrap_or_else(|| panic!("{glued}"));
+        let p = quarb_sql::pushdown(piped, None).unwrap_or_else(|| panic!("{piped}"));
+        assert_eq!(g.sql, p.sql, "{glued}");
+        assert_eq!(g.column_types, p.column_types, "{glued}");
+    }
+    let plan = quarb_sql::pushdown("/books/*::pages @| max", None).unwrap();
+    assert_eq!(plan.sql, "SELECT MAX(pages) FROM books");
+    assert_eq!(plan.column_types.numeric, ["pages"]);
     let partial = quarb_sql::partial_pushdown(
         "/books/*[::pages > 300] | ::title | .title(::title) @|{.title} count",
         None,

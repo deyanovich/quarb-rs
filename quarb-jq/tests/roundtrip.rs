@@ -90,3 +90,64 @@ fn slice_composition() {
     assert_eq!(values(".nums[2:4] | add"), vec!["5"]);
     assert_eq!(values(".users[1:][] | .name"), vec!["Bo", "Cy"]);
 }
+
+/// `--lenient`: the by-key functions run on the engine. Where no
+/// key is null and no key ties, the answers are jq's own (checked
+/// against jq 1.8 for the same filters over this document); the
+/// two places they differ are the ones the warnings name.
+#[test]
+fn lenient_by_key_functions_answer() {
+    const EVENTS: &str = r#"{"events": [
+      {"id": 46817, "kind": "read",  "payload": {"duration_ms": 12}},
+      {"id": 46818, "kind": "write", "payload": {"duration_ms": 340}},
+      {"id": 46819, "kind": "read",  "payload": {"duration_ms": 75}},
+      {"id": 46820, "kind": "write", "payload": {}},
+      {"id": 46821, "kind": "read",  "payload": {"duration_ms": 75}}
+    ]}"#;
+    let run = |jq: &str| -> Vec<String> {
+        let query = quarb_jq::translate_lenient(jq).unwrap().query;
+        let adapter = JsonAdapter::parse(EVENTS).unwrap();
+        match quarb::run(&query, &adapter).unwrap() {
+            quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect(),
+            quarb::QueryResult::Nodes(_) => panic!("expected values for {query}"),
+        }
+    };
+    // as jq answers them
+    assert_eq!(
+        run(".events | sort_by(.id) | map(.id)"),
+        ["46817", "46818", "46819", "46820", "46821"]
+    );
+    assert_eq!(run(".events | sort_by(.kind, .id) | .[0].id"), ["46817"]);
+    assert_eq!(run(".events | sort_by(.id) | .[-1].kind"), ["read"]);
+    assert_eq!(
+        run(".events | sort_by(.id) | .[1:3] | .[].id"),
+        ["46818", "46819"]
+    );
+    assert_eq!(run(".events | sort_by(.id) | length"), ["5"]);
+    assert_eq!(
+        run(".events | max_by(.payload.duration_ms) | .id"),
+        ["46818"]
+    );
+    assert_eq!(
+        run(".events | unique_by(.kind) | map(.id)"),
+        ["46817", "46818"]
+    );
+    assert_eq!(run(".events | group_by(.kind) | map(length)"), ["3", "2"]);
+    assert_eq!(run(".events[1:4] | min_by(.id) | .kind"), ["write"]);
+    // the null key (46820 has no duration): jq sorts it first and
+    // answers it as the least; here it sorts last and does not
+    // compete
+    assert_eq!(
+        run(".events | sort_by(.payload.duration_ms) | map(.id)"),
+        ["46817", "46819", "46821", "46818", "46820"]
+    );
+    assert_eq!(
+        run(".events | min_by(.payload.duration_ms) | .id"),
+        ["46817"]
+    );
+    // a tie: every element of the extreme key answers (jq: one)
+    assert_eq!(
+        run(".events[2:5] | max_by(.payload.duration_ms) | .id"),
+        ["46819", "46821"]
+    );
+}

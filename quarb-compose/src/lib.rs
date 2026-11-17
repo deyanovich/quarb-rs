@@ -109,6 +109,63 @@ pub enum DocumentGraft {
     Text,
 }
 
+/// The reading data documents (JSON, JSON lines, YAML, TOML: a
+/// leaf, a member, a cell or a string in one of them) graft under:
+/// scalars as child nodes by default, or as properties, the
+/// property reading (`json2`, `yaml2`, `toml2`), where the mount
+/// asks with `?graft=json2` (a list, `?graft=json2,yaml2`). The
+/// choice is the mount's and nested composes inherit it; the
+/// command says its own, `graft(json2)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DataGraft {
+    pub json: bool,
+    pub yaml: bool,
+    pub toml: bool,
+}
+
+/// The property readings a graft can take, as `?graft=` and
+/// `graft(…)` name them.
+pub const DATA_GRAFTS: &[&str] = &["json2", "yaml2", "toml2"];
+
+impl DataGraft {
+    /// The value of `?graft=`: one property reading or several,
+    /// comma-separated. `Err` names the word that is none.
+    pub fn parse(label: &str) -> Result<Self, String> {
+        let mut graft = DataGraft::default();
+        for word in label.split(',').map(str::trim) {
+            match graft.with(word) {
+                Some(g) => graft = g,
+                None => {
+                    return Err(format!(
+                        "graft={label:?}: {word:?} names no reading a graft takes (one of {})",
+                        DATA_GRAFTS.join(", ")
+                    ));
+                }
+            }
+        }
+        Ok(graft)
+    }
+
+    /// This choice with one property reading more; None for a word
+    /// that names none.
+    fn with(self, word: &str) -> Option<Self> {
+        Some(match word {
+            "json2" => DataGraft { json: true, ..self },
+            "yaml2" => DataGraft { yaml: true, ..self },
+            "toml2" => DataGraft { toml: true, ..self },
+            _ => return None,
+        })
+    }
+
+    fn reading(on: bool) -> quarb_json::Reading {
+        if on {
+            quarb_json::Reading::Property
+        } else {
+            quarb_json::Reading::default()
+        }
+    }
+}
+
 /// The declaration reporter a host hands the source boundary: by
 /// the source's name, the XML prologue for XML-family names, the
 /// HTML prescan for HTML names, both tried (prologue first) for a
@@ -261,6 +318,7 @@ fn parse_as(
     content: &str,
     graft: SourceGraft,
     doc: DocumentGraft,
+    data: DataGraft,
     csv: quarb_csv::CsvOptions,
 ) -> Option<Inner> {
     #[cfg(not(feature = "source"))]
@@ -268,12 +326,12 @@ fn parse_as(
     let ext = canonical_notation(notation);
     match ext.as_str() {
         "json" => {
-            return quarb_json::JsonAdapter::parse(content)
+            return quarb_json::JsonAdapter::parse_as(content, DataGraft::reading(data.json))
                 .ok()
                 .map(Inner::Json);
         }
         "jsonl" => {
-            return quarb_json::JsonAdapter::parse_lines(content)
+            return quarb_json::JsonAdapter::parse_lines_as(content, DataGraft::reading(data.json))
                 .ok()
                 .map(Inner::Json);
         }
@@ -305,8 +363,16 @@ fn parse_as(
                 DocumentGraft::Text => Inner::Text(quarb_text_html::parse(content)),
             });
         }
-        "yaml" => return quarb_yaml::parse(content).ok().map(Inner::Json),
-        "toml" => return quarb_toml::parse(content).ok().map(Inner::Json),
+        "yaml" => {
+            return quarb_yaml::parse_as(content, DataGraft::reading(data.yaml))
+                .ok()
+                .map(Inner::Json);
+        }
+        "toml" => {
+            return quarb_toml::parse_as(content, DataGraft::reading(data.toml))
+                .ok()
+                .map(Inner::Json);
+        }
         "markdown" => {
             return Some(match doc {
                 DocumentGraft::Dom => Inner::Html(quarb_markdown::parse(content)),
@@ -462,6 +528,8 @@ pub struct ComposeAdapter<A: AstAdapter> {
     source_graft: SourceGraft,
     /// The level marked-up documents graft at.
     document_graft: DocumentGraft,
+    /// The reading data documents graft under.
+    data_graft: DataGraft,
     /// Maps an outer leaf to the URL its document is served
     /// from, so a text-level graft joins relative references
     /// against it and `-->` can land on a sibling document.
@@ -518,6 +586,7 @@ impl<A: AstAdapter> ComposeAdapter<A> {
             source_bytes: None,
             source_graft: SourceGraft::default(),
             document_graft: DocumentGraft::default(),
+            data_graft: DataGraft::default(),
             document_url: None,
             urls: RefCell::new(None),
             document_reader: None,
@@ -632,6 +701,13 @@ impl<A: AstAdapter> ComposeAdapter<A> {
         self
     }
 
+    /// Choose the reading data documents graft under
+    /// (builder-style; the default reads scalars as child nodes).
+    pub fn with_data_graft(mut self, graft: DataGraft) -> Self {
+        self.data_graft = graft;
+        self
+    }
+
     /// Like [`new`](Self::new), with a hook mapping outer leaves
     /// to filesystem paths, so archive leaves (`.zip`,
     /// `.tar[.gz]`) graft too. The grafted archive composes in
@@ -695,7 +771,22 @@ impl<A: AstAdapter> ComposeAdapter<A> {
     /// or what the operand did not name. The `web` reading reads a
     /// crawl, not a lone string, and refuses.
     pub fn graft_text(&self, text: &str, operand: Option<&str>) -> Result<NodeId, String> {
-        let (reading, named): (Option<&str>, Option<String>) = match operand.map(str::trim) {
+        let shown_operand = operand;
+        // A property reading names its notation and the reading at
+        // once (`graft(json2)`: JSON, scalars as properties), the
+        // word `?graft=` takes on a mount. The command says what it
+        // wants and the mount's option does not reach it: `?graft=`
+        // is for the grafts the mount makes of its own leaves, as
+        // the document level is (`graft(markdown)` is the DOM under
+        // a `text:` mount too).
+        let (operand, data) = match operand.map(str::trim) {
+            Some(word) if DATA_GRAFTS.contains(&word) => (
+                Some(word.trim_end_matches('2')),
+                DataGraft::default().with(word).unwrap_or_default(),
+            ),
+            other => (other, DataGraft::default()),
+        };
+        let (reading, named): (Option<&str>, Option<String>) = match operand {
             None | Some("") => (None, None),
             Some(op) => match op.split_once(':') {
                 Some((r, n)) if READINGS.contains(&r) => (
@@ -706,7 +797,7 @@ impl<A: AstAdapter> ComposeAdapter<A> {
                 _ => (None, Some(canonical_notation(op))),
             },
         };
-        let shown = operand.unwrap_or("").trim();
+        let shown = shown_operand.unwrap_or("").trim();
         if reading == Some("web") {
             return Err(format!(
                 "graft({shown}): the web reading reads a crawl, not a lone string"
@@ -727,6 +818,8 @@ impl<A: AstAdapter> ComposeAdapter<A> {
         };
         let label = match reading {
             Some(r) => format!("{r}:{notation}"),
+            // the word that pastes back: `graft(json2)!/…`
+            None if DATA_GRAFTS.contains(&shown) => shown.to_string(),
             None => notation.clone(),
         };
         let inner = match reading {
@@ -734,20 +827,31 @@ impl<A: AstAdapter> ComposeAdapter<A> {
                 if !is_notation(&notation) {
                     return Err(format!(
                         "graft({shown}): '{notation}' names no notation; one of {} (or a \
-                         source language), or a reading prefix, graft(text:{notation})",
-                        NOTATIONS.join(", ")
+                         source language), a property reading, {}, or a reading over a \
+                         notation, graft(text:markdown)",
+                        NOTATIONS.join(", "),
+                        DATA_GRAFTS.join(", ")
                     ));
                 }
                 // The notation's default reading: the DOM for the
                 // marked-up ones, plain text for `text`.
-                parse_as(
-                    &notation,
-                    text,
-                    self.source_graft,
-                    DocumentGraft::Dom,
-                    self.csv.clone(),
-                )
-                .ok_or_else(|| format!("graft({shown}): the text does not parse as {notation}"))?
+                // `json2` reads JSON and, failing that, JSON lines,
+                // as the `json2:` mount does.
+                let parse = |notation: &str| {
+                    parse_as(
+                        notation,
+                        text,
+                        self.source_graft,
+                        DocumentGraft::Dom,
+                        data,
+                        self.csv.clone(),
+                    )
+                };
+                parse(&notation)
+                    .or_else(|| (shown == "json2").then(|| parse("jsonl")).flatten())
+                    .ok_or_else(|| {
+                        format!("graft({shown}): the text does not parse as {notation}")
+                    })?
             }
             Some("code") => {
                 if named_is_text(&label) {
@@ -949,6 +1053,7 @@ impl<A: AstAdapter> ComposeAdapter<A> {
                         .with_source_bytes(archive_member_bytes)
                         .with_source_graft(self.source_graft)
                         .with_document_graft(self.document_graft)
+                        .with_data_graft(self.data_graft)
                         .with_decoding(self.decoding.clone())
                         .with_csv_options(self.csv.clone())
                         .with_default_notation(self.default_notation.clone()),
@@ -1020,6 +1125,7 @@ impl<A: AstAdapter> ComposeAdapter<A> {
                 &content,
                 self.source_graft,
                 self.document_graft,
+                self.data_graft,
                 self.csv.clone(),
             )?;
             if let (Inner::Text(model), Some(f)) = (&mut inner, self.document_url)
@@ -1924,6 +2030,12 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
 
     fn whole_listings(&self) {
         self.outer.whole_listings()
+    }
+
+    /// The outer source looks again; a grafted document was read
+    /// off a leaf and stays that leaf's.
+    fn refresh(&self) {
+        self.outer.refresh()
     }
 
     fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {

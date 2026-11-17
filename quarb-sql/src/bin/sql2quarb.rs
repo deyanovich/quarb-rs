@@ -1,10 +1,16 @@
 //! Translate a SQL SELECT statement (argv or stdin) to a Quarb
 //! query. Notes go to stderr, the query to stdout.
+//!
+//! `--lenient` is taken, as the other translators take it, and
+//! changes nothing yet: what this bridge refuses has no near Quarb
+//! construct to fall back to (or translates exactly, and is not
+//! written).
 
 use std::io::Read;
 
 fn main() {
-    let input = match std::env::args().nth(1) {
+    // the translators' common switch: no lenient form here yet
+    let input = match std::env::args().skip(1).find(|a| a != "--lenient") {
         Some(a) => a,
         None => {
             let mut s = String::new();

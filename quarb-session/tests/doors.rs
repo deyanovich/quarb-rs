@@ -68,3 +68,54 @@ fn the_session_opens_lines_web_and_query_files() {
     .unwrap_or_default();
     assert!(err.contains("site store"), "{err}");
 }
+
+/// `graft=json2` on a source a host hands over (ruling 2026-11-17),
+/// as the native opener reads `?graft=json2`: an archive's JSON
+/// members graft with their scalars as properties; a word that
+/// names no property reading and a source that grafts nothing are
+/// refused by name.
+#[cfg(feature = "archives")]
+#[test]
+fn a_handed_archive_takes_the_graft_option() {
+    use quarb_session::Source;
+    use std::io::Write as _;
+    let mut bytes = Vec::new();
+    {
+        let mut z = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
+        let opts = zip::write::SimpleFileOptions::default();
+        z.start_file("order.json", opts).unwrap();
+        z.write_all(br#"{"total": 31, "ship": {"city": "Lyon"}}"#)
+            .unwrap();
+        z.finish().unwrap();
+    }
+    let read = |format: &str, text: Option<&str>, bytes: Option<&[u8]>, options: &str| {
+        Doc::read(&Source {
+            format,
+            text,
+            bytes,
+            options,
+            url: None,
+            files: &[],
+        })
+    };
+    // the default reading: a scalar is a child node
+    let plain = read("zip", None, Some(&bytes), "").unwrap();
+    assert_eq!(count(&plain, "/order.json/* @| count"), "2");
+    // json2: the structural children alone, the scalars properties
+    let held = read("zip", None, Some(&bytes), "graft=json2").unwrap();
+    assert_eq!(count(&held, "/order.json/* @| count"), "1");
+    assert_eq!(count(&held, "/order.json::total"), "31");
+    assert_eq!(count(&held, "/order.json/ship::city"), "Lyon");
+    // refusals
+    let refused = |r: anyhow::Result<Doc>| format!("{:#}", r.err().expect("refused"));
+    let e = refused(read("zip", None, Some(&bytes), "graft=json3"));
+    assert!(
+        e.contains("\"json3\" names no reading a graft takes (one of json2, yaml2, toml2)"),
+        "{e}"
+    );
+    let e = refused(read("json", Some(r#"{"k": 1}"#), None, "graft=json2"));
+    assert!(
+        e.contains("this source is read as json: read it under the property reading"),
+        "{e}"
+    );
+}

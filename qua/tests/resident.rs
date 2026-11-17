@@ -231,3 +231,63 @@ fn a_standing_session_answers_without_a_fixed_wait() {
         "the fastest of ten answers took {fastest:?}"
     );
 }
+
+/// A standing session over a git repository answers it as it stands
+/// (the ruling of 2026-11-17): the session looks at the refs before
+/// each query, so a commit, a tag and a branch made after its first
+/// answer are there at the next, through every door. Before, each
+/// listing was kept from its first read: `/HEAD` and `/commits/*`
+/// answered the old state and `/commits/HEAD` the new.
+#[test]
+fn a_session_over_a_repository_answers_it_as_it_stands() {
+    let dir = fixture("git-refs");
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .env("GIT_AUTHOR_NAME", "Ada")
+            .env("GIT_AUTHOR_EMAIL", "ada@example.org")
+            .env("GIT_COMMITTER_NAME", "Ada")
+            .env("GIT_COMMITTER_EMAIL", "ada@example.org")
+            .env("GIT_AUTHOR_DATE", "2020-01-01T00:00:00Z")
+            .env("GIT_COMMITTER_DATE", "2020-01-01T00:00:00Z")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&["init", "-q", "-b", "master"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "canto 1"]);
+
+    // the session starts here and reads the refs
+    assert_eq!(qua(&dir, &["/HEAD | ::subject", "git:repo"]), "canto 1");
+    assert_eq!(qua(&dir, &["/commits/* @| count", "git:repo"]), "1");
+    assert_eq!(qua(&dir, &["/tags/* @| count", "git:repo"]), "0");
+
+    // the repository moves under it (well inside the session's two
+    // idle seconds: the same session answers what follows)
+    git(&["commit", "-q", "--allow-empty", "-m", "canto 2"]);
+    git(&["tag", "c02"]);
+    git(&["branch", "earlier", "HEAD~1"]);
+    assert_eq!(qua(&dir, &["/HEAD | ::subject", "git:repo"]), "canto 2");
+    assert_eq!(
+        qua(&dir, &["/branches/master | ::subject", "git:repo"]),
+        "canto 2"
+    );
+    assert_eq!(qua(&dir, &["/commits/* @| count", "git:repo"]), "2");
+    assert_eq!(qua(&dir, &["/tags/* | :name", "git:repo"]), "c02");
+    assert_eq!(
+        qua(&dir, &["/branches/* | :name", "git:repo"]),
+        "earlier\nmaster"
+    );
+    assert_eq!(
+        qua(&dir, &["/HEAD(->parent){;3} | ::subject", "git:repo"]),
+        "canto 2\ncanto 1"
+    );
+}

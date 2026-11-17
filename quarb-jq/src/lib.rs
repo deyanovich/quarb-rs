@@ -15,6 +15,10 @@
 //! - Functions: `length`, `keys`, `add`, `min`, `max`, `unique`,
 //!   `sort`, `reverse`, `first`, `last`, `join(s)`, `map(path)`,
 //!   and the array-collect idiom `[EXPR] | fn`.
+//! - Not translated, and refused with the hand-written Quarb form
+//!   in the refusal: `sort_by`, `min_by`, `max_by`, `group_by`,
+//!   `unique_by` (the thread commands `@| sort_by`, `@| min_by`,
+//!   `@| max_by`, `@| unique_by`, and a fold by a pushed key).
 //!
 //! jq emits *values*, so [`translate`] projects the final
 //! navigation with `::`; [`translate_nodes`] leaves the result as
@@ -52,26 +56,50 @@ pub enum JqError {
 pub struct Translation {
     pub query: String,
     pub notes: Vec<String>,
+    /// What a lenient translation gives up: one line for each place
+    /// where the Quarb construct chosen answers differently from
+    /// jq. Empty for a strict translation, and for a lenient one of
+    /// a filter that needed no leniency.
+    pub warnings: Vec<String>,
 }
 
 /// Translate a jq filter to a value-projecting Quarb query (the
 /// final navigation gets `::`, matching jq's value output).
 pub fn translate(jq: &str) -> Result<Translation, JqError> {
-    translate_inner(jq, true)
+    translate_inner(jq, true, false)
+}
+
+/// [`translate`] under `--lenient` (the ruling of 2026-11-17): a
+/// construct with no exact Quarb counterpart is translated to the
+/// nearest one, and each divergence is named in
+/// [`Translation::warnings`]. Today that is the by-key functions:
+/// `sort_by`, `min_by`, `max_by`, `unique_by`, and `group_by(KEY) |
+/// map(length)`. A filter that needs no leniency translates as it
+/// does strictly.
+pub fn translate_lenient(jq: &str) -> Result<Translation, JqError> {
+    translate_inner(jq, true, true)
+}
+
+/// [`translate_nodes`] under `--lenient`.
+pub fn translate_nodes_lenient(jq: &str) -> Result<Translation, JqError> {
+    translate_inner(jq, false, true)
 }
 
 /// Translate a jq filter to a node query (no final projection); the
 /// results are node locations, comparable with `jq 'path(...)'`.
 pub fn translate_nodes(jq: &str) -> Result<Translation, JqError> {
-    translate_inner(jq, false)
+    translate_inner(jq, false, false)
 }
 
-fn translate_inner(jq: &str, project: bool) -> Result<Translation, JqError> {
+fn translate_inner(jq: &str, project: bool, lenient: bool) -> Result<Translation, JqError> {
     let tokens = lex(jq)?;
     let mut parser = Parser {
         tokens,
         pos: 0,
         notes: Vec::new(),
+        lenient,
+        project,
+        warnings: Vec::new(),
     };
     let query = parser.program(project)?;
     if parser.pos < parser.tokens.len() {
@@ -82,7 +110,13 @@ fn translate_inner(jq: &str, project: bool) -> Result<Translation, JqError> {
     }
     let mut notes = parser.notes;
     notes.dedup();
-    Ok(Translation { query, notes })
+    let mut warnings = parser.warnings;
+    warnings.dedup();
+    Ok(Translation {
+        query,
+        notes,
+        warnings,
+    })
 }
 
 // ---------------------------------------------------------------- lexer
@@ -338,6 +372,15 @@ enum State {
     /// Projected values (after an aggregate); only further
     /// aggregates may follow.
     Values,
+    /// The elements of an array as threads in the order a by-key
+    /// function gave them (`--lenient`), their nodes kept: an index,
+    /// a slice, `[]`, `length`, `first`, `last` or `map(path)` may
+    /// follow.
+    Ordered,
+    /// One element picked out of an ordered array (the several that
+    /// tie, for `min_by` and `max_by`), or its elements iterated: a
+    /// path may follow, read as a value.
+    Picked,
 }
 
 /// jq functions that consume an array and reduce or reorder it,
@@ -358,10 +401,83 @@ fn array_fn(name: &str) -> Option<&'static str> {
     })
 }
 
+/// jq's functions that sort, pick, group or dedup an array by a
+/// key.
+fn by_key_fn(name: &str) -> bool {
+    matches!(
+        name,
+        "sort_by" | "min_by" | "max_by" | "group_by" | "unique_by"
+    )
+}
+
+/// The refusal of a by-key function. None of them is translated
+/// (ruled 2026-11-17): the refusal names what a hand-written query
+/// says and where its answer differs from jq's, over the filter's
+/// own array (`array`, the path so far) and key (`key`, the
+/// argument as a Quarb key) when they are plain, with the places
+/// named otherwise.
+fn by_key_refusal(f: &str, array: Option<&str>, key: Option<&str>, flag: bool) -> String {
+    let a = array.unwrap_or("ARRAY");
+    let k = key.unwrap_or("KEY");
+    let way = match f {
+        "sort_by" => format!(
+            "Quarb sorts the threads and keeps the nodes: {a}/* @| sort_by({k}), then @| [1] \
+             for the first element or @| [..3] for the first three; a null key sorts last \
+             there, first in jq"
+        ),
+        "min_by" => format!(
+            "{a}/* @| min_by({k}): every thread that ties for the least key answers, where \
+             jq answers the first, and a null key does not compete, where jq takes it for \
+             the least"
+        ),
+        "max_by" => format!(
+            "{a}/* @| max_by({k}): every thread that ties for the greatest key answers, \
+             where jq answers the last"
+        ),
+        "group_by" => format!(
+            "Quarb pushes the key and folds by it: {a}/* | .k({k}) @|{{.k}} count, or \
+             another fold in the place of count; one answer a group, the groups in the \
+             order of first appearance, where jq sorts them by the key"
+        ),
+        _ => format!(
+            "{a}/* @| unique_by({k}): the first thread of each key, in the order of first \
+             appearance; jq answers them sorted by the key, which @| sort_by({k}) before \
+             it gives"
+        ),
+    };
+    let places = match (array, key) {
+        (Some(_), Some(_)) => "",
+        (None, Some(_)) => "; ARRAY is the path to the array",
+        (Some(_), None) => "; KEY is a value read from the element, as ::price",
+        (None, None) => {
+            "; ARRAY is the path to the array, KEY a value read from the element, as ::price"
+        }
+    };
+    // What `--lenient` does with it, where the refusal is the
+    // strict translator's.
+    let lenient = match (flag, f) {
+        (false, _) => "",
+        (true, "group_by") => {
+            "; --lenient translates group_by(KEY) | map(length), the size of each group, \
+             with a warning where the answer differs from jq's"
+        }
+        (true, _) => {
+            "; --lenient translates it so, with a warning where the answer differs from jq's"
+        }
+    };
+    format!("the {f} function (in a hand-written query: {way}{places}){lenient}")
+}
+
 struct Parser {
     tokens: Vec<(Tok, usize)>,
     pos: usize,
     notes: Vec<String>,
+    /// `--lenient`: translate to the nearest construct and warn.
+    lenient: bool,
+    /// Whether the result is projected to values (`translate`) or
+    /// left as nodes (`translate_nodes`).
+    project: bool,
+    warnings: Vec<String>,
 }
 
 impl Parser {
@@ -401,6 +517,7 @@ impl Parser {
             // The collected values are the projected stream.
             match state {
                 State::Nodes | State::Elements | State::PendingValues => out.push_str("::"),
+                State::Ordered | State::Picked => out.push_str(" | ::"),
                 State::Values => {}
             }
             state = State::Values;
@@ -434,6 +551,19 @@ impl Parser {
             }
             State::PendingValues => out.push_str("::"),
             State::Values => {}
+            // The ordered elements are nodes still: their values
+            // through a pipe, as a step's `::` would give them.
+            State::Ordered | State::Picked => {
+                if project {
+                    out.push_str(" | ::");
+                    self.notes.push(
+                        "value projection: scalar leaves agree with jq; a container \
+                         projects as empty here \u{2014} pipe it through | json to \
+                         serialize the subtree"
+                            .into(),
+                    );
+                }
+            }
         }
         Ok(out)
     }
@@ -451,6 +581,9 @@ impl Parser {
     /// One pipeline command.
     fn command(&mut self, out: &mut String, state: State) -> Result<State, JqError> {
         match self.peek() {
+            Some(Tok::Dot) if matches!(state, State::Ordered | State::Picked) => {
+                self.ordered_path(out, state)
+            }
             Some(Tok::Dot) => {
                 if state == State::Elements {
                     return Err(JqError::Unsupported(
@@ -491,6 +624,23 @@ impl Parser {
                 self.expect(Tok::RParen, "')' to close select")?;
                 write!(out, "[{cond}]").unwrap();
                 Ok(State::Nodes)
+            }
+            Some(Tok::Ident(f, true)) if f == "map" && state == State::Ordered => {
+                self.pos += 1;
+                self.expect(Tok::LParen, "'(' after map")?;
+                if self.peek() != Some(&Tok::Dot) {
+                    return Err(JqError::Unsupported("map with a non-path body".into()));
+                }
+                let mut path = String::new();
+                if self.nav_path(&mut path)? {
+                    return Err(JqError::Unsupported("a slice inside map".into()));
+                }
+                self.expect(Tok::RParen, "')' to close map")?;
+                self.value_below(out, &path)?;
+                self.notes.push(
+                    "map: Quarb streams the mapped values; jq boxes them into one array".into(),
+                );
+                Ok(State::Values)
             }
             Some(Tok::Ident(f, true)) if f == "map" => {
                 if !matches!(state, State::Nodes | State::Elements) {
@@ -535,10 +685,13 @@ impl Parser {
                         out.push_str(":: @| count");
                         Ok(State::Values)
                     }
-                    State::Values => {
+                    State::Values | State::Ordered => {
                         out.push_str(" @| count");
                         Ok(State::Values)
                     }
+                    State::Picked => Err(JqError::Unsupported(
+                        "length of an element picked after a by-key function".into(),
+                    )),
                 }
             }
             Some(Tok::Ident(f, false)) if f == "keys" => {
@@ -582,8 +735,41 @@ impl Parser {
                     State::Nodes => write!(out, "/*:: @| {call}").unwrap(),
                     State::Elements | State::PendingValues => write!(out, ":: @| {call}").unwrap(),
                     State::Values => write!(out, " @| {call}").unwrap(),
+                    // An ordered array keeps its nodes: its first or
+                    // its last element is a thread index.
+                    State::Ordered if f == "first" => {
+                        out.push_str(" @| [1]");
+                        return Ok(State::Picked);
+                    }
+                    State::Ordered if f == "last" => {
+                        out.push_str(" @| [-1]");
+                        return Ok(State::Picked);
+                    }
+                    State::Ordered | State::Picked => {
+                        return Err(JqError::Unsupported(format!(
+                            "{f} after a by-key function (index the ordered array, slice it, \
+                             iterate it with [] or take its length)"
+                        )));
+                    }
                 }
                 Ok(State::Values)
+            }
+            // The by-key functions are not translated (ruled
+            // 2026-11-17): the refusal names the Quarb way, over the
+            // filter's own array and key where both are plain.
+            Some(Tok::Ident(f, _)) if by_key_fn(f) => {
+                let f = f.clone();
+                if self.lenient {
+                    return self.by_key_lenient(out, state, &f);
+                }
+                let key = self.plain_path_key();
+                let array = (state == State::Nodes).then(|| out.clone());
+                Err(JqError::Unsupported(by_key_refusal(
+                    &f,
+                    array.as_deref(),
+                    key.as_deref(),
+                    true,
+                )))
             }
             Some(Tok::Ident(f, _)) => Err(JqError::Unsupported(format!("the {f} function"))),
             Some(Tok::Var(v)) => Err(JqError::Unsupported(format!("the variable ${v}"))),
@@ -605,6 +791,11 @@ impl Parser {
     /// slice (whose elements Quarb streams where jq boxes an array).
     fn nav_path(&mut self, out: &mut String) -> Result<bool, JqError> {
         self.expect(Tok::Dot, "'.'")?;
+        self.nav_segments(out)
+    }
+
+    /// The segments of a path after its leading `.`.
+    fn nav_segments(&mut self, out: &mut String) -> Result<bool, JqError> {
         let mut sliced = false;
         loop {
             // After a slice, only `[]` (which iterates the boxed
@@ -699,18 +890,7 @@ impl Parser {
         self.expect(Tok::RBracket, "']' to close the slice")?;
         // jq slices are 0-based with an exclusive end; Quarb ranges
         // are 1-based inclusive.
-        let quarb_start = match start {
-            None => String::new(),
-            Some(a) if a >= 0 => (a + 1).to_string(),
-            Some(a) => a.to_string(),
-        };
-        let quarb_end = match end {
-            None => String::new(),
-            Some(0) => "0".to_string(), // empty slice: [start..0]
-            Some(b) if b > 0 => b.to_string(),
-            Some(b) => (b - 1).to_string(),
-        };
-        write!(out, "/*[{quarb_start}..{quarb_end}]").unwrap();
+        write!(out, "/*[{}]", quarb_range(start, end)).unwrap();
         self.notes.push(
             "slice: Quarb streams the selected elements; jq boxes them into one array".into(),
         );
@@ -848,6 +1028,256 @@ impl Parser {
         }
     }
 
+    /// A by-key function under `--lenient`: the nearest Quarb
+    /// construct, and a warning for each place its answer differs
+    /// from jq's. `sort_by` and `unique_by` leave an ordered array,
+    /// `min_by` and `max_by` an element; `group_by` is translated
+    /// with the `map(length)` that follows it, an array of arrays
+    /// having no thread shape. Anything else is refused as the
+    /// strict translator refuses it, without the flag's mention.
+    fn by_key_lenient(
+        &mut self,
+        out: &mut String,
+        state: State,
+        f: &str,
+    ) -> Result<State, JqError> {
+        // What the function reads: an array node (iterated here), a
+        // slice's elements or an ordered array (streamed already).
+        let iter = match state {
+            State::Nodes => "/*",
+            State::Elements | State::Ordered => "",
+            _ => {
+                let key = self.plain_path_key();
+                return Err(JqError::Unsupported(by_key_refusal(
+                    f,
+                    None,
+                    key.as_deref(),
+                    false,
+                )));
+            }
+        };
+        let array = (state == State::Nodes).then(|| out.clone());
+        let keys = match self.key_arguments() {
+            Some(keys) if f == "sort_by" || keys.len() == 1 => keys,
+            _ => {
+                return Err(JqError::Unsupported(by_key_refusal(
+                    f,
+                    array.as_deref(),
+                    None,
+                    false,
+                )));
+            }
+        };
+        let k = keys.join("; ");
+        match f {
+            "sort_by" => {
+                write!(out, "{iter} @| sort_by({k})").unwrap();
+                self.warnings
+                    .push("sort_by: a null key sorts last, where jq sorts it first".into());
+                Ok(State::Ordered)
+            }
+            "min_by" => {
+                write!(out, "{iter} @| min_by({k})").unwrap();
+                self.warnings.push(
+                    "min_by: every element that ties for the least key answers, where jq \
+                     answers the first; a null key does not compete, where jq takes it for \
+                     the least"
+                        .into(),
+                );
+                Ok(State::Picked)
+            }
+            "max_by" => {
+                write!(out, "{iter} @| max_by({k})").unwrap();
+                self.warnings.push(
+                    "max_by: every element that ties for the greatest key answers, where jq \
+                     answers the last"
+                        .into(),
+                );
+                Ok(State::Picked)
+            }
+            "unique_by" => {
+                // jq answers the first element of each key, the keys
+                // sorted: the stable sort, then the first per key.
+                write!(out, "{iter} @| sort_by({k}) @| unique_by({k})").unwrap();
+                self.warnings
+                    .push("unique_by: a null key sorts last, where jq sorts it first".into());
+                Ok(State::Ordered)
+            }
+            _ => {
+                // `group_by(KEY) | map(length)` alone: the size of
+                // each group, the groups in the keys' order.
+                let follows = [
+                    Tok::Pipe,
+                    Tok::Ident("map".into(), true),
+                    Tok::LParen,
+                    Tok::Ident("length".into(), false),
+                    Tok::RParen,
+                ];
+                let here = self
+                    .tokens
+                    .get(self.pos..self.pos + follows.len())
+                    .is_some_and(|ts| ts.iter().map(|(t, _)| t).eq(follows.iter()));
+                if !here {
+                    return Err(JqError::Unsupported(
+                        "the group_by function without map(length) after it (an array of \
+                         arrays has no thread shape; --lenient translates group_by(KEY) | \
+                         map(length), and a hand-written query folds by the pushed key: \
+                         ARRAY/* | .k(KEY) @|{.k} COMMAND)"
+                            .into(),
+                    ));
+                }
+                self.pos += follows.len();
+                write!(out, "{iter} @| sort_by({k}) | .k({k}) @|{{.k}} count").unwrap();
+                self.warnings.push(
+                    "group_by: the group of a null key comes last, where jq puts it first".into(),
+                );
+                self.notes.push(
+                    "group_by | map(length): Quarb streams the sizes; jq boxes them into \
+                     one array"
+                        .into(),
+                );
+                Ok(State::Values)
+            }
+        }
+    }
+
+    /// The arguments of a by-key function as Quarb keys, when each
+    /// is one plain path (`sort_by(.a, .b.c)` gives `/a::` and
+    /// `/b/c::`), the function's name and parentheses consumed;
+    /// `None`, the position and the notes as they were, for anything
+    /// else.
+    fn key_arguments(&mut self) -> Option<Vec<String>> {
+        let (at, notes) = (self.pos, self.notes.len());
+        let keys = self.read_key_arguments();
+        if keys.is_none() {
+            self.pos = at;
+            self.notes.truncate(notes);
+        }
+        keys
+    }
+
+    fn read_key_arguments(&mut self) -> Option<Vec<String>> {
+        self.pos += 1; // the function's name
+        if self.bump()? != Tok::LParen {
+            return None;
+        }
+        let mut keys = Vec::new();
+        loop {
+            if self.peek() != Some(&Tok::Dot) {
+                return None;
+            }
+            let mut path = String::new();
+            if self.nav_path(&mut path).ok()? {
+                return None;
+            }
+            keys.push(format!("{path}::"));
+            match self.bump()? {
+                Tok::RParen => return Some(keys),
+                Tok::Comma => {}
+                _ => return None,
+            }
+        }
+    }
+
+    /// A path after a by-key function (`--lenient`). On the ordered
+    /// array: an index (the element, a thread index), a slice (the
+    /// array still), `[]` (its elements). On an element: a relative
+    /// path, read as a value.
+    fn ordered_path(&mut self, out: &mut String, mut state: State) -> Result<State, JqError> {
+        self.expect(Tok::Dot, "'.'")?;
+        while state == State::Ordered {
+            match self.peek() {
+                Some(Tok::LBracket) => {
+                    self.pos += 1;
+                    if self.peek() == Some(&Tok::RBracket) {
+                        self.pos += 1;
+                        state = State::Picked;
+                        continue;
+                    }
+                    let start = self.signed_number()?;
+                    if self.peek() == Some(&Tok::RBracket) {
+                        self.pos += 1;
+                        let n = start.ok_or_else(|| JqError::Syntax(0, "empty [] index".into()))?;
+                        // jq counts from zero, a thread index from
+                        // one; from the end both count alike
+                        let at = if n >= 0 { n + 1 } else { n };
+                        write!(out, " @| [{at}]").unwrap();
+                        state = State::Picked;
+                    } else {
+                        self.expect(Tok::Colon, "':' or ']' in a bracket segment")?;
+                        let end = self.signed_number()?;
+                        self.expect(Tok::RBracket, "']' to close the slice")?;
+                        write!(out, " @| [{}]", quarb_range(start, end)).unwrap();
+                    }
+                }
+                Some(Tok::Dot | Tok::Question) => self.pos += 1,
+                Some(Tok::Ident(_, false) | Tok::Str(_)) => {
+                    return Err(JqError::Unsupported(
+                        "a key on an ordered array (index it, slice it or iterate it with [] \
+                         first)"
+                            .into(),
+                    ));
+                }
+                // a bare `.`, or the path's end after a slice
+                _ => return Ok(State::Ordered),
+            }
+        }
+        let mut path = String::new();
+        if self.nav_segments(&mut path)? {
+            return Err(JqError::Unsupported(
+                "a slice of an element picked after a by-key function".into(),
+            ));
+        }
+        if path.is_empty() {
+            return Ok(State::Picked);
+        }
+        self.value_below(out, &path)?;
+        Ok(State::Values)
+    }
+
+    /// The value at `path` below each ordered element: after a
+    /// thread command a step would be refused (the topic is live),
+    /// so the path is read as a value, parenthesized. A result
+    /// asked for as nodes cannot go below the elements.
+    fn value_below(&mut self, out: &mut String, path: &str) -> Result<(), JqError> {
+        if !self.project {
+            return Err(JqError::Unsupported(
+                "a path below an element after a by-key function, where nodes are asked for \
+                 (the ordered elements are the nodes; a path below them is read as a value)"
+                    .into(),
+            ));
+        }
+        if path.is_empty() {
+            out.push_str(" | ::");
+        } else {
+            write!(out, " | ({path}::)").unwrap();
+        }
+        Ok(())
+    }
+
+    /// The argument of a by-key function as the key a hand-written
+    /// query names, when it is one plain path (`sort_by(.a.b)` gives
+    /// `/a/b::`, `sort_by(.)` gives `::`); `None` for anything else.
+    /// Read for the refusal's hint only: the position and the notes
+    /// are left as they were.
+    fn plain_path_key(&mut self) -> Option<String> {
+        let (at, notes) = (self.pos, self.notes.len());
+        let key = self.path_argument();
+        self.pos = at;
+        self.notes.truncate(notes);
+        key
+    }
+
+    fn path_argument(&mut self) -> Option<String> {
+        self.pos += 1; // the function's name
+        if self.bump()? != Tok::LParen || self.peek() != Some(&Tok::Dot) {
+            return None;
+        }
+        let mut path = String::new();
+        let sliced = self.nav_path(&mut path).ok()?;
+        (!sliced && self.peek() == Some(&Tok::RParen)).then(|| format!("{path}::"))
+    }
+
     /// A `@|` aggregate command after an array collect.
     fn aggregate_command(&mut self, out: &mut String, state: State) -> Result<State, JqError> {
         debug_assert_eq!(state, State::Values);
@@ -884,6 +1314,23 @@ impl Parser {
             }
         }
     }
+}
+
+/// A jq slice `[start:end]` (0-based, the end exclusive) as a Quarb
+/// range (1-based, inclusive).
+fn quarb_range(start: Option<i64>, end: Option<i64>) -> String {
+    let quarb_start = match start {
+        None => String::new(),
+        Some(a) if a >= 0 => (a + 1).to_string(),
+        Some(a) => a.to_string(),
+    };
+    let quarb_end = match end {
+        None => String::new(),
+        Some(0) => "0".to_string(), // empty slice: [start..0]
+        Some(b) if b > 0 => b.to_string(),
+        Some(b) => (b - 1).to_string(),
+    };
+    format!("{quarb_start}..{quarb_end}")
 }
 
 /// Render a key as a Quarb name segment, quoting when it contains
@@ -1018,6 +1465,238 @@ mod tests {
         assert!(unsupported("reduce .[] as $x (0; .+$x)").contains("reduce"));
         assert!(unsupported(".a | map(length)").contains("non-path"));
         assert!(unsupported(r#""hi \(.name)""#).contains("interpolation"));
+    }
+
+    /// The by-key functions are refused, and the refusal names the
+    /// Quarb way over the filter's own array and key (ruled
+    /// 2026-11-17). Every query form printed here answers on the
+    /// engine (probed on 0.67.0).
+    #[test]
+    fn by_key_functions_name_the_quarb_way() {
+        let m = unsupported(".events | sort_by(.payload.duration_ms) | .[0].id");
+        assert!(
+            m.starts_with("the sort_by function (in a hand-written query: "),
+            "{m}"
+        );
+        assert!(
+            m.contains("/events/* @| sort_by(/payload/duration_ms::), then @| [1]"),
+            "{m}"
+        );
+        assert!(
+            m.ends_with(
+                "a null key sorts last there, first in jq); --lenient translates it so, with \
+                 a warning where the answer differs from jq's"
+            ),
+            "{m}"
+        );
+
+        let m = unsupported(".events | min_by(.ms) | .id");
+        assert!(
+            m.contains("/events/* @| min_by(/ms::): every thread"),
+            "{m}"
+        );
+        assert!(m.contains("a null key does not compete"), "{m}");
+        let m = unsupported(".events | max_by(.ms)");
+        assert!(
+            m.contains("/events/* @| max_by(/ms::): every thread"),
+            "{m}"
+        );
+        let m = unsupported(".events | group_by(.kind)");
+        assert!(
+            m.contains("/events/* | .k(/kind::) @|{.k} count, or another fold"),
+            "{m}"
+        );
+        let m = unsupported(".events | unique_by(.kind)");
+        assert!(
+            m.contains("/events/* @| unique_by(/kind::): the first"),
+            "{m}"
+        );
+        assert!(m.contains("@| sort_by(/kind::) before it gives"), "{m}");
+
+        // after a select the array is the selected elements' path;
+        // the root array; the element itself as the key
+        let m = unsupported(".events[] | select(.id > 2) | sort_by(.ms)");
+        assert!(
+            m.contains("/events/*[/id:: > 2]/* @| sort_by(/ms::)"),
+            "{m}"
+        );
+        assert!(unsupported("sort_by(.)").contains(": /* @| sort_by(::), then"));
+
+        // a key that is no plain path: the place is named
+        let m = unsupported(".events | sort_by(.a, .b)");
+        assert!(m.contains("/events/* @| sort_by(KEY), then"), "{m}");
+        assert!(
+            m.contains("; KEY is a value read from the element, as ::price); --lenient"),
+            "{m}"
+        );
+        // an input that is no node set: the array's place is named
+        let m = unsupported(".events | map(.ms) | sort_by(.)");
+        assert!(m.contains("ARRAY/* @| sort_by(::), then"), "{m}");
+        assert!(
+            m.contains("; ARRAY is the path to the array); --lenient"),
+            "{m}"
+        );
+        let m = unsupported(".events | map(.ms) | group_by(length)");
+        assert!(
+            m.ends_with(
+                "ARRAY is the path to the array, KEY a value read from the element, as \
+                 ::price); --lenient translates group_by(KEY) | map(length), the size of each \
+                 group, with a warning where the answer differs from jq's"
+            ),
+            "{m}"
+        );
+
+        // elsewhere the function is refused as before
+        assert_eq!(
+            unsupported(".events[] | select(sort_by(.a))"),
+            "the sort_by function in a condition"
+        );
+    }
+
+    fn lenient(jq: &str) -> (String, Vec<String>) {
+        let t = translate_lenient(jq).unwrap();
+        (t.query, t.warnings)
+    }
+
+    fn lenient_unsupported(jq: &str) -> String {
+        match translate_lenient(jq) {
+            Err(JqError::Unsupported(msg)) => msg,
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    /// `--lenient` (the ruling of 2026-11-17): a by-key function is
+    /// translated to the nearest Quarb construct and each divergence
+    /// from jq is a warning. Every query here answers on the engine
+    /// (probed on 0.67.0 against jq's answers for the same filters).
+    #[test]
+    fn lenient_translates_the_by_key_functions() {
+        // the article's filter: the sort, an index, a key
+        let (q, w) = lenient(".events | sort_by(.payload.duration_ms) | .[0].id");
+        assert_eq!(
+            q,
+            "/events/* @| sort_by(/payload/duration_ms::) @| [1] | (/id::)"
+        );
+        assert_eq!(
+            w,
+            ["sort_by: a null key sorts last, where jq sorts it first"]
+        );
+        // several keys; the whole ordered array, its values
+        let (q, _) = lenient(".events | sort_by(.kind, .id)");
+        assert_eq!(q, "/events/* @| sort_by(/kind::; /id::) | ::");
+        // nodes asked for: the ordered elements themselves
+        assert_eq!(
+            translate_nodes_lenient(".events | sort_by(.id) | .[-1]")
+                .unwrap()
+                .query,
+            "/events/* @| sort_by(/id::) @| [-1]"
+        );
+        // slices keep the array; `[]` and map read below each element
+        assert_eq!(
+            lenient(".events | sort_by(.id) | .[1:3] | .[].kind").0,
+            "/events/* @| sort_by(/id::) @| [2..3] | (/kind::)"
+        );
+        assert_eq!(
+            lenient(".events | sort_by(.id) | .[:3] | map(.kind)").0,
+            "/events/* @| sort_by(/id::) @| [..3] | (/kind::)"
+        );
+        assert_eq!(
+            lenient(".events | sort_by(.id) | length").0,
+            "/events/* @| sort_by(/id::) @| count"
+        );
+        assert_eq!(
+            lenient(".events | sort_by(.id) | first | .kind").0,
+            "/events/* @| sort_by(/id::) @| [1] | (/kind::)"
+        );
+        assert_eq!(
+            lenient(".events | sort_by(.id) | last").0,
+            "/events/* @| sort_by(/id::) @| [-1] | ::"
+        );
+        // a slice's elements and the root array are read as they stand
+        assert_eq!(
+            lenient(".events[1:4] | sort_by(.id) | .[0].id").0,
+            "/events/*[2..4] @| sort_by(/id::) @| [1] | (/id::)"
+        );
+        assert_eq!(lenient("sort_by(.)").0, "/* @| sort_by(::) | ::");
+
+        // min_by, max_by: the thread commands of the same names
+        let (q, w) = lenient(".events | min_by(.payload.duration_ms) | .id");
+        assert_eq!(q, "/events/* @| min_by(/payload/duration_ms::) | (/id::)");
+        assert_eq!(w.len(), 1);
+        assert!(w[0].starts_with("min_by: every element that ties"), "{w:?}");
+        assert!(w[0].contains("a null key does not compete"), "{w:?}");
+        let (q, w) = lenient(".events | max_by(.id)");
+        assert_eq!(q, "/events/* @| max_by(/id::) | ::");
+        assert!(w[0].starts_with("max_by: every element that ties"), "{w:?}");
+
+        // unique_by: jq's order is the keys', the first of each
+        let (q, w) = lenient(".events | unique_by(.kind) | map(.id)");
+        assert_eq!(
+            q,
+            "/events/* @| sort_by(/kind::) @| unique_by(/kind::) | (/id::)"
+        );
+        assert_eq!(
+            w,
+            ["unique_by: a null key sorts last, where jq sorts it first"]
+        );
+
+        // group_by with the sizes of its groups
+        let (q, w) = lenient(".events | group_by(.kind) | map(length)");
+        assert_eq!(
+            q,
+            "/events/* @| sort_by(/kind::) | .k(/kind::) @|{.k} count"
+        );
+        assert_eq!(
+            w,
+            ["group_by: the group of a null key comes last, where jq puts it first"]
+        );
+
+        // a filter that needs no leniency is the strict translation,
+        // and warns of nothing
+        let (q, w) = lenient(".users[] | select(.age > 30) | .name");
+        assert_eq!(q, t(".users[] | select(.age > 30) | .name"));
+        assert!(w.is_empty());
+        assert!(translate(".users | length").unwrap().warnings.is_empty());
+    }
+
+    /// What stays refused under `--lenient`, each by name.
+    #[test]
+    fn lenient_refuses_what_has_no_near_construct() {
+        // a bare group_by: an array of arrays
+        let m = lenient_unsupported(".events | group_by(.kind)");
+        assert!(
+            m.starts_with("the group_by function without map(length) after it"),
+            "{m}"
+        );
+        // a key that is no plain path; several keys where one is taken
+        let m = lenient_unsupported(".events | sort_by(-.id)");
+        assert!(m.contains("/events/* @| sort_by(KEY)"), "{m}");
+        assert!(!m.contains("--lenient"), "{m}");
+        let m = lenient_unsupported(".events | min_by(.a, .b)");
+        assert!(m.contains("/events/* @| min_by(KEY)"), "{m}");
+        // an input that is no node set
+        let m = lenient_unsupported(".events | map(.ms) | sort_by(.)");
+        assert!(m.contains("ARRAY/* @| sort_by(::)"), "{m}");
+        // a key on the ordered array; a function over it
+        assert_eq!(
+            lenient_unsupported(".events | sort_by(.id) | .kind"),
+            "a key on an ordered array (index it, slice it or iterate it with [] first)"
+        );
+        assert!(
+            lenient_unsupported(".events | sort_by(.id) | add")
+                .starts_with("add after a by-key function"),
+        );
+        assert_eq!(
+            lenient_unsupported(".events | min_by(.id) | length"),
+            "length of an element picked after a by-key function"
+        );
+        // nodes asked for, and a path below the element
+        match translate_nodes_lenient(".events | sort_by(.id) | .[0].kind") {
+            Err(JqError::Unsupported(m)) => {
+                assert!(m.starts_with("a path below an element"), "{m}")
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
     }
 
     #[test]

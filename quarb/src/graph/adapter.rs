@@ -1600,6 +1600,15 @@ pub trait AstAdapter {
     /// the pushed predicates, so a whole listing changes no answer.
     /// A no-op for an adapter that never filters a listing.
     fn whole_listings(&self) {}
+    /// A standing session is about to run a query (`--resident`, a
+    /// notebook's session): a source that can change under the
+    /// session looks again at what may have moved, so the query
+    /// answers the source as it stands. A git repository looks at
+    /// its refs (one `git show-ref`) and forgets what it read off
+    /// them where one moved; what a hash names it keeps. A no-op for
+    /// a source read whole at the open, which a session serves as
+    /// it was then.
+    fn refresh(&self) {}
 
     /// The names of the properties an edge carries — the weights a
     /// budget quantifier may sum (spec: The budget quantifier) and
@@ -1878,7 +1887,7 @@ macro_rules! forward_ast_adapter {
             document_by_ref reverse_resolve descendants_named
             descendants_where may_hold_below select select_plan estimate count
             surface row_columns intrinsic row_text prefetch_properties
-            prefetch_links whole_listings link_property_names edge_weights acyclic_link quantifier_bound frontier_bound
+            prefetch_links whole_listings refresh link_property_names edge_weights acyclic_link quantifier_bound frontier_bound
             property_withheld withheld_properties nodes_withheld
             graph_bound graph_declarations graph_measure store_graph_measure
             provenance has_node
@@ -1955,6 +1964,7 @@ macro_rules! forward_ast_adapter {
     (@unless [$i:tt] [prefetch_properties $($r:ident)*] prefetch_properties) => {};
     (@unless [$i:tt] [prefetch_links $($r:ident)*] prefetch_links) => {};
     (@unless [$i:tt] [whole_listings $($r:ident)*] whole_listings) => {};
+    (@unless [$i:tt] [refresh $($r:ident)*] refresh) => {};
     (@unless [$i:tt] [quantifier_bound $($r:ident)*] quantifier_bound) => {};
     (@unless [$i:tt] [frontier_bound $($r:ident)*] frontier_bound) => {};
     (@unless [$i:tt] [link_property_names $($r:ident)*] link_property_names) => {};
@@ -2355,6 +2365,11 @@ macro_rules! forward_ast_adapter {
     (@fwd [$i:tt] whole_listings) => {
         fn whole_listings(&self) {
             $crate::forward_ast_adapter!(@target self $i).whole_listings()
+        }
+    };
+    (@fwd [$i:tt] refresh) => {
+        fn refresh(&self) {
+            $crate::forward_ast_adapter!(@target self $i).refresh()
         }
     };
     (@fwd [$i:tt] quantifier_bound) => {

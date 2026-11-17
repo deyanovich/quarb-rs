@@ -155,6 +155,13 @@ fn cell(row: &duckdb::Row<'_>, i: usize) -> Value {
 }
 
 impl DuckdbAdapter {
+    /// Hold the crosslinks of these labels in memory (the mount's
+    /// `?crosslinks=order,customer`): see
+    /// [`RelationalModel::hold_crosslinks`].
+    pub fn hold_crosslinks(&mut self, labels: &[String]) -> Result<(), String> {
+        self.model.hold_crosslinks(labels)
+    }
+
     /// Open a `.duckdb` file read-only; the catalog now, each
     /// table's rows on first touch.
     pub fn open(path: &std::path::Path) -> Result<Self, DuckdbError> {

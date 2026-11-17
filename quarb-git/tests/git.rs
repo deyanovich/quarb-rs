@@ -334,3 +334,68 @@ fn a_sweep_of_the_refs_reads_their_commits_together() {
     // twenty-seven commits are left to read: 2, 4, 8 and 13
     assert_eq!(d.header_reads(), 6);
 }
+
+/// A standing session looks at the refs again before each query
+/// (the ruling of 2026-11-17): after a commit, a new branch, a new
+/// tag or a checkout, every door answers the repository as it
+/// stands, where each listing was kept from its first read and
+/// `/commits/HEAD` alone followed. What a hash names is not read
+/// twice.
+#[test]
+fn a_look_at_the_refs_finds_what_moved() {
+    let dir = std::env::temp_dir().join("quarb-git-test-refresh");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    sh(&dir, &["init", "-q", "-b", "master"]);
+    for n in 1..=3 {
+        sh(
+            &dir,
+            &["commit", "-q", "--allow-empty", "-m", &format!("canto {n}")],
+        );
+    }
+    sh(&dir, &["tag", "c03"]);
+    let a = GitAdapter::open(&dir).unwrap();
+    // the first look differs from nothing
+    assert!(!a.refresh());
+    assert_eq!(values(&a, "/HEAD | ::subject"), ["canto 3"]);
+    assert_eq!(values(&a, "/commits/* @| count"), ["3"]);
+    assert_eq!(values(&a, "/tags/* | :name"), ["c03"]);
+    assert_eq!(values(&a, "/branches/* | :name"), ["master"]);
+    // nothing moved: nothing is forgotten, nothing read again
+    let reads = a.header_reads();
+    assert!(!a.refresh());
+    assert_eq!(values(&a, "/HEAD | ::subject"), ["canto 3"]);
+    assert_eq!(values(&a, "/commits/* @| count"), ["3"]);
+    assert_eq!(a.header_reads(), reads);
+
+    // a commit, a tag, a branch
+    sh(&dir, &["commit", "-q", "--allow-empty", "-m", "canto 4"]);
+    sh(&dir, &["tag", "c04"]);
+    sh(&dir, &["branch", "earlier", "c03"]);
+    // without a look the session answers as before, unevenly
+    assert_eq!(values(&a, "/HEAD | ::subject"), ["canto 3"]);
+    assert_eq!(values(&a, "/commits/\"HEAD\" | ::subject"), ["canto 4"]);
+    // with it, every door answers the repository as it stands
+    assert!(a.refresh());
+    assert_eq!(values(&a, "/HEAD | ::subject"), ["canto 4"]);
+    assert_eq!(values(&a, "/branches/master | ::subject"), ["canto 4"]);
+    assert_eq!(values(&a, "/commits/* @| count"), ["4"]);
+    assert_eq!(values(&a, "/tags/* | :name"), ["c03", "c04"]);
+    assert_eq!(values(&a, "/branches/* | :name"), ["earlier", "master"]);
+    assert_eq!(
+        values(&a, "/HEAD(->parent){;5} | ::subject"),
+        ["canto 4", "canto 3", "canto 2", "canto 1"]
+    );
+    assert_eq!(values(&a, "/commits/*[<-parent] @| count"), ["3"]);
+    assert!(!a.refresh());
+
+    // a checkout moves HEAD alone
+    sh(&dir, &["checkout", "-q", "earlier"]);
+    assert!(a.refresh());
+    assert_eq!(values(&a, "/HEAD | ::subject"), ["canto 3"]);
+    assert_eq!(values(&a, "/commits/* @| count"), ["4"]);
+    // a deleted tag goes
+    sh(&dir, &["tag", "-d", "c04"]);
+    assert!(a.refresh());
+    assert_eq!(values(&a, "/tags/* | :name"), ["c03"]);
+}

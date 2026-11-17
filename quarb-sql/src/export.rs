@@ -135,6 +135,19 @@ pub struct ColumnTypes {
     /// the catalog declares the column json, since the scan grafts
     /// a leaf only as declared (spec: Grafting).
     pub json: Vec<String>,
+    /// Whether the plan reads a JSON value as a child node of its
+    /// column (`/col/key::`, or the bare `/col/key` of an existence
+    /// test), with `<json>` on the step or without: the scan's only
+    /// where the mount's grafts list scalars as children, which the
+    /// property reading (`?graft=json2`) does not. The property
+    /// form (`/col::key`) answers under both readings and does not
+    /// set it. No assumption about the catalog ([`is_empty`] and
+    /// [`unmet`] leave it out): the front end holds it against its
+    /// mount's reading.
+    ///
+    /// [`is_empty`]: Self::is_empty
+    /// [`unmet`]: Self::unmet
+    pub json_children: bool,
 }
 
 impl ColumnTypes {
@@ -1071,6 +1084,14 @@ impl Exporter {
         if !declared_on_hop && !self.column_types.json.iter().any(|c| c == col) {
             self.column_types.json.push(col.to_string());
         }
+        // The child form (the bare `::`, or no projection): what the
+        // property reading leaves empty.
+        let keyed = self
+            .kid(o, "projection")
+            .is_some_and(|p| self.prop(p, "key").is_some());
+        if !keyed {
+            self.column_types.json_children = true;
+        }
     }
 
     fn json_path_loose(&self, o: NodeId) -> Option<(String, Vec<String>)> {
@@ -1208,10 +1229,13 @@ impl Exporter {
             sel.wheres = wheres;
             // A terminal projection on the driving branch is a
             // one-column select of the FROM table.
+            let mut projected = None;
             if let Some(proj) = self.kid(branches[0], "projection") {
-                let col = self.projection_col(proj)?;
-                let col = self.sql_ident(&col, "column name")?;
-                sel.select.push(format!("{lsql}.{col}"));
+                let name = self.projection_col(proj)?;
+                let col = self.sql_ident(&name, "column name")?;
+                let col = format!("{lsql}.{col}");
+                sel.select.push(col.clone());
+                projected = Some((col, name));
             }
             if self
                 .kid(self.kids(*corr, "branch")[0], "projection")
@@ -1223,7 +1247,7 @@ impl Exporter {
                         .into(),
                 ));
             }
-            self.pipeline(q, &mut sel, Some((&lsql, &rsql)))?;
+            self.pipeline(q, &mut sel, Some((&lsql, &rsql)), projected)?;
         } else {
             let (table, preds) = self.table_branch(branches[0])?;
             self.from_marks = self.row_marks(branches[0])?;
@@ -1234,11 +1258,14 @@ impl Exporter {
                 sel.wheres.push(cond);
             }
             // A terminal projection is a one-column select.
+            let mut projected = None;
             if let Some(proj) = self.kid(branches[0], "projection") {
-                let col = self.projection_col(proj)?;
-                sel.select.push(self.sql_ident(&col, "column name")?);
+                let name = self.projection_col(proj)?;
+                let col = self.sql_ident(&name, "column name")?;
+                sel.select.push(col.clone());
+                projected = Some((col, name));
             }
-            self.pipeline(q, &mut sel, None)?;
+            self.pipeline(q, &mut sel, None, projected)?;
         }
         Ok(sel.render())
     }
@@ -2216,12 +2243,15 @@ impl Exporter {
                 .any(|c| self.subtree_has_driver(c))
     }
 
-    /// Consume the pipeline into SELECT clauses.
+    /// Consume the pipeline into SELECT clauses. `projected` is the
+    /// driving path's own terminal projection, where it has one:
+    /// the column as SQL and its name.
     fn pipeline(
         &mut self,
         q: NodeId,
         sel: &mut Select,
         join: Option<(&str, &str)>,
+        projected: Option<(String, String)>,
     ) -> Result<(), SqlError> {
         let Some(pipe) = self.kid(q, "pipeline") else {
             return Ok(());
@@ -2229,9 +2259,15 @@ impl Exporter {
         let commands: Vec<NodeId> = self.arbor.children(pipe);
         let mut i = 0;
         // A pending per-row value (`| ::col`) feeding an aggregate,
-        // and the column it names where it is one.
-        let mut pending_col: Option<String> = None;
-        let mut pending_name: Option<String> = None;
+        // and the column it names where it is one. The path's own
+        // projection is that value from the start, so the glued
+        // spelling plans as the piped one: `/t/*::col @| max` is
+        // `/t/* | ::col @| max` (it was refused as a reducer "over
+        // row nodes", with a hint to write the piped form).
+        let (mut pending_col, mut pending_name) = match projected {
+            Some((col, name)) => (Some(col), Some(name)),
+            None => (None, None),
+        };
         // After a grouped reduction: (key, agg_sql, alias).
         let mut grouped: Option<(String, String, String)> = None;
         // A pushed key awaiting its fold: (the regula's name, key_sql).
@@ -2675,7 +2711,7 @@ fn sql_agg(name: &str, col: Option<String>) -> Result<String, SqlError> {
         // not SQL.
         None if f == "COUNT" => Ok("COUNT(*)".to_string()),
         None => Err(SqlError::Unsupported(format!(
-            "'{name}' over row nodes (project a column first: '| ::col @| {name}')"
+            "'{name}' over row nodes (project a column: '/table/*::col @| {name}')"
         ))),
     }
 }

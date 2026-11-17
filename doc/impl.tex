@@ -2545,6 +2545,11 @@ pub trait AstAdapter {
     fn prefetch_properties(&self, _nodes: &[NodeId], _names: &[&str]) {}
     /// A batching hint before a link sweep over `nodes`.
     fn prefetch_links(&self, _nodes: &[NodeId], _dir: LinkDir) {}
+    /// A standing session is about to run a query: a source that
+    /// can change under it looks again at what may have moved (a
+    /// git repository at its refs, one `git show-ref`), and keeps
+    /// what cannot. A no-op for a source read whole at the open.
+    fn refresh(&self) {}
     /// The weights an edge carries (spec: the edge model, ruling
     /// 2026-11-07): quantities of pairwise distinct dimensions, none
     /// dimensionless, in the canonical dimension order -- what a

@@ -193,6 +193,118 @@ fn a_leaf_grafts_only_as_declared() {
     );
 }
 
+/// `?graft=json2` on a mount (ruling 2026-11-17): the grafts the
+/// mount makes of its own leaves and cells read under the property
+/// reading, the step's `<json>` among them; a folder's JSON leaves
+/// alike.
+#[test]
+fn mount_graft_option_selects_the_property_reading() {
+    let dir = std::env::temp_dir().join("qua-mount-graft-option-test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("g.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            r#"CREATE TABLE s (id INTEGER PRIMARY KEY, meta JSON, note TEXT);
+             INSERT INTO s VALUES
+               (1,'{"device":"phone","geo":{"city":"London"}}','{"geo":{"city":"Paris"}}'),
+               (2,'{"device":"laptop","geo":{"city":"Berlin"}}','{"geo":{"city":"Rome"}}');"#,
+        )
+        .unwrap();
+    }
+    let db = path.to_str().unwrap();
+    let mount =
+        |target: &str, opts: &OpenOpts| Dyn(open_target(target, opts).expect("mount").adapter);
+    let plain = mount(db, &OpenOpts::default());
+    assert_eq!(run_q(&plain, "/s/1/meta/geo/city::"), ["London"]);
+    assert_eq!(run_q(&plain, "/s/1/meta/* @| count"), ["2"]);
+
+    let j2 = mount(&format!("{db}?graft=json2"), &OpenOpts::default());
+    assert_eq!(run_q(&j2, "/s/1/meta/geo::city"), ["London"]);
+    assert_eq!(run_q(&j2, "/s/1/meta/geo/city::"), Vec::<String>::new());
+    assert_eq!(run_q(&j2, "/s/1/meta/* @| count"), ["1"]);
+    assert_eq!(run_q(&j2, "/s/*[/meta/geo::city = \"Berlin\"]::id"), ["2"]);
+    assert_eq!(run_q(&j2, "/s/1/note<json>/geo::city"), ["Paris"]);
+    assert_eq!(
+        run_q(&j2, "/s/1/note<json>/geo/city::"),
+        Vec::<String>::new()
+    );
+
+    // a folder: its JSON leaves, the YAML ones as before
+    std::fs::write(dir.join("a.json"), r#"{"k":"named","in":{"n":1}}"#).unwrap();
+    std::fs::write(dir.join("b.yaml"), "k: named\nin:\n  n: 1\n").unwrap();
+    let opts = OpenOpts {
+        graft: true,
+        ..OpenOpts::default()
+    };
+    let f = mount(&format!("{}?graft=json2", dir.display()), &opts);
+    assert_eq!(run_q(&f, "/a.json::k"), ["named"]);
+    assert_eq!(run_q(&f, "/a.json/* @| count"), ["1"]);
+    assert_eq!(run_q(&f, "/b.yaml/* @| count"), ["2"]);
+    let f = mount(&format!("{}?graft=json2,yaml2", dir.display()), &opts);
+    assert_eq!(run_q(&f, "/b.yaml/* @| count"), ["1"]);
+}
+
+/// `?crosslinks=LABEL` on a database file (ruling 2026-11-17): the
+/// references of the named labels are held in memory; a label the
+/// database does not carry is refused at the open, and so is the
+/// option on a source that is no database.
+#[test]
+fn mount_crosslinks_option_holds_the_named_references() {
+    let dir = std::env::temp_dir().join("qua-mount-crosslinks-option-test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("poem.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE cantos (id INTEGER PRIMARY KEY, title TEXT);
+             CREATE TABLE lines (id INTEGER PRIMARY KEY,
+                 canto_id INTEGER REFERENCES cantos(id), text TEXT);
+             INSERT INTO cantos VALUES (1, 'canto 1'), (2, 'canto 2');
+             INSERT INTO lines VALUES (1, 1, 'a'), (2, 1, 'b'), (3, 2, 'c'), (4, NULL, 'd');",
+        )
+        .unwrap();
+    }
+    let db = path.to_str().unwrap();
+    let opts = OpenOpts::default();
+    // the mounted adapter itself: this file's `Dyn` forwards no
+    // link step
+    let run = |target: &str, q: &str| -> Vec<String> {
+        let a = open_target(target, &opts).expect("mount").adapter;
+        match quarb::run(q, &a).unwrap() {
+            quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect(),
+            _ => panic!("expected values"),
+        }
+    };
+    let q = "/cantos/1<-canto @| count | %(n = $_; whole = (^/lines:::loaded))";
+    assert_eq!(run(db, q), ["%(n = 2; whole = false)"]);
+    assert_eq!(
+        run(&format!("{db}?crosslinks=canto"), q),
+        ["%(n = 2; whole = true)"]
+    );
+    let refused = |target: &str| {
+        open_target(target, &opts)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default()
+    };
+    let err = refused(&format!("{db}?crosslinks=verse"));
+    assert!(
+        err.contains("no reference of this database is labelled \"verse\" (its labels: canto)"),
+        "{err}"
+    );
+    let err = refused(&format!("{db}?crosslinks="));
+    assert!(err.contains("as in ?crosslinks=order,customer"), "{err}");
+    std::fs::write(dir.join("a.json"), r#"{"k": 1}"#).unwrap();
+    let err = refused(&format!(
+        "{}?crosslinks=canto",
+        dir.join("a.json").display()
+    ));
+    assert!(err.contains("this source declares none"), "{err}");
+}
+
 /// The graft rename's semantics, through the same mount door:
 /// `graft` opts a directory in, `no_graft` holds every boundary
 /// opaque, and `code:` refuses the contradiction.

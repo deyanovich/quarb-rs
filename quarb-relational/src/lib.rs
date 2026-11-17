@@ -207,6 +207,20 @@ pub type Fetcher = Box<dyn Fn(usize, &TableSpec) -> Result<Vec<RowSpec>, String>
 pub type KeyFetcher =
     Box<dyn Fn(usize, &TableSpec, Option<usize>, &[Value]) -> Result<Vec<RowSpec>, String>>;
 
+/// Whether an index of the store leads with a column of a table
+/// (the column's index among the spec's): `Some(true)` where a
+/// lookup by the column is the store's keyed read, `Some(false)`
+/// where each statement scans the table, `None` where the driver
+/// cannot say. Asked once a column, the first time a step reads the
+/// table by it.
+pub type IndexProbe = Box<dyn Fn(&TableSpec, usize) -> Option<bool>>;
+
+/// The code of the info a step raises when it reads a table by a
+/// column that no index leads (the user's word of 2026-11-17 on
+/// the backward step): the answer is the one asked for, and each
+/// statement behind it scanned the table.
+pub const UNINDEXED: &str = "UNINDEXED";
+
 /// A driver's row source with an optional WHERE and an optional
 /// row limit: the one function from which
 /// [`RelationalModel::lazy_where`] derives the whole read, the
@@ -353,6 +367,10 @@ struct TableData {
     fetched: std::collections::HashSet<(usize, String)>,
     /// Keyed statements issued.
     statements: usize,
+    /// Per column read by key: whether each such statement scans
+    /// the table (no index leads the column), as the store's
+    /// catalog answered when first asked.
+    scans: HashMap<usize, bool>,
     /// Keyed reading is off for this table: unsupported, failed, or
     /// over budget.
     keyed_off: bool,
@@ -392,6 +410,13 @@ pub struct RelationalModel {
     tables: Vec<LazyTable>,
     fetcher: Fetcher,
     key_fetcher: Option<KeyFetcher>,
+    /// What the store's catalog says of a column's index.
+    index_probe: Option<IndexProbe>,
+    /// The crosslinks held in memory (`?crosslinks=LABEL`), as
+    /// (table, referring column): a step that reads such a table by
+    /// that column reads it whole, once, and its index of the
+    /// column answers the steps after.
+    held: std::collections::HashSet<(usize, usize)>,
     /// The first k rows of a table, for a step that keeps a prefix.
     prefix_fetcher: Option<PrefixFetcher>,
     /// The exact row count of a table not read.
@@ -469,6 +494,8 @@ impl RelationalModel {
                 unreachable!("eager model refetched table '{}'", spec.name)
             }),
             key_fetcher: None,
+            index_probe: None,
+            held: std::collections::HashSet::new(),
             prefix_fetcher: None,
             counter: None,
             listing: None,
@@ -495,6 +522,8 @@ impl RelationalModel {
                 .collect(),
             fetcher,
             key_fetcher: None,
+            index_probe: None,
+            held: std::collections::HashSet::new(),
             prefix_fetcher: None,
             counter: None,
             listing: None,
@@ -573,6 +602,57 @@ impl RelationalModel {
     /// read whole only when a query asks for all of it.
     pub fn with_key_fetcher(mut self, key_fetcher: KeyFetcher) -> Self {
         self.key_fetcher = Some(key_fetcher);
+        self
+    }
+
+    /// Hold the crosslinks of these labels in memory: the mount's
+    /// `?crosslinks=order,customer` (the user's ruling of
+    /// 2026-11-17; a name is the link's label, as in `<-order`).
+    /// Every table that carries a reference so labelled is read
+    /// whole at the first step along it, and its index of the
+    /// referring column answers the steps after: what the keyed
+    /// read falls back to when its statements are spent, chosen
+    /// from the start. It costs the table's memory, and a standing
+    /// session serves the table as read. `Err` names a label no
+    /// reference of the database carries.
+    pub fn hold_crosslinks(&mut self, labels: &[String]) -> Result<(), String> {
+        for label in labels {
+            let mut found = false;
+            for (t, table) in self.tables.iter().enumerate() {
+                for (i, l) in table.spec.fk_labels().iter().enumerate() {
+                    if l == label {
+                        self.held.insert((t, table.spec.fks[i].0));
+                        found = true;
+                    }
+                }
+            }
+            if !found {
+                let mut known: Vec<String> = self
+                    .tables
+                    .iter()
+                    .flat_map(|t| t.spec.fk_labels())
+                    .collect();
+                known.sort();
+                known.dedup();
+                let known = if known.is_empty() {
+                    "it declares no reference".to_string()
+                } else {
+                    format!("its labels: {}", known.join(", "))
+                };
+                return Err(format!(
+                    "crosslinks={label:?}: no reference of this database is labelled \
+                     {label:?} ({known})"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Give the model the store's word on its indexes: a step that
+    /// reads a table by a column no index leads then says so
+    /// ([`UNINDEXED`]).
+    pub fn with_index_probe(mut self, index_probe: IndexProbe) -> Self {
+        self.index_probe = Some(index_probe);
         self
     }
 
@@ -817,6 +897,13 @@ impl RelationalModel {
             self.whole(t);
             return false;
         }
+        // A held crosslink (`?crosslinks=LABEL`): the table whole,
+        // now, and its index of the column from here on.
+        if col != KEY && self.held.contains(&(t, col)) {
+            self.tables[t].data.borrow_mut().keyed_off = true;
+            self.whole(t);
+            return false;
+        }
         let mut wanted: Vec<(String, Value)> = Vec::new();
         {
             let d = self.tables[t].data.borrow();
@@ -837,6 +924,9 @@ impl RelationalModel {
         }
         if wanted.is_empty() {
             return true;
+        }
+        if col != KEY {
+            self.note_scan(t, col);
         }
         let spec = &self.tables[t].spec;
         let fetcher = self.key_fetcher.as_ref().expect("keyed() checked");
@@ -995,6 +1085,51 @@ impl RelationalModel {
 
     fn table_index(&self, table: &str) -> Option<usize> {
         self.tables.iter().position(|t| t.spec.name == table)
+    }
+
+    /// A read of table `t` by its column `col` where no index of the
+    /// store leads the column: each statement behind the step scans
+    /// the table. Said once a run, as an info; the answer is the one
+    /// asked for. Silent where the driver gives no word on indexes.
+    fn note_scan(&self, t: usize, col: usize) {
+        let Some(probe) = self.index_probe.as_ref() else {
+            return;
+        };
+        let spec = &self.tables[t].spec;
+        let known = self.tables[t].data.borrow().scans.get(&col).copied();
+        let scans = match known {
+            Some(scans) => scans,
+            None => {
+                let scans = probe(spec, col) == Some(false);
+                self.tables[t].data.borrow_mut().scans.insert(col, scans);
+                scans
+            }
+        };
+        if scans {
+            let (table, column) = (&spec.name, &spec.columns[col]);
+            // the second remedy, for a database nobody may alter:
+            // the reference's label, where the column is one
+            let held = spec
+                .fks
+                .iter()
+                .position(|(c, _, _)| *c == col)
+                .map(|i| {
+                    format!(
+                        ", or mount with ?crosslinks={} to hold the reference in memory",
+                        spec.fk_labels()[i]
+                    )
+                })
+                .unwrap_or_default();
+            quarb::record_info(
+                UNINDEXED,
+                &format!("{table}.{column}"),
+                format!(
+                    "{table} is read by {column}, which has no index, so each statement of \
+                     the step scans the table; CREATE INDEX {table}_{column} ON \
+                     {table}({column}) lets the database answer by key{held}"
+                ),
+            );
+        }
     }
 
     /// The row node of `table` whose key column equals `value`.

@@ -3589,6 +3589,14 @@ pub(crate) fn prefetch_hint(
         // A resolution with no label follows the declared keys —
         // the outgoing crosslinks — so the same hint serves it.
         Axis::Resolve { label: None, .. } => &[crate::graph::adapter::LinkDir::Out],
+        // A backward resolution with no scope follows the declared
+        // keys backward — the incoming crosslinks — so the hint
+        // serves it too: a sweep of `<--` reads its referrers for the
+        // whole context together, as `<-label` does. Unhinted, a
+        // store was asked a row at a time: 64 statements a table,
+        // and then the table whole (200 orders over a million items
+        // took 7.3 s where the link step took 0.15 s).
+        Axis::ReverseResolve { scope: None, .. } => &[crate::graph::adapter::LinkDir::In],
         _ => return,
     };
     let nodes: Vec<NodeId> = nodes.collect();
