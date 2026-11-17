@@ -184,7 +184,7 @@ impl OracleAdapter {
         let conn = Rc::new(RefCell::new(conn));
         // One row source with an optional WHERE: the whole read, the
         // listing under a pushed-down filter, and the keyed read a
-        // hop makes (`WHERE key IN (…)`) all derive from it.
+        // step makes (`WHERE key IN (…)`) all derive from it.
         let conn2 = conn.clone();
         let conn3 = conn.clone();
         let model = RelationalModel::lazy_where(

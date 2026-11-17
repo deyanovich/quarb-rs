@@ -145,7 +145,7 @@ fn malformed_xml_is_an_error() {
 /// Finding 18: the descendant walk is iterative, so a document
 /// nested far deeper than any thread's stack allows per frame
 /// (200,000 levels; test threads have 2 MB) still answers `//a`,
-/// a predicate walk and a parent hop.
+/// a predicate walk and a parent step.
 #[test]
 fn a_very_deep_document_walks_without_recursion() {
     let n = 200_000;

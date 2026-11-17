@@ -42,7 +42,7 @@ fn catalog_and_rows() {
 #[test]
 #[ignore = "needs QUARB_ORACLE pointing at a music schema"]
 fn fk_machinery() {
-    // the two-hop join as a path, over USER_CONSTRAINTS FKs
+    // the two-step join as a path, over USER_CONSTRAINTS FKs
     assert_eq!(
         values("/TRACKS/1::ALBUM_ID-->::ARTIST_ID-->::NAME"),
         ["Holst"]

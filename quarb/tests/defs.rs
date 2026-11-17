@@ -228,7 +228,7 @@ fn union_body_as_group() {
 fn group_splice() {
     // an invocation inside a group alternative
     assert_eq!(
-        exp("def &hop: <-cookie; /x(&hop|->ip)+ @| count"),
+        exp("def &step: <-cookie; /x(&step|->ip)+ @| count"),
         "/x(<-cookie|->ip)+ @| count"
     );
     // a group-bodied fragment nests
@@ -318,7 +318,7 @@ fn macro_path_splice() {
     // a macro expansion splices mid-path (the brace quantifier's
     // canonical form is the explicit group)
     assert_eq!(
-        exp(r#"macro &hop($n): ^ | "/w{${$n}}"; /x&hop(2)/leaf::"#),
+        exp(r#"macro &step($n): ^ | "/w{${$n}}"; /x&step(2)/leaf::"#),
         "/x(/w){2}/leaf::"
     );
     // ... and under a written quantifier
@@ -526,7 +526,7 @@ fn unparse_fixpoint() {
         // operand commands keep their parens; a quoted dot-leading
         // string stays a constant topic; quoted trait names reprint
         // quoted; `<-` keeps its axis before a digit-led matcher; a
-        // dash-led name after the sibling hop `<` reprints quoted
+        // dash-led name after the sibling step `<` reprints quoted
         // (spaced, `<` would be the comparison); a trailing leaf
         // anchor regroups before a plain pipe instead of reparsing
         // as the map pipe.

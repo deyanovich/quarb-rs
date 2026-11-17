@@ -453,7 +453,7 @@ impl AstAdapter for MaildirAdapter {
 
     /// Headers, lowercased: `::subject`, `::from`,
     /// `::in-reply-to`, ... A header that occurs more than once
-    /// (`Received` on every hop, several `Cc` lines, an `X-` header
+    /// (`Received` on every step, several `Cc` lines, an `X-` header
     /// written twice) is the list of its occurrences, in the
     /// message's own order; one that occurs once is the string it
     /// is (ruling 2026-11-14 for 0.65: it read as its first

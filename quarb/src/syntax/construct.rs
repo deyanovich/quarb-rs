@@ -83,7 +83,7 @@ const COMMANDS: &[Synopsis] = &[
     },
     kind!(
         "step",
-        "a hop: its axis, its matcher, whether it is a leaf anchor; the traits and the predicates beneath",
+        "a step: its axis, its matcher, whether it is a leaf anchor; the traits and the predicates beneath",
         [
             op(
                 "axis",
@@ -96,7 +96,7 @@ const COMMANDS: &[Synopsis] = &[
     ),
     kind!(
         "trait",
-        "a trait block on a hop: its alternatives, one name or a list, joined by ||",
+        "a trait block on a step: its alternatives, one name or a list, joined by ||",
         [op(
             "alts",
             "the trait names: one, or a list for alternatives",
@@ -629,7 +629,7 @@ impl Form {
                 if alts.is_empty() {
                     return Err(
                         "a group node holds one alternative or more, each a walk of at least \
-                         one hop; none given"
+                         one step; none given"
                             .to_string(),
                     );
                 }

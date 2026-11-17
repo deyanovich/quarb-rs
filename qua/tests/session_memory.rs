@@ -143,7 +143,7 @@ fn the_session_settings_are_set_by_the_session_command() {
         s.run("session(--precision=2) | 2 div 4").unwrap(),
         vec!["0.5"]
     );
-    // `session` alone answers a record: a hop after it refuses as
+    // `session` alone answers a record: a step after it refuses as
     // after any value
     let e = s.run("session | /rows/*").unwrap_err().to_string();
     assert!(e.contains("cannot navigate in value mode"), "{e}");

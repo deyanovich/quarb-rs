@@ -56,7 +56,7 @@ pub fn options_of(name: &str) -> Option<Vec<&'static crate::syntax::signature::O
 /// `graph:closeness`) declares the long option `long` (`--harmonic`),
 /// in any of its forms. A library's rows are read too, which
 /// [`signatures`] leaves out: the parser asks this to tell a graph
-/// command's option from an undirected hop written first.
+/// command's option from an undirected step written first.
 pub fn declares_long(written: &str, long: &str) -> bool {
     use std::collections::HashMap;
     use std::sync::OnceLock;
@@ -665,6 +665,14 @@ pub fn man(args: &[&str]) -> Result<String, String> {
                     Ok(glyph_list(&rows, ru))
                 }
                 None if kinds.is_empty() => Err("the syntax index names no kinds".into()),
+                // the kind's name until 0.67 (the term was renamed,
+                // ruling 2026-11-17)
+                None if matches!(*kind, "hop" | "hops") && kinds.iter().any(|k| k == "step") => {
+                    Err(
+                        "no kind 'hop' of syntax: a hop is a step since 0.67, 'man syntax step'"
+                            .into(),
+                    )
+                }
                 None => Err(format!(
                     "no kind '{kind}' of syntax; the kinds: {}",
                     kinds.join(", ")

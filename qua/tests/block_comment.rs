@@ -60,7 +60,10 @@ fn a_comment_is_whitespace_in_query_text() {
     assert_eq!(
         ok(
             &d,
-            &["/row(!! glued to the hop )[::id = 2] | ::title", "rows.csv"]
+            &[
+                "/row(!! glued to the step )[::id = 2] | ::title",
+                "rows.csv"
+            ]
         ),
         "Emma"
     );

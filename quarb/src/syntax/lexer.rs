@@ -13,7 +13,7 @@
 //! Typing-friendly aliases — the rounded syntax — resolve here, so
 //! the parser sees one syntax: the tail-colon arrows `:-` / `:--` /
 //! `-:` / `--:` lex as `->` / `-->` / `<-` / `<--`, the semicolon
-//! sibling hops `;-` / `-;` (reach forms `;;-` / `-;;`) as `>` / `<`
+//! sibling steps `;-` / `-;` (reach forms `;;-` / `-;;`) as `>` / `<`
 //! (`>>` / `<<`), the file-system ascent `../` / `..//` as `\` / `\\`,
 //! the quantifier `(;m,n)` as `{m,n}`, and the rounded predicate
 //! `(?…)` and trait `(:…)` as `[…]` and `<…>` — the lexer keeps a
@@ -35,22 +35,22 @@ pub enum Token {
     BackslashBackslash,
     /// `>` — `spaced` when a space (or the end) follows, `before`
     /// when one precedes. Spaced on both sides, it is the
-    /// comparison; glued to what follows, the next-sibling hop (or
+    /// comparison; glued to what follows, the next-sibling step (or
     /// a trait's closer). Spacing alone decides, in every position;
     /// spaced on one side only, it is refused with the pointer.
     Gt { spaced: bool, before: bool },
-    /// `;-` — the next-sibling hop's rounded spelling. A token of
-    /// its own, not `Gt`: the alias names the hop only, never the
+    /// `;-` — the next-sibling step's rounded spelling. A token of
+    /// its own, not `Gt`: the alias names the step only, never the
     /// comparison `>` (which gets its own rounded form).
     NextSibling,
-    /// `-;` — the previous-sibling hop's rounded spelling (see
+    /// `-;` — the previous-sibling step's rounded spelling (see
     /// [`Token::NextSibling`]).
     PrevSibling,
     /// `>>`, `>>?`, `>>!` — all / proximal / distal following
     /// siblings.
     FollowingSiblings(char),
     /// `<` — see [`Token::Gt`]: spaced, the comparison; glued, the
-    /// previous-sibling hop or a trait's opener.
+    /// previous-sibling step or a trait's opener.
     Lt { spaced: bool, before: bool },
     /// `<<`, `<<?`, `<<!` — all / proximal / distal preceding
     /// siblings. The payload is the reach selector (' ', '?', '!').
@@ -349,7 +349,7 @@ enum Opener {
 
 /// Whether a dash at this point is the edge accessor's own name —
 /// glued to a preceding `$` or `@` (`$-`, `@-`) — rather than the
-/// start of a rounded arrow or sibling hop.
+/// start of a rounded arrow or sibling step.
 fn after_accessor(tokens: &[Token], glued: bool) -> bool {
     glued && matches!(tokens.last(), Some(Token::Dollar | Token::At))
 }
@@ -1050,7 +1050,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             }
             // `<_km/h>`, `<_m/s^2>`, `<_t/a>` — a compound unit as the
             // unit trait's word (the review of 2026-11-10, syntax B13):
-            // one name token, so the slash is no hop and the caret no
+            // one name token, so the slash is no step and the caret no
             // anchor. `header` answers `:Speed<_km/h>`, and that text
             // was refused ("close with '>': '<_km>'"). A simple unit,
             // `<_km>`, is a name already.
@@ -1090,7 +1090,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 i += len;
             }
             // A `/.../` regex literal on the right of `=~` / `!~`,
-            // where `/` cannot be a hop. Elsewhere `/` is navigation.
+            // where `/` cannot be a step. Elsewhere `/` is navigation.
             // `s/pat/repl/mods` directly after a pipe — the
             // substitution command — or at the head of a call's body,
             // after its `(` or an argument separator (`map(s/, m$//)`,
@@ -1123,7 +1123,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             }
             // `/..` — the parent, `/...` — the ancestors (`/...?` the
             // proximal, `/...!` the distal): the rounded ascent, a
-            // hop in name position like the filesystem's `..`. A
+            // step in name position like the filesystem's `..`. A
             // longer dotted run (`/..x`, `/.git`) is a name.
             '/' if at(i + 1) == Some('.')
                 && at(i + 2) == Some('.')
@@ -1381,7 +1381,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             }
             // `--` — the headless arrow — carved out of the dash
             // run like `->`; the name lexer breaks on it too, so a
-            // glued `/posts/5--ip` reads as row 5 then the hop.
+            // glued `/posts/5--ip` reads as row 5 then the step.
             '-' if at(i + 1) == Some('-') => {
                 tokens.push(Token::DashDash);
                 i += 2;
@@ -1394,7 +1394,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 i += 2;
             }
             // `-;;` / `-;` — the preceding-siblings reach and the
-            // previous-sibling hop, rounded: the sibling hops live
+            // previous-sibling step, rounded: the sibling steps live
             // in the semicolon family (the dash points at the
             // sibling, the semicolon marks the axis). Same accessor
             // guard as the arrows.
@@ -1417,7 +1417,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 i += 2;
             }
             // `<<=` / `>>=` — the containment comparisons; longest
-            // match, before the sibling hops and `<=` / `>=`.
+            // match, before the sibling steps and `<=` / `>=`.
             '<' if at(i + 1) == Some('<') && at(i + 2) == Some('=') => {
                 binary("<<=", glued && !opens, at(i + 3))?;
                 tokens.push(Token::Within);
@@ -1436,7 +1436,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             }
             // `<--` — reverse resolution, canonical spelling.
             // Longest match: before `<-`; the digit guard mirrors
-            // `<-`'s so `<--3` stays a comparison shape, not a hop.
+            // `<-`'s so `<--3` stays a comparison shape, not a step.
             '<' if at(i + 1) == Some('-')
                 && at(i + 2) == Some('-')
                 && !at(i + 3).is_some_and(|c| c.is_ascii_digit()) =>
@@ -1853,7 +1853,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                     "'=~' is retired: the pattern comparison is '==' ('== (/…/)')",
                 ));
             }
-            // `=>` — the scalar pattern-search hop (spec: Search
+            // `=>` — the scalar pattern-search step (spec: Search
             // Operators). Not implemented yet; recognized here so it
             // yields the pointed message rather than lexing as `=` `>`.
             // `=>` — the value match: the nodes of a scope whose
@@ -2029,7 +2029,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             // `(/…/)` — the regex literal, canonical in
             // both positions. In name position it closes strictly
             // with `/)` (flags inline: `(/(?i)^foo/)`), so a pattern
-            // group ending in a hop named i/m/s/x is never misread;
+            // group ending in a step named i/m/s/x is never misread;
             // in operand position the Perl modifiers follow the
             // closing slash (`(/^bob/i)`). `\/` is a literal slash.
             // Glued to a call head the paren is the call's (`f(/x/)`
@@ -2056,18 +2056,18 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             // `>`. A trait body never begins with a colon or a dash,
             // so `(::a = 1)` stays a group opening on a projection
             // and `(:-p|…)` a group opening on the `:-` arrow. A
-            // trait sits on a hop name — one that follows an axis —
+            // trait sits on a step name — one that follows an axis —
             // so glued to any other call head (`sort_by(:size)`,
             // `%(:name)`) the paren is the call's, opening on a
             // field of the topic record; and spaced (`= (:name)`,
             // `| (:index)`) it is a value group on the core read
             // or the topic's field, never a trait, since a trait is
-            // glued to its hop.
+            // glued to its step.
             '(' if at(i + 1) == Some(':')
                 && glued
                 // `#(:A)` after the projection operator holds columns
                 && !(i > 0 && chars[i - 1] == '#')
-                // a trait sits on a hop name: glued to an opener
+                // a trait sits on a step name: glued to an opener
                 // (`((:year div 2) | …)`, `[(:n > 1)]`) or a separator
                 // the paren is a value group on the topic's field
                 && !(i > 0 && matches!(chars[i - 1], '(' | '[' | '{' | '=' | ';' | ',' | '|'))
@@ -2126,7 +2126,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
             // `sh(cmd)` — retired (ruling 2026-11-02): the shell joins a
             // query only as an environment mount, `sh=shell:`, its
             // programs the commands `sh:tr(a-z; A-Z)`.
-            // (a command only: `sh` as a hop's name, `/bin/sh(/b|/c)`,
+            // (a command only: `sh` as a step's name, `/bin/sh(/b|/c)`,
             // and as a fragment's, `&sh($x)`, is a name like any
             // other; the review of 2026-11-10, syntax B12)
             '(' if after_call_head(&tokens, glued)
@@ -2219,7 +2219,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 i += 1;
             }
             // An `@` directly after a navigation operator, before a
-            // name character, is part of the hop name (kaiv array
+            // name character, is part of the step name (kaiv array
             // namespaces like `/@servers`). The register/context
             // sigils (`@.`, `@|`, `@*`) never follow a navigation
             // operator, so there is no clash.
@@ -2324,7 +2324,7 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 ));
             }
             // `;;-` / `;-` — the following-siblings reach and the
-            // next-sibling hop, rounded (`>>` / `>`).
+            // next-sibling step, rounded (`>>` / `>`).
             ';' if at(i + 1) == Some(';') && at(i + 2) == Some('-') => {
                 let mark = match at(i + 3) {
                     Some(m @ ('?' | '!')) => {
@@ -2394,10 +2394,10 @@ pub fn lex_spanned(input: &str) -> Result<(Vec<Token>, Vec<(usize, usize)>)> {
                 i = next;
             }
             // `../` / `..//` — the file-system idiom for the
-            // ascending hops `\` / `\\` (the reach selectors `?` / `!`
+            // ascending steps `\` / `\\` (the reach selectors `?` / `!`
             // follow as their own tokens, as after `\\`). A dot run
             // is otherwise a name (`..3` in a range, `...` the
-            // spread), so only `..` directly before `/` is the hop;
+            // spread), so only `..` directly before `/` is the step;
             // the name lexer breaks on the same shape.
             c if is_name_char(c) => {
                 i = lex_name(&chars, i, glued, &mut tokens)?;
@@ -2504,7 +2504,7 @@ fn lex_name(chars: &[char], mut i: usize, glued: bool, tokens: &mut Vec<Token>) 
             break;
         }
         // Likewise the rounded `-:` (arrow) and `-;`
-        // (sibling hop) — but a dash before a colon run
+        // (sibling step) — but a dash before a colon run
         // stays a name character (`x-::prop`), and a
         // leading dash is the accessor case the arms
         // above already settled (`$-::prop`).
@@ -2515,7 +2515,7 @@ fn lex_name(chars: &[char], mut i: usize, glued: bool, tokens: &mut Vec<Token>) 
             break;
         }
         // `..` before `/` ends a name: the ascending
-        // hop `../` (`a../b` is `a\b`). A longer dot run
+        // step `../` (`a../b` is `a\b`). A longer dot run
         // (`.../`) is the spread, kept whole.
         if ch == '.'
             && !text.is_empty()
@@ -2894,7 +2894,7 @@ fn read_interpolated(chars: &[char], start: usize) -> Result<(Vec<InterpPart>, u
 /// past the closer; `None` for any other body. Refused, with the
 /// pointer: the bare unit of draft.219 (`{_km}` → `{*_km}`; with
 /// `rule`, `{min:_m}` → `{min:*_m}`), the star alone (`{*}` is the
-/// hop's star), a star beside a `;` (a star takes no bound, since a
+/// step's star), a star beside a `;` (a star takes no bound, since a
 /// bound's own unit names the dimension), and a star naming no unit.
 fn read_star_unit(
     chars: &[char],
@@ -2942,7 +2942,7 @@ fn read_star_unit(
     }
     if *star == "*" {
         return Err(QuarbError::lex(
-            "'{*}' is no quantifier: the star is the hop's, '(->x)*'; a budget without bounds \
+            "'{*}' is no quantifier: the star is the step's, '(->x)*'; a budget without bounds \
              names its dimension, '{*_km}'",
         ));
     }
@@ -3604,7 +3604,7 @@ mod glued_operator_tests {
         }
         // The expression head is no binary operator.
         assert!(lex("= 1 + 2").is_ok());
-        // Glued, the characters are names, hops and literals.
+        // Glued, the characters are names, steps and literals.
         assert!(lex("/chapter-02.md").is_ok());
         assert!(lex("//h2>p").is_ok());
         assert!(lex("[::d = 2024-02-15]").is_ok());
@@ -3760,7 +3760,7 @@ mod glued_operator_tests {
             lex("/x-::p").unwrap(),
             vec![Token::Slash, name("x-"), Token::ColonColon, name("p")]
         );
-        // sibling hops and reaches
+        // sibling steps and reaches
         assert!(lex("/a;-b").unwrap().contains(&Token::NextSibling));
         assert!(lex("/a-;b").unwrap().contains(&Token::PrevSibling));
         assert!(
@@ -3797,7 +3797,7 @@ mod glued_operator_tests {
                 name("c")
             ]
         );
-        // dot runs that are not the hop
+        // dot runs that are not the step
         assert_eq!(
             lex("| ...").unwrap(),
             vec![
@@ -3841,9 +3841,9 @@ mod glued_operator_tests {
             lex("(:-p)").unwrap().as_slice(),
             [Token::LParen, Token::ArrowOut, ..]
         ));
-        // a trait is glued to its hop; at the start of a query the
+        // a trait is glued to its step; at the start of a query the
         // paren opens a value group, so the unbalanced trait is
-        // tested on a hop
+        // tested on a step
         assert!(lex("//x(:a>").is_err());
         assert!(lex("//x(:a]").is_err());
         // a pipe or an operator after the name: a value group on
@@ -3866,7 +3866,7 @@ mod glued_operator_tests {
             lex("(:n - :back)").unwrap().as_slice(),
             [Token::LParen, Token::Field, Token::Name { .. }, ..]
         ));
-        // glued to a hop, a dashed or worded body is the trait
+        // glued to a step, a dashed or worded body is the trait
         assert!(matches!(
             lex("//x(:stage-direction)").unwrap().as_slice(),
             [
@@ -4110,7 +4110,7 @@ mod glued_operator_tests {
 
     #[test]
     fn angle_brackets_carry_their_spacing() {
-        // `>` spaced is the comparison, glued the hop: the lexer
+        // `>` spaced is the comparison, glued the step: the lexer
         // records which, the parser decides nothing.
         assert!(lex("[::n > 3]").unwrap().contains(&Token::Gt {
             spaced: true,
@@ -4167,7 +4167,7 @@ mod glued_operator_tests {
         // `~(…)` regex spelling reads as the star and a group
         assert!(lex("/a~x").unwrap().contains(&Token::Tilde));
         assert!(lex("/a~~?x").unwrap().contains(&Token::TildeTilde));
-        // a group ending in a hop named x stays a group
+        // a group ending in a step named x stays a group
         assert!(matches!(
             lex("/a(/src/x)+").unwrap().as_slice(),
             [
@@ -4427,7 +4427,7 @@ mod glued_operator_tests {
     #[test]
     fn call_head_paren_is_not_a_trait() {
         // `f(:x)` — a call whose first argument is a field of the
-        // topic record; the trait opener needs a hop name.
+        // topic record; the trait opener needs a step name.
         assert!(matches!(
             lex("| sort_by(:size)").unwrap().as_slice(),
             [
@@ -4454,7 +4454,7 @@ mod glued_operator_tests {
             lex("| %(:name, 'x')").unwrap().as_slice(),
             [Token::Pipe, Token::Percent, Token::LParen, Token::Field, ..]
         ));
-        // a hop name keeps its trait, on every axis
+        // a step name keeps its trait, on every axis
         for q in [
             "//user(:admin)",
             "/*(:admin)",

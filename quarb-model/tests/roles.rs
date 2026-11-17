@@ -1,7 +1,7 @@
 //! One container, several roles: a container declared by more than
 //! one `node` statement holds every statement's members under its
 //! own role — `/tables/class` and `/tables/schema` share `/tables`,
-//! hops label by the role they land on, and a ref targets a role.
+//! steps label by the role they land on, and a ref targets a role.
 
 use quarb::AstAdapter as _;
 use quarb_json::JsonAdapter;
@@ -69,7 +69,7 @@ fn refs_and_edges_resolve_within_the_role() {
         values(&a, "/tables/class[:: = 'n1']--entry::w"),
         vec!["дом", "стол"]
     );
-    // the lattice: hops label by the role they land on
+    // the lattice: steps label by the role they land on
     assert_eq!(
         values(&a, "/tables/class[:: = 'n1']--schema::"),
         vec!["b", "c"]

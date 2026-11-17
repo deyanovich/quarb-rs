@@ -90,7 +90,7 @@ fn the_star_quantified_is_a_plain_walk() {
     // cells — once.
     assert_eq!(qua(&dir, "/employees/6(~*)+ @| count"), ["383"]);
     assert_eq!(qua(&dir, "/employees/6(~*)+ @| collapse @| count"), ["35"]);
-    // The nearest Ada is two hops away through the table, not
+    // The nearest Ada is two steps away through the table, not
     // three up the manager chain.
     assert_eq!(
         qua(&dir, "/employees/6(~*)+[::name = \"Ada\"]?"),
@@ -100,7 +100,7 @@ fn the_star_quantified_is_a_plain_walk() {
         qua(&dir, "/employees/6(~*){2}[::name = \"Ada\"]"),
         ["/employees/1"]
     );
-    // Along manager edges alone Ada is three hops up.
+    // Along manager edges alone Ada is three steps up.
     assert_eq!(
         qua(&dir, "/employees/6(~manager){2}[::name = \"Ada\"]"),
         Vec::<String>::new()
@@ -114,7 +114,7 @@ fn the_star_quantified_is_a_plain_walk() {
 #[test]
 fn the_deep_star_ends_at_a_matching_edge() {
     let dir = fixture("deep");
-    // The walk over every edge, then the matching hop: the nearest
+    // The walk over every edge, then the matching step: the nearest
     // manager edge is Fay's own link, the nearest manager_id edge
     // her own cell.
     assert_eq!(qua(&dir, "/employees/6~~?manager"), ["/employees/4"]);

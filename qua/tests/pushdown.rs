@@ -105,7 +105,7 @@ fn a_comparison_the_types_would_change_scans() {
 /// A JSON path under a column pushes down only as the scan grafts:
 /// a TEXT column holding JSON text is a leaf on both roads (no
 /// rows), a column declared JSON grafts on both, and `<json>` on
-/// the hop declares the graft on both whatever the column's type.
+/// the step declares the graft on both whatever the column's type.
 #[test]
 fn a_json_path_pushes_only_as_declared() {
     let dir = fixture("json-declared");
@@ -143,9 +143,100 @@ fn a_json_path_pushes_only_as_declared() {
     assert_eq!(out, "1");
     assert_eq!(scan(q), "1");
     assert!(err.contains("json_extract"), "{err}");
-    // `<json>` on the hop declares the graft on both roads.
+    // `<json>` on the step declares the graft on both roads.
     let q = "/jrows/*[/j<json>/tag:: = \"gold\"]::id";
     let (out, _) = qua(&dir, q);
     assert_eq!(out, "1\n3");
     assert_eq!(scan(q), "1\n3");
+}
+
+/// The property form of a JSON path, `[/col/a::b OP v]`, answers
+/// pushed as it answers scanned, over every shape a value takes. It
+/// is not the child form's question: an array of scalars is a list
+/// (any item matches), and `!=` keeps a row whose key is absent.
+/// And the child form's whole push no longer takes an array or an
+/// object for the text literal that spells it.
+#[test]
+fn a_json_property_pushes_as_the_scan_answers() {
+    let dir = fixture("json-property");
+    let db = rusqlite::Connection::open(dir.join("lib.db")).unwrap();
+    db.execute_batch(
+        r#"CREATE TABLE orders (id INTEGER PRIMARY KEY, data JSON);
+           INSERT INTO orders VALUES
+             (1, '{"a":[1,2]}'), (2, '{"a":"[1,2]"}'), (3, '{"a":"x"}'),
+             (4, '{"a":{"k":1}}'), (5, '{"a":"{\"k\":1}"}'), (6, '{"a":["x","y"]}'),
+             (7, '{"a":["x",{"k":1}]}'), (8, '{}'), (9, '{"a":null}'), (10, '{"a":[]}'),
+             (11, '{"a":7}'), (12, '{"a":"7"}'), (13, '{"a":true}'), (14, '{"a":["7"]}'),
+             (15, '{"b":{"a":"x"}}'), (16, '{"a":[null,"x"]}'), (17, 'not json'),
+             (18, '["x"]');
+           CREATE TABLE named (id INTEGER PRIMARY KEY, value JSON);
+           INSERT INTO named VALUES (1, '{"a":"x"}'), (2, '{"a":["x"]}'), (3, '{"a":"y"}');
+           CREATE TABLE plain (id INTEGER PRIMARY KEY, j TEXT);
+           INSERT INTO plain VALUES (1, '{"a":"x"}'), (2, '{"a":["x"]}'), (3, '{"a":"y"}');"#,
+    )
+    .unwrap();
+    let scan = |q: &str| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_qua"))
+            .env("QUARB_LOCALE", "C")
+            .current_dir(&dir)
+            .args(["--no-pushdown", q, "lib.db"])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .trim()
+            .replace('\n', " ")
+    };
+    let pushed = |q: &str| {
+        let (out, err) = qua(&dir, q);
+        (out.replace('\n', " "), err)
+    };
+    // what each answers, and that the two roads agree
+    for (q, answer) in [
+        ("/orders/*[/data::a = 'x']::id", "3 6 16"),
+        ("/orders/*['x' = /data::a]::id", "3 6 16"),
+        ("/orders/*[/data::a = '[1,2]']::id", "2"),
+        (
+            "/orders/*[/data::a != 'x']::id",
+            "1 2 4 5 6 7 8 9 11 12 13 14 15 16 17 18",
+        ),
+        ("/orders/*[/data::a > 6]::id", "11 12 14"),
+        ("/orders/*[/data::a = 7]::id", "11 12 14"),
+        ("/orders/*[/data::a = '7']::id", "11 12 14"),
+        ("/orders/*[/data::a < 'y']::id", "2 3 6 12 14 16"),
+        ("/orders/*[/data::a]::id", "1 2 3 5 6 11 12 13 14 16"),
+        ("/orders/*[/data/b::a = 'x']::id", "15"),
+        ("/orders/*[/data/b::a != 'q']::id", "15"),
+        ("/orders/*[/data::a = 'x'] @| count", "3"),
+        // the child form, beside it: an array has no value
+        ("/orders/*[/data/a:: = 'x']::id", "3"),
+        ("/orders/*[/data/a:: = '[1,2]']::id", "2"),
+        ("/orders/*[/data/a:: = '{\"k\":1}']::id", "5"),
+        // a column of one of json_each's own names
+        ("/named/*[/value::a = 'x']::id", "1 2"),
+        // a TEXT column is a leaf on both roads, and a graft where
+        // the step declares it
+        ("/plain/*[/j::a = 'x']::id", ""),
+        ("/plain/*[/j<json>::a = 'x']::id", "1 2"),
+    ] {
+        let (out, _) = pushed(q);
+        assert_eq!(out, answer, "{q}");
+        assert_eq!(scan(q), answer, "{q} (scanned)");
+    }
+    // the string equality is pushed whole, its array branch with it
+    let (_, err) = pushed("/orders/*[/data::a = 'x']::id");
+    assert!(
+        err.contains("PUSHED (query)") && err.contains("json_each(data, '$.a')"),
+        "{err}"
+    );
+    // a comparison narrows, the arrays let through
+    let (_, err) = pushed("/orders/*[/data::a > 6]::id");
+    assert!(
+        err.contains("PUSHED (prefilter)") && err.contains("IN ('text', 'array')"),
+        "{err}"
+    );
+    // the container-looking literal narrows too; it was pushed whole
+    let (_, err) = pushed("/orders/*[/data/a:: = '[1,2]']::id");
+    assert!(err.contains("PUSHED (prefilter)"), "{err}");
 }

@@ -1785,7 +1785,7 @@ impl Mounted {
     pub fn of<A: AstAdapter + 'static>(a: Rc<A>, render: Box<dyn Fn(NodeId) -> String>) -> Mounted {
         // A source with no composing layer of its own gets one that
         // grafts on demand only (spec: Grafting, `graft(NOTATION)`;
-        // a `<NOTATION>` trait at a hop), its leaves as they were;
+        // a `<NOTATION>` trait at a step), its leaves as they were;
         // the layer's locator marks a grafted node, the source's own
         // renders the rest.
         if !a.grafts_on_demand() {
@@ -2284,7 +2284,7 @@ fn open_mount_as_written(p: &Path, cli: &OpenOpts) -> anyhow::Result<Mounted> {
     // the autounits option; ruling 2026-11-08): the source opens as
     // it is, and the convention wraps whatever opened
     let (p, suffixes, slugs, units) = take_units_option(&p)?;
-    // `?sci` comes off beside them (spec: Text Readings, the
+    // `?sci` comes off beside them (spec: Quarb Readings, the
     // scientific reading; ruling 2026-11-10): the source opens as it
     // is, and every table the mount builds is read scientifically
     let (p, sci) = take_sci_option(&p)?;

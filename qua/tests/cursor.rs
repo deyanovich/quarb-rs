@@ -70,7 +70,7 @@ fn the_position_is_a_reference() {
 }
 
 /// `$$__` is the opener of the last query body, held through the
-/// body's hops and transparent through expression bodies; null at
+/// body's steps and transparent through expression bodies; null at
 /// the top level.
 #[test]
 fn the_invoking_position() {

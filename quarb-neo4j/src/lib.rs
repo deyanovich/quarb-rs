@@ -280,7 +280,7 @@ pub struct Neo4jAdapter {
     edge_props: RefCell<HashMap<(NodeId, String, NodeId), Vec<(String, Value)>>>,
     /// A node's relationships once read, per direction: `edges`
     /// answers from here, and `prefetch_links` fills it for a whole
-    /// hop in one statement instead of one per node.
+    /// step in one statement instead of one per node.
     edge_cache: RefCell<HashMap<(NodeId, bool), Vec<(String, NodeId)>>>,
 }
 
@@ -465,7 +465,7 @@ impl Neo4jAdapter {
     }
 
     /// The relationships of many nodes in one statement per 500,
-    /// into the edge cache — the hop that follows reads them
+    /// into the edge cache — the step that follows reads them
     /// without a round trip per node.
     fn prefetch_edges(&self, nodes: &[NodeId], incoming: bool) {
         let mut wanted: Vec<(NodeId, String)> = Vec::new();
@@ -496,7 +496,7 @@ impl Neo4jAdapter {
             let Some(rows) = quarb::fetched_opt(
                 self.client
                     .cypher(&stmt, serde_json::json!({ "eids": eids })),
-                || "neo4j: reading the relationships of a hop".to_string(),
+                || "neo4j: reading the relationships of a step".to_string(),
             ) else {
                 return;
             };

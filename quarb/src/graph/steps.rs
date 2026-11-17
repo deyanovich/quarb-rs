@@ -37,7 +37,7 @@ pub(crate) fn navigate_paths(
         },
         seed_register.to_vec(),
     )];
-    // the lineage's hop in progress: the elements since the last
+    // the lineage's step in progress: the elements since the last
     // mark, one level of the thread tree
     let recording = crate::graph::threads::recording();
     let mut hop_text = String::new();
@@ -81,7 +81,7 @@ pub(crate) fn navigate_paths(
         // threads merge only when no later read could tell them
         // apart — the same node, the same arriving edge (its
         // identity: parallel edges and different labels stay apart),
-        // the same capsa and marks. A hop from two threads to one
+        // the same capsa and marks. A step from two threads to one
         // node is two threads, as a join's rows are; a walk's exit
         // is one thread per acyclic walk.
         let mut next: Vec<(Option<usize>, GraphExt, Vec<Reg>)> = Vec::new();
@@ -95,7 +95,7 @@ pub(crate) fn navigate_paths(
                 // replaces it before anything runs
                 PathElem::Hole(_) | PathElem::Param(_) => {}
                 PathElem::Step(step) => {
-                    // a link hop hands its edges over: one thread
+                    // a link step hands its edges over: one thread
                     // per edge (two rows on one leg, a node linked
                     // both ways)
                     let succs: Vec<(NodeId, Option<EdgeCtx>)> = if let Some(edges) =
@@ -172,7 +172,7 @@ pub(crate) fn navigate_paths(
                         let arrived = p.last_edge.clone().into_iter().collect();
                         // the walk's facts ride the exit; one
                         // thread per walk, none merged; the
-                        // whole walk one hop of the lineage
+                        // whole walk one step of the lineage
                         let trail = crate::graph::threads::hop(
                             &ext.trail, hop_first, &hop_text, &hop_lead, p.ext.node,
                         );
@@ -326,7 +326,7 @@ pub(crate) fn navigate_from_level(
 /// current node, every node the path has traversed (the group's
 /// anchor included), the breadcrumbs its pushes have made, and the
 /// edge it most recently walked (the `$-` a pattern command sees).
-/// Simple-path semantics: a hop whose target is already in `visited`
+/// Simple-path semantics: a step whose target is already in `visited`
 /// is not taken — which is what makes open quantifiers terminate on
 /// cyclic crosslink data. `visited` is kept sorted (traversal order
 /// carries no meaning for the cycle check), so two paths that cover
@@ -373,7 +373,7 @@ pub(crate) struct GPath {
     /// — under the acyclic promise, or for a plain open walk (spec:
     /// Expansion paths, Acyclic links).
     pub(crate) node_level: bool,
-    /// The hops the walk has taken to reach this path's node.
+    /// The steps the walk has taken to reach this path's node.
     pub(crate) hops: usize,
     /// The cost so far under every budget brace, in budget order
     /// (spec: Def. Walk, the braces stack); `None` before the first
@@ -415,14 +415,14 @@ impl BudgetBounds {
             crate::value::quantity::parse_unit_text(&text.replace('_', " ")).ok_or_else(|| {
                 if text.trim().parse::<f64>().is_ok() {
                     format!(
-                        "one dimension per quantifier: '{text}' counts hops where the other \
+                        "one dimension per quantifier: '{text}' counts steps where the other \
                          bound measures a quantity; a budget's bounds are quantities of one \
-                         dimension ('{{;100_km}}'), a count of hops is '{{1;5}}'"
+                         dimension ('{{;100_km}}'), a count of steps is '{{1;5}}'"
                     )
                 } else {
                     format!(
                         "the budget's bound '{text}' is no quantity: a budget bounds a sum of an \
-                         edge weight, '{{;100_km}}', '{{2_h;}}' — a count of hops is '{{;5}}'"
+                         edge weight, '{{;100_km}}', '{{2_h;}}' — a count of steps is '{{;5}}'"
                     )
                 }
             })
@@ -545,10 +545,10 @@ impl BudgetBounds {
     }
 }
 
-/// The walk's facts at `path`: round and hops, the total under the
+/// The walk's facts at `path`: round and steps, the total under the
 /// last brace where it is a budget (spec: Def. Walk), and the costs
 /// under every brace in brace order (the braces stack): a count
-/// brace's hop count, a budget brace's cost as a quantity.
+/// brace's step count, a budget brace's cost as a quantity.
 pub(crate) struct WalkBraces<'a> {
     /// The group's braces in writing order.
     pub(crate) braces: &'a [&'a Quant],
@@ -607,7 +607,7 @@ impl GPath {
         self.visited.binary_search(&node).is_ok()
     }
 
-    /// The path extended by one hop to `node`, along `edge`.
+    /// The path extended by one step to `node`, along `edge`.
     fn with(&self, node: NodeId, edge: Option<EdgeCtx>) -> GPath {
         let mut visited = self.visited.clone();
         if !self.set_walk
@@ -707,7 +707,7 @@ pub(crate) fn arrived_edge(
             row: None,
         },
         Axis::Ancestor(_) => {
-            // The chain's last hop: the child of `succ` on the walk.
+            // The chain's last step: the child of `succ` on the walk.
             let mut child = from;
             while let Some(p) = adapter.parent(child) {
                 if p == succ {
@@ -796,7 +796,7 @@ pub(crate) fn arrived_edge(
         }
         // The navop star: the edge of `from` that reaches `succ`
         // (the matching label first, as `link_property` reads it).
-        // A deep walk's last hop is not recorded: the edge into
+        // A deep walk's last step is not recorded: the edge into
         // `succ` from its parent, else its first backlink.
         Axis::Any | Axis::AnyDeep(_) => {
             if let Some((_, e)) = incident_edges(adapter, from, step)
@@ -900,7 +900,7 @@ pub(crate) fn expand_group(
         record_refusal_coded(
             crate::diagnostic::REFUSED,
             "the quantifier",
-            "two braces count hops: one brace per dimension".to_string(),
+            "two braces count steps: one brace per dimension".to_string(),
         );
         return Vec::new();
     }
@@ -999,9 +999,9 @@ pub(crate) fn expand_group(
     let anchor_was_set = anchor.set_walk;
     let anchor_ground = anchor.visited.clone();
     // The acyclic promise (spec: Model Files, Acyclic links): every
-    // hop of the group over a link promised acyclic. A set walk
+    // step of the group over a link promised acyclic. A set walk
     // keeps no history, so the promise has nothing to spare it.
-    // Over link hops alone the promise is read from the edges the
+    // Over link steps alone the promise is read from the edges the
     // walk crosses, round by round: it holds while every crossed
     // label is promised (an exact label resolves it before the
     // first round, a wildcard after it) and lapses at the first
@@ -1151,15 +1151,15 @@ pub(crate) fn expand_group(
     // exact where one brace bounds the walk and nothing can prefer a
     // dearer arrival: no count brace and no second budget, no floor,
     // a cost that never falls along a walk (every rule but `min`),
-    // alternatives of one hop each, and a guard that reads the node
+    // alternatives of one step each, and a guard that reads the node
     // alone. A group that records its way (`(->* .(::code))`) is
     // searched too: the routes answered are those of the lightest
     // walks, every one that ties. Weights are non-negative there (a
-    // negative one refuses on the hop). Any other form runs the
+    // negative one refuses on the step). Any other form runs the
     // exact walk below and keeps its lightest survivors. (The search
     // ran for every form: `{;15_h}{*_EUR}[P]?` answered nothing
     // where the cheap way in ran out of hours, `{;1}{*_EUR}?`
-    // answered a walk of two hops, a floor and `min:` were not
+    // answered a walk of two steps, a floor and `min:` were not
     // looked at.)
     let by_total = lightest
         && braces.len() == 1
@@ -1170,10 +1170,10 @@ pub(crate) fn expand_group(
         && !guard_reads_walk(group);
     if by_total {
         // the answer's total, once a survivor is met (the start
-        // itself, where the walk admits no hop and the guard it)
+        // itself, where the walk admits no step and the guard it)
         let mut least: Option<f64> = matches.first().map(|(p, _)| p.total);
         // the least total at which a walk stood at the quantifier
-        // bound with a hop still to take
+        // bound with a step still to take
         let mut cut: Option<f64> = None;
         // Each node settles at its least total, and EVERY walk that
         // arrives at that total is kept and walked on from: under a
@@ -1190,7 +1190,7 @@ pub(crate) fn expand_group(
         let mut settled: HashMap<NodeId, f64> = HashMap::from([(start, anchor.total)]);
         let mut arrived = HashSet::from([anchor.key()]);
         // Each walk beside its place in the plain walk's order: the
-        // position of every hop among its round's expansions, so the
+        // position of every step among its round's expansions, so the
         // tied walks answer by round and then by the edges' document
         // order, as the exact walk lists them, whatever order the
         // search met them in (it answered BOM before DEL where the
@@ -1349,7 +1349,7 @@ pub(crate) fn expand_group(
     let mut answered = false;
     for count in 1..=hi {
         frontier = advance(&frontier, count);
-        // a refusal met on a hop (a cycle under the promise, a
+        // a refusal met on a step (a cycle under the promise, a
         // negative weight) voids the walk, whatever it matched
         if crate::value::ambient::refusal_pending() {
             return Vec::new();
@@ -1420,7 +1420,7 @@ pub(crate) fn expand_group(
         Reach::Distal => matches.iter().map(|&(_, c)| c).max(),
     };
     // Under a budget the distal reach is the heaviest walk within it
-    // and the proximal the lightest, the count of hops aside.
+    // and the proximal the lightest, the count of steps aside.
     let mut kept: Vec<(GPath, usize)> = if budget.is_some() && group.reach != Reach::All {
         let totals = matches.iter().map(|(p, _)| p.total);
         let extreme = if group.reach == Reach::Distal {
@@ -1485,7 +1485,7 @@ pub(crate) fn expand_group(
     // answers, which are one where the walk's own key has them one
     // (the node, the ground covered, the capsa, the arriving edge),
     // so two tied walks over two edges are two answers, alike or
-    // not, and `$-` reads each walk's own edge. The reach by hop
+    // not, and `$-` reads each walk's own edge. The reach by step
     // count alone stays the node set it is, one thread per node and
     // capsa.
     let out: Vec<GPath> = if group.reach == Reach::All || !budgets.is_empty() {
@@ -1510,7 +1510,7 @@ pub(crate) fn expand_group(
 
 /// The walk's results leave the group with the walk's facts on them
 /// (spec: Edge facts): the one command after the group reads `$-`
-/// and `$-:round`, `$-:hops`, `$-:total` for the walk that ended
+/// and `$-:round`, `$-:steps`, `$-:total` for the walk that ended
 /// there.
 fn exit_walk(mut out: Vec<GPath>, shape: &WalkBraces) -> Vec<GPath> {
     for p in &mut out {
@@ -1538,7 +1538,7 @@ pub(crate) fn set_form(group: &Group) -> bool {
         && one_step_alternatives(group)
 }
 
-/// Whether every alternative of the group is one hop: one step, and
+/// Whether every alternative of the group is one step, and
 /// beside it nothing but the pushes and marks that record the way.
 /// A repetition then moves by one edge, with no node in between.
 fn one_hop_alternatives(group: &Group) -> bool {
@@ -1566,7 +1566,7 @@ fn one_step_alternatives(group: &Group) -> bool {
 
 /// Whether the group's guard reads the walk: the edge it arrived by
 /// (`$-`, `@-`) or a fact of the walk, read off the same accessor
-/// (`$-:hops`, `$-:total`, `$-:round`). A guard that reads the node
+/// (`$-:steps`, `$-:total`, `$-:round`). A guard that reads the node
 /// alone answers alike for every walk that ends there; one that
 /// reads the walk tells two arrivals apart, so a search that keeps
 /// one arrival per node cannot run it (spec: Expansion paths, the
@@ -1689,8 +1689,8 @@ pub(crate) fn group_admits(
     )
 }
 
-/// Whether the group walks crosslinks alone: every hop of every
-/// alternative, nested groups included, is a link hop by a label or
+/// Whether the group walks crosslinks alone: every step of every
+/// alternative, nested groups included, is a link step by a label or
 /// a wildcard — the walks the acyclic promise can spare their
 /// histories. A child step or a navop star leaves a walk its
 /// histories.
@@ -1709,8 +1709,8 @@ fn group_walks_links(group: &Group) -> bool {
 
 /// The declaration promising every link the group walks acyclic
 /// (spec: Model Files, Acyclic links) before the first round: each
-/// hop a crosslink hop by an exact label the adapter promises. A
-/// wildcard hop resolves it from the edges crossed instead.
+/// step a crosslink step by an exact label the adapter promises. A
+/// wildcard step resolves it from the edges crossed instead.
 fn group_promise(adapter: &impl AstAdapter, group: &Group) -> Option<String> {
     let mut decl: Option<String> = None;
     for alt in &group.alts {
@@ -1723,7 +1723,7 @@ fn group_promise(adapter: &impl AstAdapter, group: &Group) -> Option<String> {
                     decl.get_or_insert(d);
                 }
                 PathElem::Step(step) => {
-                    // a resolution hop (`::manager_id-->`) walks the
+                    // a resolution step (`::manager_id-->`) walks the
                     // reference under its label: the written one, else
                     // the property's default label, else the property
                     if let Axis::Resolve { property, label } = &step.axis {
@@ -1975,7 +1975,7 @@ pub(crate) fn expand_elems(
                 // replaces it before anything runs
                 PathElem::Hole(_) | PathElem::Param(_) => {}
                 PathElem::Step(step) => {
-                    // a link hop hands its edges over: one walk per
+                    // a link step hands its edges over: one walk per
                     // edge (two rows on one leg, a node linked both
                     // ways)
                     let succs: Vec<(NodeId, Option<EdgeCtx>)> = if let Some(edges) = link_edges(
@@ -2019,7 +2019,7 @@ pub(crate) fn expand_elems(
                                     "the walk",
                                     format!(
                                         "a cycle under the promise '{decl}': the walk from \
-                                         {} returns to {} after {} hop{}",
+                                         {} returns to {} after {} step{}",
                                         node_path(adapter, path.visited[0]),
                                         node_path(adapter, s),
                                         path.hops + 1,
@@ -2033,7 +2033,7 @@ pub(crate) fn expand_elems(
                         let mut p = path.with(s, edge);
                         // Under a budget an edge is crossed with its
                         // weight, or not at all: a missing weight is no
-                        // weight, never a free hop; past the ceiling the
+                        // weight, never a free step; past the ceiling the
                         // path ends here.
                         // Every budget brace weighs the leg under its rule
                         // (spec: Def. Cost Rule); a leg without the weight is
@@ -2215,7 +2215,7 @@ pub(crate) fn project(adapter: &impl AstAdapter, node: NodeId, proj: &Projection
 /// Apply one step to a single source node, appending results to `out`.
 #[allow(clippy::too_many_arguments)]
 /// The prefix the step's plan carries (ruling 2026-11-05): the
-/// pipeline's, where the hop in progress is the branch's last step
+/// pipeline's, where the step in progress is the branch's last
 /// and the step tests nothing of its own after the adapter's cut.
 fn plan_limit(step: &Step) -> Option<usize> {
     if !step.predicates.is_empty()
@@ -2530,7 +2530,7 @@ pub(crate) fn apply_step(
             );
             out.extend(by_reach(found, *reach));
         }
-        // the link axes: one successor per edge, the headless hop
+        // the link axes: one successor per edge, the headless step
         // both ways — `link_edges` is the arm, the edges it hands
         // over read by the walks that keep them
         Axis::OutLink | Axis::InLink => {
@@ -2549,7 +2549,7 @@ pub(crate) fn apply_step(
             adapter, node, step, trace, outer, witness, state, register, out,
         ),
         // `~` — every edge touching the node, the far ends the step
-        // keeps; `~~` the walk over every edge ending at such a hop.
+        // keeps; `~~` the walk over every edge ending at such a step.
         Axis::Any => any_edge_step(
             adapter, node, step, trace, outer, witness, state, register, out,
         ),
@@ -2720,7 +2720,7 @@ pub(crate) fn incident_edges(
         }
     }
     // The incoming half is what the navop wildcard cannot leave out:
-    // over a source that cannot walk its links back the hop is
+    // over a source that cannot walk its links back the step is
     // refused (spec: The adapter contract).
     if backward_refused(adapter, node, "~", named_label(step)) {
         return Vec::new();
@@ -2787,7 +2787,7 @@ pub(crate) fn any_edge_step(
 
 /// `~~` — the deep navop star, `(~*)*~name`: the plain walk over
 /// every edge from the node (each node reached once, at the fewest
-/// rounds, the node itself at depth 0), then the matching hop from
+/// rounds, the node itself at depth 0), then the matching step from
 /// every node reached, at the tier after its depth; the reach picks
 /// the nearest or the farthest tier. `apply_step`'s arm.
 #[allow(clippy::too_many_arguments)]
@@ -2866,14 +2866,14 @@ pub(crate) fn both_link_step(
     );
 }
 
-/// A link hop's successors, each with the edge it crosses: `->` the
+/// A link step's successors, each with the edge it crosses: `->` the
 /// outgoing links, `<-` the incoming, `--` both, `~` every edge
 /// touching the node, the tree's among them (the edge context
 /// recording the edge's true direction — the walk just declined to
 /// assert it). `None` for any other axis. One successor per EDGE:
 /// a node reached by two rows of an edge-declared table, or linked
 /// both ways, is reached twice, one thread per edge (spec: Expansion
-/// paths, Edge rows), which is why the hop hands its edges over
+/// paths, Edge rows), which is why the step hands its edges over
 /// rather than leaving them to be re-derived from the node
 /// (`arrived_edge` finds the first).
 #[allow(clippy::too_many_arguments)]
@@ -2887,7 +2887,7 @@ pub(crate) fn link_edges(
     state: &GraphExt,
     register: &[Reg],
 ) -> Option<Vec<(NodeId, EdgeCtx)>> {
-    // `~`, the navop wildcard, hands its edges over as a link hop
+    // `~`, the navop wildcard, hands its edges over as a link step
     // does (the review of 2026-11-10, graph B7): `~x` is
     // `(/x|\x|->x|<-x)`, one thread per edge. The step had each edge
     // in hand and answered nodes, and the edge was derived again from
@@ -2918,7 +2918,7 @@ pub(crate) fn link_edges(
         _ => return None,
     };
     // A source with links it cannot walk back refuses the backward
-    // hop and the headless one (spec: The adapter contract).
+    // step and the headless one (spec: The adapter contract).
     if incoming
         && backward_refused(
             adapter,
@@ -3572,7 +3572,7 @@ pub(crate) fn reverse_found(
     .collect()
 }
 
-/// Tell the adapter which crosslinks a hop is about to follow from
+/// Tell the adapter which crosslinks a step is about to follow from
 /// which nodes — a batching hint, no semantics.
 pub(crate) fn prefetch_hint(
     adapter: &impl AstAdapter,
@@ -3696,7 +3696,7 @@ pub(crate) fn descendants(
 
 /// Whether `node` passes `step`'s tests: the name matcher, the trait
 /// filters, and the leaf anchor. Predicates are *not* checked here —
-/// they apply to the hop's collected result list (`apply_predicates`).
+/// they apply to the step's collected result list (`apply_predicates`).
 /// `[::prop = "text"]` — the one predicate shape an adapter's
 /// property index can answer (a named property of the node itself
 /// against a text literal); anything else keeps the walk.
@@ -3790,8 +3790,8 @@ pub(crate) fn matches_step(adapter: &impl AstAdapter, node: NodeId, step: &Step)
 
 /// Whether `node` passes the name algebra of a step on a node axis
 /// (`/(*.rs && !test_*)`, spec: Name algebra): every clause holds
-/// of the node's name, the complement read among the hop's own
-/// candidates, which is where the caller stands. A crosslink hop
+/// of the node's name, the complement read among the step's own
+/// candidates, which is where the caller stands. A crosslink step
 /// reads its labels instead (`select_links`), and a step without
 /// an algebra passes.
 pub(crate) fn algebra_ok(adapter: &impl AstAdapter, node: NodeId, step: &Step) -> bool {
@@ -3816,7 +3816,7 @@ pub(crate) fn tests_ok(adapter: &impl AstAdapter, node: NodeId, step: &Step) -> 
 /// Whether `node` would match `elem` as a step of a path, decided
 /// at the node and nowhere else: the name matcher, the trait
 /// clauses, the leaf anchor and the expression predicates, with no
-/// hop performed and no context beyond the node (a predicate may
+/// step performed and no context beyond the node (a predicate may
 /// still look around from it). A name-alternation group matches
 /// when any alternative does and the group's own clauses hold. A
 /// model's declared trait is this test, so the engine never walks
@@ -3888,11 +3888,11 @@ pub fn node_matches_elem(adapter: &impl AstAdapter, node: NodeId, elem: &PathEle
     }
 }
 
-/// Apply `step`'s predicates to one hop's result list (the tested
+/// Apply `step`'s predicates to its result list at one node (the tested
 /// matches from a single source node, in axis order), sequentially:
 ///
 /// - An index predicate `[n]` keeps the `n`-th element of the list
-///   as filtered so far (`[-1]` the last) — position among the hop's
+///   as filtered so far (`[-1]` the last) — position among the step's
 ///   results, not sibling position (that is `[:index = n]`). Out
 ///   of range keeps nothing.
 /// - A range predicate `[a..b]` keeps the inclusive positional span,
@@ -3992,7 +3992,7 @@ pub(crate) fn apply_predicates<T>(
                     let edge = edge_of(item);
                     // Navigation predicates have no capsa of
                     // their own; `$$…` still reaches the
-                    // invoking subcontext's capsa. Edge hops
+                    // invoking subcontext's capsa. Edge steps
                     // define `$-` for their own predicates.
                     // The path's own capsa: its breadcrumb register
                     // (seeded from the invoking capsa inside a body —

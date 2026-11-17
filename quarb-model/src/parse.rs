@@ -35,10 +35,10 @@ pub struct Model {
     /// `<--(SCOPE::prop)`) whose scope is the declared one. Cost
     /// only: the answer is the walk's, with or without it.
     pub indexes: Vec<IndexDecl>,
-    /// `graph SCOPE(hop) { measure; … };` — the measures of the
+    /// `graph SCOPE(step) { measure; … };` — the measures of the
     /// graph library the source maintains over the whole graph of
-    /// the hop on the scope (spec: Graph Declarations). Cost only:
-    /// a library command is answered from it when its hop, options
+    /// the step on the scope (spec: Graph Declarations). Cost only:
+    /// a library command is answered from it when its step, options
     /// and context are the declared ones.
     pub graphs: Vec<GraphDecl>,
     /// `weight-potential SCOPE-PATH::prop;` — the properties that are
@@ -152,15 +152,15 @@ pub struct TreeDecl {
     pub path: String,
 }
 
-/// A declared graph: `graph SCOPE(hop) { measure; measure(options); };`
+/// A declared graph: `graph SCOPE(step) { measure; measure(options); };`
 /// (spec: Graph Declarations) — the source maintains the named
-/// measures of the graph library over the whole graph of the hop on
+/// measures of the graph library over the whole graph of the step on
 /// the scope, each as a query writes it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GraphDecl {
     /// The node-selecting path.
     pub scope: String,
-    /// The hop as written (`->link`, `--*`).
+    /// The step as written (`->link`, `--*`).
     pub hop: String,
     /// Each measure as written (`pagerank`, `betweenness(--normalized)`).
     pub measures: Vec<String>,
@@ -385,7 +385,7 @@ pub struct Mount {
 pub struct NodeDecl {
     /// The container's name: `ips` from `/ips/ip`.
     pub name: String,
-    /// The role each child plays in it: `ip` from `/ips/ip`. A hop
+    /// The role each child plays in it: `ip` from `/ips/ip`. A step
     /// into this container is labelled by this role — a label names
     /// what it lands on, never the property it came from.
     pub role: String,
@@ -430,7 +430,7 @@ pub struct RefDecl {
     pub key_field: Option<String>,
     /// `as NAME`: the edge's own label, both ways (`->NAME`,
     /// `<-NAME`); `as ::prop` each row's edge labelled by that
-    /// property's value; without either the role the hop arrives at.
+    /// property's value; without either the role the step arrives at.
     /// On a property the source already declares (a catalog's foreign
     /// key) it renames that one edge.
     pub label: Option<Label>,
@@ -720,14 +720,14 @@ fn split_tail(rest: &str) -> Result<(&str, Vec<WeightSpec>, bool), String> {
 /// a `;` inside `(…)`, `[…]` or `{…}` separates a call's arguments
 /// or a record's fields (`%(a = ::a; b = ::b)`), never statements;
 /// strings are opaque.
-/// `graph SCOPE(hop) { measure; measure(options); }`: the scope path
-/// up to the hop's parentheses, the hop inside them, the measures
+/// `graph SCOPE(step) { measure; measure(options); }`: the scope path
+/// up to the step's parentheses, the step inside them, the measures
 /// between the braces each ending in `;`.
 fn parse_graph(rest: &str, stmt: &str) -> Result<GraphDecl, String> {
     let rest = rest.trim();
     let Some(open) = rest.find('{') else {
         return Err(format!(
-            "graph takes its measures in braces: 'graph SCOPE(hop) {{ pagerank; }};' — '{stmt}'"
+            "graph takes its measures in braces: 'graph SCOPE(step) {{ pagerank; }};' — '{stmt}'"
         ));
     };
     let Some(close) = rest.rfind('}') else {
@@ -739,18 +739,18 @@ fn parse_graph(rest: &str, stmt: &str) -> Result<GraphDecl, String> {
     let head = rest[..open].trim();
     let Some(hop_open) = head.rfind('(') else {
         return Err(format!(
-            "graph takes the hop in parentheses after the scope: 'graph /pages/*(->link) {{ … }};' — '{stmt}'"
+            "graph takes the step in parentheses after the scope: 'graph /pages/*(->link) {{ … }};' — '{stmt}'"
         ));
     };
     if !head.ends_with(')') {
         return Err(format!(
-            "graph takes the hop in parentheses after the scope: 'graph /pages/*(->link) {{ … }};' — '{stmt}'"
+            "graph takes the step in parentheses after the scope: 'graph /pages/*(->link) {{ … }};' — '{stmt}'"
         ));
     }
     let scope = head[..hop_open].trim();
     let hop = head[hop_open + 1..head.len() - 1].trim();
     if scope.is_empty() || hop.is_empty() {
-        return Err(format!("graph takes a scope path and a hop — '{stmt}'"));
+        return Err(format!("graph takes a scope path and a step — '{stmt}'"));
     }
     let mut measures = Vec::new();
     for m in rest[open + 1..close].split(';') {
@@ -1093,7 +1093,7 @@ fn split_trait(head: &str) -> (String, Option<String>) {
 }
 
 /// `/ips/ip` -> (`ips`, `ip`). A bare name has no role and is
-/// refused: the role is what a hop into the container is called.
+/// refused: the role is what a step into the container is called.
 fn split_container_role(path: &str) -> Option<(String, String)> {
     let p = path.trim().trim_start_matches('/');
     let (container, role) = p.split_once('/')?;
@@ -1319,7 +1319,7 @@ fn parse_model_in(
                 let (path, trait_name) = split_trait(head.trim());
                 let (name, role) = split_container_role(&path).ok_or_else(|| {
                     format!(
-                        "node needs '/container/role', so a hop can be \
+                        "node needs '/container/role', so a step can be \
                          labelled by the role it lands on: '{stmt}'"
                     )
                 })?;
@@ -1940,7 +1940,7 @@ mod tests {
 
     #[test]
     fn a_node_head_needs_a_role() {
-        // `node ips: …` says nothing about what a hop landing in
+        // `node ips: …` says nothing about what a step landing in
         // the container should be called.
         assert!(parse_model("node ips: /row::ip;").is_err());
     }

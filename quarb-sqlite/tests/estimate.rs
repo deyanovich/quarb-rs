@@ -1,6 +1,6 @@
 //! The static plan through the SQLite adapter: `ANALYZE`'s row
 //! counts as the estimate, unknown without them; the equality on
-//! the child hop claimed by the catalog.
+//! the child step claimed by the catalog.
 
 use quarb::{Confidence, Latency};
 use quarb_sqlite::SqliteAdapter;

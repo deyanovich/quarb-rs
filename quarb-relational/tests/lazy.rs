@@ -84,7 +84,7 @@ fn only_touched_tables_load() {
 #[test]
 fn resolution_pulls_the_target() {
     let (model, fetched) = counting_model();
-    // the FK hop from orders loads orders, then users on resolve
+    // the FK step from orders loads orders, then users on resolve
     assert_eq!(values(&model, "/orders/10::user_id-->::name"), vec!["Bo"]);
     assert_eq!(*fetched.borrow(), vec!["orders", "users"]);
 }

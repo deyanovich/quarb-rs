@@ -514,8 +514,8 @@ fn a_numeric_command_leaves_a_cell_and_nulls_a_lone_value() {
     assert!(refused(&d, &[r#"= "abc" | pow"#]).contains("pow takes the exponent"));
 }
 
-/// A positional predicate in a hop operand counts per source node
-/// (ruling 2026-11-10), as the hop does in a path: `edges(->*[1])`
+/// A positional predicate in a step operand counts per source node
+/// (ruling 2026-11-10), as the step does in a path: `edges(->*[1])`
 /// kept the first edge of all the nodes together.
 #[test]
 fn a_hop_operands_position_counts_per_source_node() {
@@ -818,7 +818,7 @@ fn the_lightest_walk_honours_every_brace() {
         q(r#"(->leg){;15_h}{*_EUR}[::code = "V"]? | $-:total"#),
         "105_EUR"
     );
-    // a count brace: no walk of one hop reaches T (it answered the
+    // a count brace: no walk of one step reaches T (it answered the
     // walk of two)
     assert_eq!(q(r#"(->leg){;1}{*_EUR}[::code = "T"]? | $-:total"#), "");
     // a floor: the walk into X under it is not the answer
@@ -861,7 +861,7 @@ fn the_lightest_walk_honours_every_brace() {
 /// The set walk keeps one arrival per node, so it runs only where no
 /// arrival can be told from another (the review, graph B2 and B3): a
 /// guard that reads the walk makes the walk exact, and so does an
-/// alternative of several hops.
+/// alternative of several steps.
 #[test]
 fn the_set_walk_is_for_guards_and_groups_it_cannot_change() {
     let d = legs("setwalk");
@@ -1873,8 +1873,8 @@ fn a_reach_selector_per_brace_breaks_the_ties() {
         )),
         by_q
     );
-    // a count brace with a selector selects by the hops
-    let hops = r#"| %(route = (@. | join(" > ")); via = $-; h = $-:hops)"#;
+    // a count brace with a selector selects by the steps
+    let hops = r#"| %(route = (@. | join(" > ")); via = $-; h = $-:steps)"#;
     assert_eq!(
         q(&format!(
             r#"(->* .(::code)){{1;3}}?{{*_h}}[::code = "T"]? {hops}"#
@@ -2153,7 +2153,7 @@ fn a_levelled_column_is_named_by_its_path_in_the_options() {
 
 /// The review's syntax B13: a compound unit as the unit trait's word.
 /// `header` answers `:Speed<_km/h>`, and that text was refused
-/// ("close with '>': '<_km>'"), the slash read as a hop. It is one
+/// ("close with '>': '<_km>'"), the slash read as a step. It is one
 /// word, where the unit trait stands; and a unit the query does not
 /// know is refused by name in a literal's header, where the list was
 /// read again as a row.
@@ -2197,7 +2197,7 @@ fn a_compound_unit_is_the_unit_traits_word() {
 }
 
 /// Two rows of the review's syntax table. `sh(` was refused as the
-/// retired command wherever it stood: `sh` as a hop's name before a
+/// retired command wherever it stood: `sh` as a step's name before a
 /// group and as a fragment's name are names like any other (B12).
 /// And a constructor right after a comment was refused as glued,
 /// the comment's `)` standing before it: a comment is whitespace
@@ -2315,7 +2315,7 @@ fn the_navop_wildcard_hands_its_edges_over() {
             ],
         )
     };
-    // one thread per edge, as the link hop has them
+    // one thread per edge, as the link step has them
     assert_eq!(q(r#"--leg[::code = "T"] | $-::id"#), "1\n2");
     assert_eq!(q(r#"~leg[::code = "T"] | $-::id"#), "1\n2");
     assert_eq!(q(r#"~*[::code = "T"] | $-::fare"#), "9\n4");

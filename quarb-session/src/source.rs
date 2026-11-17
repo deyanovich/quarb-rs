@@ -424,7 +424,7 @@ fn document_text(kind: &str, bytes: Option<&[u8]>) -> Result<TextModel> {
 }
 
 /// The composing layer around a source (spec: Grafting): grafting on
-/// demand only (`graft(NOTATION)`, a `<NOTATION>` trait at a hop),
+/// demand only (`graft(NOTATION)`, a `<NOTATION>` trait at a step),
 /// the leaves as they were; around a relational source the whole
 /// layer, so a text column that holds JSON walks as a subtree, as
 /// the native opener mounts one.

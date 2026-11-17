@@ -296,7 +296,7 @@ impl ExternalRef {
 /// what it applied; the engine tests the rest.
 #[derive(Debug, Clone)]
 pub struct StepPlan<'a> {
-    /// The axis: a child hop or a descendant search.
+    /// The axis: a child step or a descendant search.
     pub axis: PlanAxis,
     /// The name the step matches, when it is one literal name.
     pub name: Option<&'a str>,
@@ -666,7 +666,7 @@ impl Estimate {
     }
 
     /// The estimate a catalogued source gives a step at a literal
-    /// `scope`, narrowing to the path the plan records: a bare hop
+    /// `scope`, narrowing to the path the plan records: a bare step
     /// by name is one entry when the catalog finds it (and costs
     /// nothing; the step that reads under it is priced by that
     /// entry's own catalog) and may read the whole when it does not
@@ -852,7 +852,7 @@ pub fn arena_estimate<A: AstAdapter + ?Sized>(
 }
 
 /// [`AstAdapter::select`]'s default, through the individual hooks:
-/// a child hop by `children_named`; a descendant search by
+/// a child step by `children_named`; a descendant search by
 /// `descendants_where` when the plan leads with an equality the
 /// adapter indexes, else `descendants_named`. A wrapper that
 /// translates node ids forwards `select` to its inner adapter and
@@ -968,7 +968,7 @@ pub fn value_kind(v: &crate::Value) -> &'static str {
 ///   `aliased_metadata`.
 /// - **References**, three protocols the engine consults in this
 ///   order. *Materialized edges*: `links` / `backlinks` (the `->` /
-///   `<-` hops) with `link_property` and the `prefetch_links`
+///   `<-` steps) with `link_property` and the `prefetch_links`
 ///   batching hint. *Property resolution* (`::prop-->`, `-->`,
 ///   `<--`): `resolve`, `ref_property`, `ref_label`,
 ///   `resolve_needs_label`, `reverse_resolve`, `reverse_label`,
@@ -1195,7 +1195,7 @@ pub trait AstAdapter {
     }
 
     /// The children of `node` whose edge name is exactly `name` —
-    /// the engine's fast path for name-matcher child hops. The
+    /// the engine's fast path for name-matcher child steps. The
     /// default filters [`children`](Self::children); an adapter
     /// whose containers cannot be enumerated (permission-scoped or
     /// unbounded remote trees) overrides this with a direct,
@@ -1218,7 +1218,7 @@ pub trait AstAdapter {
     /// Whether `node` answers to `name` as a literal spelling
     ///. The default is canonical equality. An adapter
     /// may declare per-node aliases — a social feed spelling a
-    /// handle `@alice` while the stripped `alice` is the hop name —
+    /// handle `@alice` while the stripped `alice` is the step name —
     /// and the engine consults this wherever a *literal* name is
     /// matched, on every axis, so one override keeps `/@alice` and
     /// `//@alice` in agreement. `:name` stays canonical (locators
@@ -1318,7 +1318,7 @@ pub trait AstAdapter {
     /// The edges of the graph as a table (spec: The graph as a
     /// table, The graph library): what `edges` collects and the
     /// graph library reads, from `node` outward. By default the link
-    /// rows; a level whose hop lands inside the target — the web's
+    /// rows; a level whose step lands inside the target — the web's
     /// fragment link, which `links` lands on the section — reports
     /// the edge to the target node itself, so that the induced
     /// subgraph of the pages carries it and the stored rank's graph
@@ -1338,12 +1338,12 @@ pub trait AstAdapter {
     /// Whether the links into `node` are ones this source cannot walk
     /// back (spec: The adapter contract): it answers `links` and
     /// provides no `backlinks`, as a document store whose references
-    /// live in the referring documents does. A hop that needs the
+    /// live in the referring documents does. A step that needs the
     /// backward direction there (`<-`, `--`, the navop wildcard,
     /// `edges` over any of them) is refused, the refusal naming what
     /// the source lacks, rather than answered with an empty set that
     /// would read as "nothing points here". `label` is the one label
-    /// the hop names when it names exactly one, `None` for a
+    /// the step names when it names exactly one, `None` for a
     /// wildcard, a pattern or a selection: a layer that walks some
     /// labels back itself (a model's declared references over such a
     /// source) answers for those and hands the rest down. A source
@@ -1354,7 +1354,7 @@ pub trait AstAdapter {
     }
 
     /// Whether the link from `source` under `label` is a reference
-    /// an edge declaration consumed: a bare wildcard hop (`->*`,
+    /// an edge declaration consumed: a bare wildcard step (`->*`,
     /// `<-*`, `--*`, the crosslink part of `~`) skips it, the label
     /// named (`<-origin`) still walks it (spec: Model Files, Edge
     /// rows). A model's `edge /flights/*: ::origin -- ::dest`
@@ -1712,7 +1712,7 @@ pub trait AstAdapter {
 
     /// A declared measure's values for `nodes`, the declared scope
     /// entire in the engine's order, once the engine has found the
-    /// command's hop, options and context to be the declared ones:
+    /// command's step, options and context to be the declared ones:
     /// one value per node, or one table for a table-answering
     /// command. `None` declines, and the engine computes.
     fn graph_measure(

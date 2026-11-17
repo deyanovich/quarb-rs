@@ -33,7 +33,7 @@ pub enum PageKind {
     /// A link target that is no page of the site — a file (a PDF,
     /// an image, an archive) or another host's page — kept as a node
     /// so `//page[->link<pdf>]` and `<-link` from it answer (spec:
-    /// Text Readings, the web reading). Not a `//page`.
+    /// Quarb Readings, the web reading). Not a `//page`.
     Resource,
 }
 
@@ -51,7 +51,7 @@ impl PageKind {
 
     /// Whether a row of kind `have` answers a walk for `want`: its
     /// own kind only. A redirect stands for a page and is not one
-    /// (spec: Text Readings, the web reading): `//page` leaves the
+    /// (spec: Quarb Readings, the web reading): `//page` leaves the
     /// stubs out, `//redirect` reaches them.
     pub fn answers_kind(have: PageKind, want: PageKind) -> bool {
         have == want
@@ -167,7 +167,7 @@ pub struct LinkRow {
     /// redlink), or a same-site path no page answers to.
     pub red: bool,
     /// The edge's label, read off the page's standard markers (spec:
-    /// Text Readings, the web reading): `link` for an anchor in the
+    /// Quarb Readings, the web reading): `link` for an anchor in the
     /// content, `navbar` (the header, a nav that is no breadcrumb),
     /// `breadcrumb`, `footer`, `altlang` (`<link rel="alternate"
     /// hreflang>`), `pdf` / `feed` (an alternate by its type),

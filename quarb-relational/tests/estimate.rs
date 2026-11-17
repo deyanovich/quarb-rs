@@ -72,7 +72,7 @@ fn the_estimator_is_asked_with_the_equalities_and_remembered() {
         seen.borrow().as_slice(),
         [None, Some("\"customer\" = 'Emma'".to_string())]
     );
-    // Not under a table: not the estimator's. A named hop is a row
+    // Not under a table: not the estimator's. A named step is a row
     // by key: at most one, the estimator asked for the keyed read.
     assert!(model.estimate(&[], &whole).is_none());
     let named = StepPlan {

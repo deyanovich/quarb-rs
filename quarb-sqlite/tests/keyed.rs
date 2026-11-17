@@ -1,4 +1,4 @@
-//! Hops read by key: a lazily opened database answers `-->`, `->`,
+//! Steps read by key: a lazily opened database answers `-->`, `->`,
 //! `<-`, `<--` and `/table/KEY` from the rows they land on, never
 //! from a whole table it was not asked to list — and answers
 //! exactly as the eagerly loaded one does.
@@ -159,7 +159,7 @@ fn a_pushed_down_filter_lists_only_and_hops_stay_exact() {
         let l = SqliteAdapter::open_filtered(&path, table, where_sql).unwrap();
         assert_eq!(show(&l, q), show(&e, q), "{q}");
     }
-    // the planner agrees to prefilter beside hops for a keyed adapter…
+    // the planner agrees to prefilter beside steps for a keyed adapter…
     let keyed = |q: &str| quarb_sql::partial_pushdown_keyed(q, Some(quarb_sql::Dialect::Sqlite));
     assert!(keyed("/staff/*[::id < 3]<-boss").is_ok());
     assert!(keyed("/books/*[::id < 4]::author_id-->::name").is_ok());

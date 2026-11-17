@@ -2330,7 +2330,7 @@ fn expr_command_at<H: Host>(
                 return vec![c];
             }
             let scope = c.scope(group.or(Some(i + 1)), peers, outer);
-            // An operand that yields several values is a hop in
+            // An operand that yields several values is a step in
             // value position: each value is its own row, as each
             // target of a navigation is.
             if c.members.is_empty() {
@@ -3037,7 +3037,7 @@ pub(crate) fn map_cells_command<H: Host>(
 /// the notation named, or as it declares itself when none is, and
 /// the thread then stands on the parsed document's root in
 /// navigation mode, as a filing leaves it, its register and origins
-/// kept, so a hop walks on into what a program or a column handed
+/// kept, so a step walks on into what a program or a column handed
 /// over as text. A text that does not parse as asked refuses the
 /// query; a null topic stays null; a topic that is no text refuses
 /// naming its kind.
@@ -3371,7 +3371,7 @@ pub(crate) fn expr_push_command<H: Host>(
             // it is: the topic before the push is the topic after
             // it (spec: Def Capsa, draft 154). The PUSH is still
             // what returns the thread to navigation mode: a
-            // following hop is legal and rebuilds the capsae, the
+            // following step is legal and rebuilds the capsae, the
             // filed value safe in the register (spec: Execution
             // Modes).
             c

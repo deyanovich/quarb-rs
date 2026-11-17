@@ -20,7 +20,7 @@
 //! `path/field.json` — the cheapest possible request (one
 //! scalar, no shallow walk of siblings). This is a deliberate
 //! ergonomic divergence from `quarb-json` (where fields are only
-//! child hops): on a remote tree, `/items/42::score` should cost
+//! child steps): on a remote tree, `/items/42::score` should cost
 //! one tiny request, and does.
 //!
 //! **References resolve by hint.** RTDB has no schema, so `-->`
@@ -500,7 +500,7 @@ impl AstAdapter for FirebaseAdapter {
     }
 
     /// The declared references are read off the node they leave,
-    /// and nothing here records what points at a node: the hop back
+    /// and nothing here records what points at a node: the step back
     /// is refused rather than answered empty (spec: The adapter
     /// contract). With no reference declared the source has no links
     /// at all, and the empty answer is the true one.

@@ -208,7 +208,7 @@ fn correlated_join_navigates_from_context() {
 }
 
 /// A key that begins with `@` (kaiv canonicalizes array namespaces
-/// this way) navigates as an ordinary hop name after `/` or `//`.
+/// this way) navigates as an ordinary step name after `/` or `//`.
 #[test]
 fn at_leading_hop_names() {
     let doc = r#"{ "@servers": [ {"host": "web1"}, {"host": "web2"} ] }"#;

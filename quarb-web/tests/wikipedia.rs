@@ -192,7 +192,7 @@ fn the_path_tree() {
     let a = WebAdapter::new(store);
     assert_eq!(lines(&a, "/sites/*::host"), ["it.example.org"]);
     // the four articles; the redirect stub stands for one and is no
-    // page (spec: Text Readings, the web reading)
+    // page (spec: Quarb Readings, the web reading)
     assert_eq!(lines(&a, "//page @| count"), ["4"]);
     assert_eq!(lines(&a, "//redirect @| count"), ["1"]);
     assert_eq!(

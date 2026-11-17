@@ -498,7 +498,7 @@ impl AstAdapter for ImapAdapter {
     }
 
     /// Headers, lowercased (one fetch per message, cached). A
-    /// header that occurs more than once (`Received` on every hop,
+    /// header that occurs more than once (`Received` on every step,
     /// several `Cc` lines) is the list of its occurrences, in the
     /// message's own order, as in the Maildir adapter (ruling
     /// 2026-11-14 for 0.65; it read as its first occurrence).

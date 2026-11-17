@@ -1,5 +1,5 @@
 //! Position lists in brackets (spec: Index Predicates): `[2; 4; 5]`,
-//! `[1; 3..4; -1]` on a hop, on the pipe, on the aggregate pipe and
+//! `[1; 3..4; -1]` on a step, on the pipe, on the aggregate pipe and
 //! glued to a value; brackets that look at no node (`[@(2; 4)]`,
 //! `[$.pos]`, `[$.n]`) read as positions at run time; two positions
 //! joined by `||` / `&&` are refused with the list spelling.
@@ -40,7 +40,7 @@ fn a_position_list_on_a_hop_keeps_the_hops_order_each_once() {
     );
     assert_eq!(names("/rows/*[2; 2] | ::name"), ["Emma"]);
     assert_eq!(names("/rows/*[9; 2] | ::name"), ["Emma"]);
-    // a list after the hop's filtering, as `[n]` is
+    // a list after the step's filtering, as `[n]` is
     assert_eq!(
         names("/rows/*[::pages > 400][1; -1] | ::name"),
         ["Iliad", "Odyssey"]

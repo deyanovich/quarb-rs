@@ -1,7 +1,7 @@
 //! A model over a base that cannot walk its links back (spec: The
 //! adapter contract): what the model declares it walks back
 //! itself, under the declaration's own label; every other backward
-//! hop needs the base's backlinks and is refused as over the base
+//! step needs the base's backlinks and is refused as over the base
 //! alone.
 
 use quarb::{AstAdapter, NodeId};
@@ -109,7 +109,7 @@ fn any_other_backward_hop_is_the_bases_and_refused() {
 fn the_edges_table_reads_the_sets_forward_links() {
     let a = library("ref /books/*::author --> authors as wrote;");
     // (the base's own link stands under the property's name too; the
-    // wildcard is the hop that would have needed it walked back)
+    // wildcard is the step that would have needed it walked back)
     let into = values(&a, "/*/* @| edges(<-*) | #(:source; :target) @| csv");
     assert_eq!(
         into,

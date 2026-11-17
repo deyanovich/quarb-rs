@@ -347,7 +347,7 @@ impl CwlAdapter {
 
     /// One bounded FilterLogEvents sweep of a group, oldest first.
     /// The group's events in the mount's window, `cut` to a prefix
-    /// where a hop keeps one (the pushdown scanning round,
+    /// where a step keeps one (the pushdown scanning round,
     /// 2026-11-06): the paging stops at the first `cut` events, the
     /// mount's `limit=` still the ceiling.
     fn fetch_events(&self, group: &str, cut: Option<usize>) -> Result<Vec<Event>, CwlError> {
@@ -554,7 +554,7 @@ impl AstAdapter for CwlAdapter {
     /// `/group/* @| [..k]` on a group not yet listed fetches k events
     /// and no more (the pushdown scanning round, 2026-11-06); the
     /// nodes stand on their own, the group's listing still to come
-    /// when a later hop asks for it whole.
+    /// when a later step asks for it whole.
     fn select(&self, from: NodeId, plan: &quarb::StepPlan<'_>) -> Option<quarb::Selection> {
         let k = plan.limit?;
         if plan.axis != quarb::PlanAxis::Child

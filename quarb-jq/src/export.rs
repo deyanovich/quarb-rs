@@ -6,7 +6,7 @@
 //! cannot express. Fragments and pure macros expand before
 //! reflection, so they translate for free.
 //!
-//! The translatable subset: child hops (`/name` → `.name`, `/*` →
+//! The translatable subset: child steps (`/name` → `.name`, `/*` →
 //! `.[]`), terminal value projections (bare `::`), predicates
 //! (comparisons, `and`/`or`/`not`, truthiness, `=~` → `test()`,
 //! `*=` → `contains()`, indexes and ranges), unions (`,`),
@@ -14,7 +14,7 @@
 //! the array-collect idiom (`count` → `length`, `sum` → `add`, …).
 //!
 //! Notes report the standing divergences (1-based vs 0-based
-//! indexing is converted; Quarb positions within the whole hop
+//! indexing is converted; Quarb positions within the whole step
 //! result; `0`/`""` truthiness).
 
 use crate::{JqError, Translation};
@@ -120,7 +120,7 @@ impl Exporter {
         // (`/a::head:year || /b::title`) has no translation here
         if self.kid(b, "field").is_some() || self.kid(b, "value-meta").is_some() {
             return Err(JqError::Unsupported(
-                "a field read after a projection ('::head:year'; JSON fields are child hops: '/head/year::')"
+                "a field read after a projection ('::head:year'; JSON fields are child steps: '/head/year::')"
                     .into(),
             ));
         }
@@ -131,7 +131,7 @@ impl Exporter {
                 "property" if self.prop(p, "key").is_none() => {}
                 other => {
                     return Err(JqError::Unsupported(format!(
-                        "the {other} projection '::{}' (JSON fields are child hops: '/name::')",
+                        "the {other} projection '::{}' (JSON fields are child steps: '/name::')",
                         self.prop_s(p, "key")
                     )));
                 }
@@ -178,7 +178,7 @@ impl Exporter {
                 let name = self.prop_s(s, "matcher");
                 if !positional.is_empty() {
                     return Err(JqError::Unsupported(
-                        "a positional predicate on a named hop".into(),
+                        "a positional predicate on a named step".into(),
                     ));
                 }
                 match quarb::item_index(&name) {
@@ -223,7 +223,7 @@ impl Exporter {
     fn positional(&mut self, p: NodeId) -> Result<String, JqError> {
         self.notes.push(
             "positional: Quarb is 1-based and positions within the whole \
-             hop result; jq is 0-based per array"
+             step result; jq is 0-based per array"
                 .to_string(),
         );
         match self.prop_s(p, "kind").as_str() {
@@ -346,7 +346,7 @@ impl Exporter {
                     && !(self.prop_s(p, "kind") == "property" && self.prop(p, "key").is_none())
                 {
                     return Err(JqError::Unsupported(
-                        "a named projection in a predicate (JSON fields are child hops)".into(),
+                        "a named projection in a predicate (JSON fields are child steps)".into(),
                     ));
                 }
                 Ok(if out.is_empty() { ".".into() } else { out })

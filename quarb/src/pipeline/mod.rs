@@ -93,7 +93,7 @@ impl<X: Attachment> Thread<X> {
             view: self.ext.view(),
             // the walk that ended here, for the one command after
             // it; else the edge the thread most recently walked, a
-            // plain hop's (spec: Arrived-by Edge)
+            // plain step's (spec: Arrived-by Edge)
             crossing: self
                 .ext
                 .walk_exit()
@@ -141,11 +141,11 @@ pub(crate) struct Scope<'a, X: Attachment> {
     /// attachment itself.
     pub(crate) view: X::View,
     /// The move being evaluated, before it is the thread's state (the
-    /// graph: the edge a hop is crossing).
+    /// graph: the edge a step is crossing).
     pub(crate) crossing: Option<&'a X::Crossing>,
     /// The walk the crossing belongs to, where one does (a group's
     /// predicate or push, the one command after a group): its facts
-    /// for `$-:round`, `$-:hops`, `$-:total`.
+    /// for `$-:round`, `$-:steps`, `$-:total`.
     pub(crate) walk: Option<&'a X::Walk>,
     /// The witness under trial, where a correlation search evaluates
     /// a candidate binding; `None` reads the thread's own.

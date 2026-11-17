@@ -111,7 +111,7 @@ fn the_star_binds_every_witness() {
 
 /// The threads of a starred correlation stand on one node and
 /// differ by their witness: they stay apart at the gate and after a
-/// hop, and the commands of the context see every one.
+/// step, and the commands of the context see every one.
 #[test]
 fn the_threads_differ_by_their_witness() {
     assert_eq!(values(&format!("/owners/* <=>* {ON} @| count")), ["4"]);
@@ -119,7 +119,7 @@ fn the_threads_differ_by_their_witness() {
         values(&format!("/owners/* <=>* {ON} | ::team")),
         [r#""core""#, r#""core""#, r#""edge""#, r#""edge""#]
     );
-    // a hop from each thread keeps its witness, and the threads
+    // a step from each thread keeps its witness, and the threads
     // that arrive at one node do not merge
     assert_eq!(
         values(&format!(

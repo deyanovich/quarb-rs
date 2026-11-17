@@ -381,10 +381,10 @@ fn the_braces_stack_and_a_rule_folds_the_legs() {
     let e = no("/stations/*[::id = 1](->stage){;10_parasang}{;5_km} | ::name");
     assert!(e.contains("two braces measure m"), "{e}");
     let e = no("/stations/*[::id = 1](->stage){1;2}{3;4} | ::name");
-    assert!(e.contains("two braces measure the hop count"), "{e}");
+    assert!(e.contains("two braces measure the step count"), "{e}");
     let e = no("/stations/*[::id = 1](->stage){abs:3} | ::name");
     assert!(
-        e.contains("is a cost function, and this brace counts hops"),
+        e.contains("is a cost function, and this brace counts steps"),
         "{e}"
     );
     let e = no("/stations/*[::id = 1](->stage)+{3} | ::name");

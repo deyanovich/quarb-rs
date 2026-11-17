@@ -127,7 +127,7 @@ impl PostgresAdapter {
         })?;
         // One row source with an optional WHERE: the whole read, the
         // listing under a pushed-down filter, and the keyed read a
-        // hop makes (`WHERE key IN (…)`) all derive from it.
+        // step makes (`WHERE key IN (…)`) all derive from it.
         let rt = std::rc::Rc::new(rt);
         let client = std::rc::Rc::new(client);
         let (rt2, client2) = (rt.clone(), client.clone());

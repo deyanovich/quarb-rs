@@ -527,7 +527,7 @@ fn autoindex_labels_the_rows() {
         "%(ix = 1; Sex = \"female\"; Class = 1; Age = 38; Fare = 71.5)"
     );
     let e = err(&d, &format!("{T} | autoindex(--start=1_m)"));
-    assert!(e.contains("the start 1_m takes a step"), "{e}");
+    assert!(e.contains("the start 1_m takes a stride"), "{e}");
     let e = err(&d, &format!("{T} | autoindex(--start=2001-01-01 --step=2)"));
     assert!(e.contains("of another kind than the start"), "{e}");
     let e = err(&d, "= 5 | autoindex");

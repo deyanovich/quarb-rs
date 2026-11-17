@@ -20,7 +20,7 @@ use crate::syntax::ast::{
 use crate::value::{Table, Value};
 use std::collections::{HashMap, HashSet};
 
-/// Which edges `edges` collects, as the hop its operand spells.
+/// Which edges `edges` collects, as the step its operand spells.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Collect {
     /// `->label`: the outgoing stored edges, directed.
@@ -34,7 +34,7 @@ pub enum Collect {
     Any,
 }
 
-/// One collecting hop of an `edges` / `pagerank` call: the axis,
+/// One collecting step of an `edges` / `pagerank` call: the axis,
 /// the label it names (`None` for a wildcard) and the name algebra
 /// on it (`->(a || !b)`).
 #[derive(Clone, Debug)]
@@ -43,26 +43,26 @@ pub struct Hop {
     pub label: Option<String>,
     pub labels: Vec<LabelClause>,
     /// The step as written when it carries predicates or traits
-    /// (spec: The graph library, draft.191): a hop operand takes
-    /// exactly the predicate a walk's hop takes, evaluated once per
+    /// (spec: The graph library, draft.191): a step operand takes
+    /// exactly the predicate a walk's step takes, evaluated once per
     /// edge with the node arrived at as the topic and `$-` the edge.
     pub filter: Option<Box<crate::syntax::ast::Step>>,
 }
 
 impl Hop {
-    /// A bare wildcard (`->*`, `--*`, `~*`): the hop that skips the
+    /// A bare wildcard (`->*`, `--*`, `~*`): the step that skips the
     /// references an edge declaration consumed (spec: Edge rows).
     fn wild(&self) -> bool {
         self.label.is_none() && self.labels.is_empty()
     }
 
-    /// Whether the hop's explicit label admits `label`.
+    /// Whether the step's explicit label admits `label`.
     fn named(&self, label: &str) -> bool {
         self.label.as_deref().is_none_or(|l| l == label)
     }
 
-    /// The edges of `edges` (label, other end, row) the hop walks,
-    /// read as the crosslink hop reads its label algebra over
+    /// The edges of `edges` (label, other end, row) the step walks,
+    /// read as the crosslink step reads its label algebra over
     /// single-label edges (spec: the edge model): a positive clause
     /// a class of edges, the conjunction of classes the edges of any
     /// class whose other end every class reaches, a wholly negated
@@ -99,7 +99,7 @@ impl Hop {
     }
 }
 
-/// The `edges` call read: the hops (one, or the alternatives of a
+/// The `edges` call read: the steps (one, or the alternatives of a
 /// group, `(->road|->rail)`) and the `--weight` option.
 #[derive(Clone, Debug)]
 pub struct EdgesSpec {
@@ -126,7 +126,7 @@ pub enum GraphTable {
     Nodes,
     /// `@| graph:pagerank(->link; --damping=d --rounds=n
     /// --weight=…)` (spec: The graph library) — the rank over the
-    /// induced subgraph by the hop's edges, a float per node (the
+    /// induced subgraph by the step's edges, a float per node (the
     /// bare `@| pagerank` table of 0.44 is retired).
     Pagerank {
         spec: EdgesSpec,
@@ -134,8 +134,8 @@ pub enum GraphTable {
         rounds: usize,
     },
     /// `@| graph:distance(->*; --from=NODES; --weight=…)`: each
-    /// node's shortest distance from the seed set along the hop —
-    /// hops, or the weights summed.
+    /// node's shortest distance from the seed set along the step —
+    /// steps, or the weights summed.
     Distance {
         spec: EdgesSpec,
         from: Operand,
@@ -204,7 +204,7 @@ pub enum GraphTable {
 }
 
 /// A graph a source declares it maintains measures over (spec: Graph
-/// Declarations): the scope path, the hop, and each measure as
+/// Declarations): the scope path, the step, and each measure as
 /// written in the declaration (`pagerank`,
 /// `betweenness(--normalized)`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -371,7 +371,7 @@ impl GraphTable {
                 // `--weight=::prop` is retired (spec: the edge model,
                 // ruling 2026-11-07): a property is a weight only where
                 // the model declares it one, and a weight is read by
-                // its unit; a count of hops is the count form
+                // its unit; a count of steps is the count form
                 Arg::Opt {
                     name: opt,
                     value:
@@ -384,7 +384,7 @@ impl GraphTable {
                     return Err(format!(
                         "{shown}: --weight=::{prop} names a property, and a property is no weight: \
                          declare it one in the model ('edge …: ::a -- ::b weights(::{prop});') and \
-                         read it by its unit (--weight=km); a count of hops needs no weight"
+                         read it by its unit (--weight=km); a count of steps needs no weight"
                     ));
                 }
                 Arg::Opt { name: opt, .. } if opt == "--weight" || opt == "-w" => {
@@ -422,15 +422,15 @@ impl GraphTable {
                             "graph:distance: '{opt}' is no option; the options are '--from=NODES' and '--weight=UNIT'"
                         )
                     } else if kcore {
-                        format!("graph:kcore: '{opt}' is no option; it takes the hop alone")
+                        format!("graph:kcore: '{opt}' is no option; it takes the step alone")
                     } else if conncomp {
-                        format!("graph:conncomp: '{opt}' is no option; it takes the hop alone")
+                        format!("graph:conncomp: '{opt}' is no option; it takes the step alone")
                     } else if betweenness {
                         format!(
                             "graph:betweenness: '{opt}' is no option; the options are '--normalized', '--edges' and '--weight=UNIT'"
                         )
                     } else if undirected {
-                        format!("{shown}: '{opt}' is no option; it takes the hop alone")
+                        format!("{shown}: '{opt}' is no option; it takes the step alone")
                     } else if route {
                         format!(
                             "graph:route: '{opt}' is no option; the options are '--from=NODES' and '--weight=UNIT'"
@@ -466,8 +466,8 @@ impl GraphTable {
                 }) if spec.hops.is_empty() => match steps.as_slice() {
                     [PathElem::Step(step)] => spec.hops.push(hop_of(step)?),
                     // `(->road|->rail)`: the alternatives of a plain
-                    // group, each one hop — the table forms; the
-                    // library takes one hop (label algebra inside it)
+                    // group, each one step — the table forms; the
+                    // library takes one step (label algebra inside it)
                     [PathElem::Group(g)]
                         if !library && g.quant.min == 1 && g.quant.max == Some(1) =>
                     {
@@ -480,7 +480,7 @@ impl GraphTable {
                     }
                     [PathElem::Group(_)] if library => {
                         return Err(format!(
-                            "{shown} takes one hop (->link, --road, ->*, ~*, ->(a || b)); write the labels' algebra inside it, not an alternation of hops"
+                            "{shown} takes one step (->link, --road, ->*, ~*, ->(a || b)); write the labels' algebra inside it, not an alternation of steps"
                         ));
                     }
                     _ => return Err(hop_message()),
@@ -606,7 +606,7 @@ impl GraphTable {
         }
     }
 
-    /// The hop and the weight, for the commands that have them.
+    /// The step and the weight, for the commands that have them.
     pub(crate) fn spec(&self) -> Option<&EdgesSpec> {
         match self {
             GraphTable::Nodes => None,
@@ -632,7 +632,7 @@ impl GraphTable {
         matches!(self, GraphTable::Betweenness { .. })
     }
 
-    /// One text for the command, its hop and its options, equal
+    /// One text for the command, its step and its options, equal
     /// exactly when a declared measure and a written command agree
     /// (spec: Graph Declarations).
     pub(crate) fn fingerprint(&self) -> String {
@@ -663,7 +663,7 @@ impl GraphTable {
 }
 
 fn hop_message() -> String {
-    "edges takes the collecting hop as its operand: edges(->road) the outgoing road edges, \
+    "edges takes the collecting step as its operand: edges(->road) the outgoing road edges, \
      edges(<-road) the incoming, edges(--road) either way, edges(~*) every edge the navop \
      wildcard walks; bare edges is edges(->*)"
         .to_string()
@@ -693,8 +693,8 @@ impl Row {
 }
 
 /// The stored edges of the induced subgraph of `nodes` that the
-/// spec's hops collect, each once, in document order; whether the
-/// collection is directed (every hop out or in).
+/// spec's steps collect, each once, in document order; whether the
+/// collection is directed (every step out or in).
 fn collect_rows(
     adapter: &impl AstAdapter,
     nodes: &[NodeId],
@@ -704,8 +704,8 @@ fn collect_rows(
     let inside: HashSet<NodeId> = nodes.iter().copied().collect();
     let mut rows: Vec<Row> = Vec::new();
     let mut seen: HashSet<(NodeId, String, NodeId, Option<NodeId>)> = HashSet::new();
-    // a candidate edge: the row and the node the hop arrives at,
-    // the topic of the hop's predicate
+    // a candidate edge: the row and the node the step arrives at,
+    // the topic of the step's predicate
     let mut push = |rows: &mut Vec<Row>,
                     from: NodeId,
                     label: String,
@@ -829,12 +829,12 @@ fn collect_rows(
                     ));
                 }
             }
-            // The hop's predicate and traits, as a walk applies them
+            // The step's predicate and traits, as a walk applies them
             // from this node: the node arrived at is the topic, `$-`
             // the edge (spec: The graph library, draft.191), and a
             // positional predicate counts among this node's edges
             // (ruling 2026-11-10: `edges(->*[..2])` keeps two edges
-            // per source node, as the hop keeps them in a path; the
+            // per source node, as the step keeps them in a path; the
             // predicates ran once over the edges of all the nodes
             // together, so it kept two edges in all).
             if let Some(step) = &hop.filter {
@@ -1109,7 +1109,7 @@ pub(crate) fn route_values(
         .collect())
 }
 
-/// `graph:closeness`: each node's closeness along the hop as named
+/// `graph:closeness`: each node's closeness along the step as named
 /// (spec: The graph library).
 pub(crate) fn closeness_values(
     adapter: &impl AstAdapter,
@@ -1191,7 +1191,7 @@ pub(crate) fn triangles_values(
 }
 
 /// `graph:modularity`: the modularity of the partition `part` (a
-/// part index per node) over the hop's edges (spec: The graph
+/// part index per node) over the step's edges (spec: The graph
 /// library), one float for the context.
 pub(crate) fn modularity_value(
     adapter: &impl AstAdapter,
@@ -1318,7 +1318,7 @@ pub(crate) fn nodes_table(adapter: &impl AstAdapter, nodes: &[NodeId]) -> Table 
 }
 
 /// The rank of each node of the context over the induced subgraph by
-/// the hops' edges (directed as written, an undirected hop both
+/// the steps' edges (directed as written, an undirected step both
 /// ways), one per node in the order given (spec: The graph library):
 /// the power iteration of `quarb-lib-graph`, the dangling mass
 /// spread uniformly, a self-loop ignored, a repeated edge once, or
@@ -1403,7 +1403,7 @@ fn index_edges(
 }
 
 /// `@| graph:distance`: each node's shortest distance from the seeds
-/// (spec: The graph library) — an integer in hops; under
+/// (spec: The graph library) — an integer in steps; under
 /// `--weight=UNIT` a quantity in that unit.
 /// A seed reads zero, a node no seed reaches null; a seed outside
 /// the context counts for nothing.
@@ -1446,7 +1446,7 @@ pub(crate) fn distance_values(
 }
 
 /// `@| graph:kcore`: each node's core number (spec: The graph
-/// library) over the distinct neighbours by the hop's edges, either
+/// library) over the distinct neighbours by the step's edges, either
 /// direction, an integer per node.
 pub(crate) fn kcore_values(
     adapter: &impl AstAdapter,
@@ -1464,7 +1464,7 @@ pub(crate) fn kcore_values(
 
 /// `@| graph:betweenness`: each node's betweenness centrality (spec:
 /// The graph library), Brandes over the induced subgraph — every
-/// ordered pair of other nodes under a directed hop, every unordered
+/// ordered pair of other nodes under a directed step, every unordered
 /// pair under an undirected one; `--normalized` divides by the
 /// number of pairs; `--weight` makes the shortest paths the shortest
 /// by weight.
@@ -1497,7 +1497,7 @@ pub(crate) fn betweenness_values(
 /// `@| graph:conncomp`: each node's connected component (spec: The
 /// graph library), numbered from 1 in the order of the components'
 /// first nodes — the strongly connected components under a directed
-/// hop, the connected components under an undirected one.
+/// step, the connected components under an undirected one.
 pub(crate) fn conncomp_values(
     adapter: &impl AstAdapter,
     nodes: &[NodeId],

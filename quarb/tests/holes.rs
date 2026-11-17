@@ -74,7 +74,7 @@ fn quasiquote_holes_untouched() {
     // the macro layer's `${$p}` splice carries no colon and stays
     // exactly as it was
     assert_eq!(
-        canon(r#"macro &hop($n): ^ | "/w{${$n}}"; /x&hop(2)/leaf::"#),
+        canon(r#"macro &step($n): ^ | "/w{${$n}}"; /x&step(2)/leaf::"#),
         "/x(/w){2}/leaf::"
     );
 }

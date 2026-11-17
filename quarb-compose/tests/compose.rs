@@ -150,6 +150,15 @@ fn dual_exposure_at_graft_root() {
         _ => panic!("expected values"),
     };
     assert_eq!(got, ["phone"]);
+    // and the names of those properties are among the file's
+    let names = match quarb::run("/'meta.json' | :props | ...", &a).unwrap() {
+        quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+        _ => panic!("expected values"),
+    };
+    assert!(
+        names.contains(&"device".to_string()) && names.contains(&"geo".to_string()),
+        "{names:?}"
+    );
 }
 
 /// Source leaves graft at the level the mount chose: the syntax

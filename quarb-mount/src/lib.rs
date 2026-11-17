@@ -18,7 +18,7 @@
 //!
 //! A mount may be *latent*: declared with its name, its target and
 //! an opener ([`Latent`]), and opened the first time a query reaches
-//! it — a hop by its name, a listing of the root's children, a
+//! it — a step by its name, a listing of the root's children, a
 //! reference landing on its declared identity. Laziness is
 //! unobservable: an unanchored `//x` or `/*` lists the root's
 //! children and so activates every declared mount before the
@@ -562,7 +562,7 @@ impl AstAdapter for MountAdapter {
     /// by mount name — matching what [`name`](Self::name) reports.
     fn children_named(&self, node: NodeId, name: &str) -> Vec<NodeId> {
         match self.decode(node) {
-            // A hop by name reaches that mount alone: it opens.
+            // A step by name reaches that mount alone: it opens.
             None => (0..self.mounts.len())
                 .filter(|&m| self.mounts[m].name == name)
                 .map(|m| self.encode(m, self.adapter(m).root()))

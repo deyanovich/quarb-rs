@@ -66,8 +66,8 @@ fn a_declared_edge_is_its_row() {
         ["Gates", "Euphrates", "Ephesus"]
     );
     // The row's cells are the edge's properties: `$-` for the
-    // command after a group's exit, `@-` (the final-hop edges, a
-    // list) after a plain hop.
+    // command after a group's exit, `@-` (the final-step edges, a
+    // list) after a plain step.
     assert_eq!(
         qua(
             &dir,
@@ -143,7 +143,7 @@ fn an_acyclic_edge_expands_by_node_and_refuses_a_cycle() {
         "{err}"
     );
     assert!(
-        err.contains("the walk from /stations/1 returns to /stations/1 after 3 hops"),
+        err.contains("the walk from /stations/1 returns to /stations/1 after 3 steps"),
         "{err}"
     );
 }
@@ -186,7 +186,7 @@ fn a_budget_walks_the_stages() {
     assert_eq!(
         qua(
             &dir,
-            "/stations/2(->stage){;200_parasang}[::name = \"Euphrates\"]? | $-:hops"
+            "/stations/2(->stage){;200_parasang}[::name = \"Euphrates\"]? | $-:steps"
         ),
         ["1"]
     );

@@ -122,8 +122,8 @@ fn positional_predicates() {
     );
 }
 
-/// `[n]` positions among the hop's per-source results. On a child
-/// hop this matches XPath exactly; on an abbreviated `//` hop it
+/// `[n]` positions among the step's per-source results. On a child
+/// step this matches XPath exactly; on an abbreviated `//` step it
 /// indexes the whole per-source descendant list (XPath positions
 /// within each parent), which the importer flags in its notes.
 #[test]

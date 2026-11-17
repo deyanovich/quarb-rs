@@ -44,7 +44,7 @@ fn a_name_expansion_is_a_whole_token() {
         ),
         "^ | .year-mean(^/row::year @| mean) | .pages-mean(^/row::pages @| mean) | %."
     );
-    // a hop and a property named by a value
+    // a step and a property named by a value
     assert_eq!(
         exp("macro &deep($g): q(/${$g}//*::${$g}); &deep(\"row\")"),
         "/row//*::row"

@@ -181,7 +181,7 @@ pub struct PlannedStep {
     /// the lowered conjuncts run engine-side.
     pub predicates: usize,
     /// The literal names from the root to the step's base, when
-    /// every step before it was a bare child hop by name; `None`
+    /// every step before it was a bare child step by name; `None`
     /// when the base is not known statically.
     pub scope: Option<Vec<String>>,
     /// Which conjuncts the adapter would apply from its catalog
@@ -193,7 +193,7 @@ pub struct PlannedStep {
 }
 
 impl PlannedStep {
-    /// A bare hop: one child by its literal name, nothing tested —
+    /// A bare step: one child by its literal name, nothing tested —
     /// the way into a container, which costs nothing to price and
     /// which no store estimates on its own.
     pub fn is_bare_hop(&self) -> bool {
@@ -225,7 +225,7 @@ pub struct BranchPlan {
 impl BranchPlan {
     /// The branch's cost: its steps' estimates composed in order
     /// ([`Estimate::then`]); unknown when a step that reads has no
-    /// estimate. A bare hop ([`PlannedStep::is_bare_hop`]) with
+    /// estimate. A bare step ([`PlannedStep::is_bare_hop`]) with
     /// none is free: the way into a container is not a read.
     pub fn estimate(&self) -> Option<Estimate> {
         let mut acc: Option<Estimate> = None;
@@ -536,7 +536,7 @@ fn plan_steps(
             pushed,
             estimate,
         });
-        // The base stays literal only through a bare child hop by
+        // The base stays literal only through a bare child step by
         // name.
         scope = match (
             axis,

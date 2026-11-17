@@ -3,7 +3,7 @@
 use quarb::{AstAdapter, NodeId, Value};
 
 /// A tiny social feed: the root holds handle-named accounts. The
-/// canonical hop name is the stripped `alice`; the source spelling
+/// canonical step name is the stripped `alice`; the source spelling
 /// `@alice` is a declared alias.
 struct Feed;
 

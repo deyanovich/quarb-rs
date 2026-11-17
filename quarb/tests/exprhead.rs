@@ -48,7 +48,7 @@ fn parens_keep_their_navigational_meanings() {
     canon("(/a/(x.rs|y.txt)|/b/z.rs)");
     // (mark anchors print in double parentheses)
     assert_eq!(canon("/a .m | $$.m/address"), "/a .m | $$.m/address");
-    assert!(refuse("(|/a)").contains("at least one hop"));
+    assert!(refuse("(|/a)").contains("at least one step"));
 }
 
 #[test]

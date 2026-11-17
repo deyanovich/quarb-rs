@@ -992,11 +992,11 @@ fn eval_operand_in<H: Host>(
                 let a = int(from, "start")?;
                 let b = int(to, "end")?;
                 let s = match step {
-                    Some(s) => int(s, "step")?,
+                    Some(s) => int(s, "stride")?,
                     None => 1,
                 };
                 if s == 0 {
-                    return Err("a range's step is not zero".into());
+                    return Err("a range's stride is not zero".into());
                 }
                 let s = match step {
                     // the written step is the direction
@@ -1432,7 +1432,7 @@ fn eval_operand_in<H: Host>(
                 .map(|c| c.topic.unwrap_or(Value::Bool(true)))
                 .collect()
         }
-        // `@-` — all final-hop crossings: labels bare, each edge's
+        // `@-` — all final-step crossings: labels bare, each edge's
         // property projected. Empty list where none.
         Operand::Edges { projection } => host.edges(scope, projection.as_ref()),
         Operand::Edge { projection } => host.edge(scope, projection.as_ref()),

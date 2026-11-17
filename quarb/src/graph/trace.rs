@@ -1,17 +1,17 @@
 //! Tracing: the `quarb/trace` payload for a query — every evaluation
 //! snapshot, the threads, the edges they walked (ribbons), and the
-//! next hop's candidates with verdicts (lookahead).
+//! next step's candidates with verdicts (lookahead).
 //!
-//! The trace is built by *replaying* the query one hop per thread
+//! The trace is built by *replaying* the query one step per thread
 //! with the evaluator's own navigation ([`navigate_paths`] for
-//! a hop, [`apply_command`] for a pipeline command), so nothing in
+//! a step, [`apply_command`] for a pipeline command), so nothing in
 //! the evaluator changes and the payload cannot disagree with it in
 //! kind — and it is checked against a plain evaluation at the end,
 //! so it cannot disagree in fact either. The corpus in the
 //! quarbopsis repo is the acceptance surface.
 //!
 //! Scope (what the corpus needed): one branch, no correlations, no
-//! marks or pushes; hops on every axis, one-alternative groups
+//! marks or pushes; steps on every axis, one-alternative groups
 //! (quantified walks), projections, per-capsa pipeline commands, whole-
 //! context aggregates. Anything else is [`QuarbError::unsupported`].
 
@@ -179,16 +179,16 @@ fn predicates_text(ps: &[Predicate]) -> Option<String> {
     Some(parts.join(" "))
 }
 
-fn step_record(i: usize, p: &PStep, staged: bool) -> qt::Step {
-    let mut r = qt::Step {
-        step: i as i64 + 1,
+fn stage_record(i: usize, p: &PStep, staged: bool) -> qt::Stage {
+    let mut r = qt::Stage {
+        stage: i as i64 + 1,
         expr: p.expr.clone(),
         staged,
         ..Default::default()
     };
     match &p.kind {
         PKind::Hop(s) => {
-            r.kind = "hop".into();
+            r.kind = "step".into();
             r.axis = Some(axis_text(&s.axis).into());
             if s.labels.is_empty() {
                 r.matcher = Some(unparse::matcher(&s.matcher));
@@ -359,7 +359,7 @@ impl<'a, A: AstAdapter> Tracer<'a, A> {
         path
     }
 
-    /// The edges a hop from `from` to `to` contributes to a thread's
+    /// The edges a step from `from` to `to` contributes to a thread's
     /// history (NOTES 002: walked traversal history, not root paths).
     fn hop_edges(&self, from: NodeId, to: NodeId, step: &Step, arrived: &[EdgeCtx]) -> Vec<Walked> {
         match &step.axis {
@@ -447,7 +447,7 @@ impl<'a, A: AstAdapter> Tracer<'a, A> {
         base
     }
 
-    /// A hop: every live thread forks over its candidates.
+    /// A step: every live thread forks over its candidates.
     fn hop(&mut self, at: i64, prev: &[Th], step: &Step) -> Result<Vec<Th>> {
         let bare = PathElem::Step(Step {
             predicates: Vec::new(),
@@ -459,7 +459,7 @@ impl<'a, A: AstAdapter> Tracer<'a, A> {
         let mut ordinal = 0i64;
         for th in prev {
             let Some(u) = th.node else {
-                return Err(unsupported("a hop after the aggregation pipe"));
+                return Err(unsupported("a step after the aggregation pipe"));
             };
             let cands = self.nav(u, &bare);
             let surv: Vec<NodeId> = self.nav(u, &full).into_iter().map(|(n, _)| n).collect();
@@ -542,7 +542,7 @@ impl<'a, A: AstAdapter> Tracer<'a, A> {
             .iter()
             .map(|e| match e {
                 PathElem::Step(s) => Ok(s),
-                _ => Err(unsupported("non-hop group bodies")),
+                _ => Err(unsupported("non-step group bodies")),
             })
             .collect::<Result<_>>()?;
         let bound = quantifier_bound(self.adapter);
@@ -601,7 +601,7 @@ impl<'a, A: AstAdapter> Tracer<'a, A> {
             for w in walks.iter_mut() {
                 let mut next = Vec::new();
                 for (n, edges) in &w.frontier {
-                    // The body, hop by hop.
+                    // The body, step by step.
                     let mut cur: Vec<(NodeId, Vec<Walked>)> = vec![(*n, edges.clone())];
                     for s in &steps {
                         let elem = PathElem::Step((*s).clone());
@@ -960,10 +960,10 @@ pub fn trace<A: AstAdapter>(
         ));
     }
     let n_committed = plan_c.len();
-    let steps: Vec<qt::Step> = plan_f
+    let stages: Vec<qt::Stage> = plan_f
         .iter()
         .enumerate()
-        .map(|(i, p)| step_record(i, p, i >= n_committed))
+        .map(|(i, p)| stage_record(i, p, i >= n_committed))
         .collect();
 
     let root = adapter.root();
@@ -1370,7 +1370,7 @@ pub fn trace<A: AstAdapter>(
             nodes,
             edges,
         },
-        steps,
+        stages,
         threads,
         groups,
         snapshots,

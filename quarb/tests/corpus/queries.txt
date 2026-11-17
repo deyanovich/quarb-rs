@@ -2576,10 +2576,10 @@ sentences/ru.desm
 /airports/* @| nodes | dim
 /airports/*[::region = "Oceania"] @| edges(->*; --weight=min) @| csv
 /airports/LJU(->*)+?::code
-/airports/LJU(->*)+[::region = "Oceania"]? | %(::code; flights = $-:hops)
-/airports/LJU(->*)+[::region = "South America"]? | %(::code; flights = $-:hops)
+/airports/LJU(->*)+[::region = "Oceania"]? | %(::code; flights = $-:steps)
+/airports/LJU(->*)+[::region = "South America"]? | %(::code; flights = $-:steps)
 /airports/LJU(->* .(::code))+[::code = "PPT"]? | @. | join(" > ")
-/airports/LJU(->* .(::code)){;3}[::code = "SIN"] | %(route = (@. | join(" > ")); flights = $-:hops) @| top(5; -:flights)
+/airports/LJU(->* .(::code)){;3}[::code = "SIN"] | %(route = (@. | join(" > ")); flights = $-:steps) @| top(5; -:flights)
 /airports/LJU(->* .(::code)){3}[::code = "SIN"] | @. | join(" > ") | [$_ *= "DXB"]
 /airports/*[!<-*{;2}[::code = "LJU"]]::code
 /airports/LJU(->*){3} @| collapse @| count
@@ -3160,7 +3160,7 @@ nodes=5000
 /ports/*[::name = "Devonport"]->leg | %(to = $-:target::name; weights = $-:weights)
 /ports/*[::name = "Devonport"](->leg){;365_d} | ::name
 /ports/*[::name = "Devonport"](->leg){;365_d}! | %(::name; days = $-:total)
-/ports/*[::name = "Devonport"](->leg){*_d}[::name = "Sydney"] | %(legs = $-:hops; days = $-:total)
+/ports/*[::name = "Devonport"](->leg){*_d}[::name = "Sydney"] | %(legs = $-:steps; days = $-:total)
 /ports/*[::name = "Devonport"](->leg){max:*_d}[::name = "Falmouth"] | %(longest = $-:total)
 /ports/*[::name = "Montevideo"](<-leg){*_d}[::name = "Devonport"] | $-:total
 /ports/*[::name = "Montevideo"](<-leg){abs:*_d}[::name = "Devonport"] | %(days = $-:total)
@@ -3186,7 +3186,7 @@ nodes=5000
 /airports/LJU(->*){;10_h} @| count
 /airports/LJU(->*){;10_h} @| collapse @| count
 /airports/LJU(->*){;10_h}[::region != "Europe"] @| collapse | ::code
-/airports/LJU(->*){;15_h}[::code = "SIN"] | %(flights = $-:hops; t = $-:total)
+/airports/LJU(->*){;15_h}[::code = "SIN"] | %(flights = $-:steps; t = $-:total)
 /airports/LJU(->*){;1000_km} @| collapse | ::code
 /airports/LJU(->*){;3_h} @| collapse | ::code
 /airports/LJU(->*){;1000_EUR}[::code = "SIN"] @| count
@@ -3200,7 +3200,7 @@ nodes=5000
 /airports/DXB->(!swissair) | %(to = ::code; carrier = $-)
 /airports/KEF(->*|<-*) @| collapse | ::code
 /airports/* | %(::code; reach = ((->*){;2} @| collapse @| count)) @| top(3; :reach)
-/airports/LJU(->*)+[::code = "PPT"]? | $-:hops @| unique
+/airports/LJU(->*)+[::code = "PPT"]? | $-:steps @| unique
 /airports/LJU(->* .(::code))+[::code = "PPT"]? | @. | join(" > ") @| first
 /airports/LJU(->* .(::code)){;20_h}[::code = "SIN"]? | %(route = (@. | join(" > ")); t = $-:total)
 /airports/LJU(->* .(::code)){;1200_EUR}[::code = "SIN"]? | %(route = (@. | join(" > ")); fare = $-:total)
@@ -3737,7 +3737,7 @@ def (=lvl)(_l): /teams/*/members/*[::level = _l]; (=lvl)("junior")::name
 = 'say "hi"'
 /airports/LJU(->*){;150_EUR} | %(::code; fare = $-:total)
 /airports/LJU(->*){max:;2_h} @| collapse | ::code
-/airports/LJU(->*){max:;2_h}[::code = "MAD"] | %(hops = $-:hops; longest = $-:total)
+/airports/LJU(->*){max:;2_h}[::code = "MAD"] | %(hops = $-:steps; longest = $-:total)
 /airports/LJU(->*){;3_h}{*_km}[::code = "AMS"]? | %(::code; km = $-:total; costs = $-:costs)
 /huts/*[::name = "Valley Inn"](--trail){rise:;900_m} @| collapse | ::name
 /airports/LJU(->*){;1_kg} | ::code

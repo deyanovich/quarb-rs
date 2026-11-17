@@ -381,7 +381,7 @@ fn a_redirect_stub_stands_for_its_target() {
         path: "guide/latest".into(),
         html: "<!doctype html><html><head><title>latest</title><script>\n  location.replace('/guides/jq.html' + location.hash);\n</script></head><body></body></html>".into(),
     });
-    let hub_body = "<p>The entries of the reference, one per form, each a page of its own with the grammar it rests on, the commands it names and the recipe that shows it at work; find one by name below or read the list in the order of the specification.</p><ul><li><a href=\"entries/hop.html\">hop</a></li><li><a href=\"entries/group.html\">group</a></li></ul>";
+    let hub_body = "<p>The entries of the reference, one per form, each a page of its own with the grammar it rests on, the commands it names and the recipe that shows it at work; find one by name below or read the list in the order of the specification.</p><ul><li><a href=\"entries/step.html\">step</a></li><li><a href=\"entries/group.html\">group</a></li></ul>";
     files.push(PageFile {
         path: "reference/index.html".into(),
         html: format!(
@@ -396,7 +396,7 @@ fn a_redirect_stub_stands_for_its_target() {
         files,
     ));
     // a redirect is no page: `//redirect` reaches the stubs, `//page`
-    // leaves them out (spec: Text Readings, the web reading)
+    // leaves them out (spec: Quarb Readings, the web reading)
     assert_eq!(strs(&a, "//redirect @| count"), ["2"]);
     assert_eq!(strs(&a, "//page<redirect> @| count"), ["0"]);
     assert_eq!(
@@ -645,8 +645,8 @@ fn a_link_to_no_page_points_at_a_resource() {
         ["1"]
     );
     assert_eq!(strs(&a, &format!("{spec}->canonical::path")), ["spec.html"]);
-    // the crumb's position rides the edge: the hop's own predicate
-    // reads `$-`, the command after a plain hop the plural `@-`
+    // the crumb's position rides the edge: the step's own predicate
+    // reads `$-`, the command after a plain step the plural `@-`
     assert_eq!(
         strs(&a, &format!("{spec}->breadcrumb[$-::position = 1]::path")),
         ["index.html"]

@@ -66,7 +66,7 @@ fn declared_refs_resolve_and_backlink() {
     let a = forum();
     // a base row resolves its ip into the container
     assert_eq!(values(&a, "/posts/1::ip-->::"), vec!["ip-a"]);
-    // Forward, the hop is named for the role it lands on.
+    // Forward, the step is named for the role it lands on.
     assert_eq!(values(&a, "/posts/1--ip::"), vec!["ip-a"]);
     // Backward it lands on a row, so it is named for the row.
     // `--cookie` from a cookie node names no relation at all: it
@@ -84,7 +84,7 @@ fn declared_refs_resolve_and_backlink() {
 #[test]
 fn pair_edges_close_the_walk() {
     let a = forum();
-    // the payoff: every hop names the role it lands on, and the
+    // the payoff: every step names the role it lands on, and the
     // junction is never spelled twice. ck-1..ck-3 chain over
     // ip-a/ip-b.
     let mut got = values(&a, "/cookies/cookie[:: = 'ck-1'](--ip--cookie)+::");

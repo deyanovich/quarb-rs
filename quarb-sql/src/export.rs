@@ -130,7 +130,7 @@ pub struct ColumnTypes {
     /// Columns compared with a text literal.
     pub text: Vec<String>,
     /// Columns the plan extracts a JSON path from on the strength
-    /// of the column's declaration alone (the hop carried no
+    /// of the column's declaration alone (the step carried no
     /// `<json>`): the pushed `json_extract` is the scan's only where
     /// the catalog declares the column json, since the scan grafts
     /// a leaf only as declared (spec: Grafting).
@@ -292,6 +292,12 @@ fn json_extract(dialect: Dialect, qual: Option<&str>, col: &str, path: &[String]
         Dialect::Mssql | Dialect::Oracle => format!("JSON_VALUE({qcol}, '$.{}')", path.join(".")),
     }
 }
+
+/// The columns SQLite's `json_each` answers: inside a subquery over
+/// it an unqualified name of these is its own.
+const JSON_EACH_COLUMNS: &[&str] = &[
+    "key", "value", "type", "atom", "id", "parent", "fullkey", "path", "json", "root",
+];
 
 /// Wrap a JSON-path condition in the dialect's validity guard,
 /// where a cheap one exists. SQLite and MySQL error the whole
@@ -514,10 +520,10 @@ pub fn partial_pushdown_explained(
     partial_pushdown_with(quarb, dialect, false)
 }
 
-/// [`partial_pushdown_explained`] for an adapter that reads hops by
+/// [`partial_pushdown_explained`] for an adapter that reads steps by
 /// key and filters only the table's listing
 /// (`RelationalModel::with_filtered_listing`): crosslinks and
-/// resolutions no longer refuse the prefilter, since a hop into the
+/// resolutions no longer refuse the prefilter, since a step into the
 /// filtered table reads its row unfiltered. What still refuses: a
 /// second navigation into the table, and a `<--` or `=>` scope that
 /// could list it.
@@ -595,7 +601,7 @@ struct Exporter {
     join_sql: Option<String>,
     in_on: bool,
     aggregate: bool,
-    /// The adapter reads hops by key (the pushed-down WHERE filters
+    /// The adapter reads steps by key (the pushed-down WHERE filters
     /// the table's listing only), so crosslinks and resolutions are
     /// safe beside the prefilter.
     keyed_hops: bool,
@@ -669,7 +675,7 @@ impl Exporter {
                     // `<--` carry their scope as text, so the table
                     // count below cannot see them.
                     if matches!(axis.as_str(), "->" | "<-" | "--" | "-->" | "<--" | "=>") {
-                        // Where hops are read by key they are exact
+                        // Where steps are read by key they are exact
                         // beside the prefilter. A scope is a listing,
                         // though: it is safe only when it plainly
                         // lists another table (`/other/…`), and an
@@ -790,7 +796,13 @@ impl Exporter {
             // truthiness — existence is its superset). The type
             // probe sees JSON null too, as the graft does.
             "path" => {
-                let (col, path) = self.json_path_loose(e)?;
+                // The property form (`/col/a::b`) is truthy on a
+                // scalar and on a list with an item: the key is
+                // present either way, so existence is its superset
+                // too.
+                let (col, path) = self
+                    .json_path_loose(e)
+                    .or_else(|| self.json_property_path(e))?;
                 self.note_json_column(e, &col);
                 let probe = json_type_probe(dialect, None, &col, &path)?;
                 Some(json_valid_guard(
@@ -825,9 +837,130 @@ impl Exporter {
                     self.note_json_column(kids[pi], &col);
                     return self.json_prefilter(dialect, &col, &path, &op, &ty, &raw);
                 }
+                // The property form, `/col/a::b OP literal`.
+                for (pi, li) in [(0usize, 1usize), (1, 0)] {
+                    let Some((col, path)) = self.json_property_path(kids[pi]) else {
+                        continue;
+                    };
+                    if self.kind(kids[li]) != "literal" {
+                        continue;
+                    }
+                    let ty = self.prop_s(kids[li], "type");
+                    if ty == "null" {
+                        return None;
+                    }
+                    let raw = self
+                        .prop(kids[li], "value")
+                        .map(|v| v.to_string())
+                        .unwrap_or_default();
+                    let op = if pi == 0 { op.clone() } else { flip_op(&op) };
+                    self.note_json_column(kids[pi], &col);
+                    return self.json_property_prefilter(dialect, &col, &path, &op, &ty, &raw);
+                }
                 None
             }
             _ => None,
+        }
+    }
+
+    /// The superset prefilter for `/col/a::b OP literal`, the
+    /// property form of a JSON path. It is [`json_prefilter`] with
+    /// the two places where a property differs from a child's value:
+    ///
+    /// - an ARRAY of scalars is a list, and a list in a comparison
+    ///   matches when any item does (`[::tags = 'a']` keeps
+    ///   `{"tags": ["a", "b"]}`); the child form's `/tags::` has no
+    ///   value there. So every form lets the arrays through for the
+    ///   engine to decide;
+    /// - `!=` keeps a row whose key is ABSENT (null is not the
+    ///   literal), where the child form has no node and no thread.
+    ///   Its floor is the existence of the node the property is
+    ///   read on; on the column itself there is none (a cell that
+    ///   is no JSON still answers a null property).
+    ///
+    /// [`json_prefilter`]: Self::json_prefilter
+    fn json_property_prefilter(
+        &self,
+        d: Dialect,
+        col: &str,
+        path: &[String],
+        op: &str,
+        lit_ty: &str,
+        raw: &str,
+    ) -> Option<String> {
+        if !matches!(op, "=" | "!=" | "<" | "<=" | ">" | ">=") {
+            return None;
+        }
+        if op == "!=" {
+            let owner = &path[..path.len() - 1];
+            if owner.is_empty() {
+                return None;
+            }
+            let probe = json_type_probe(d, None, col, owner)?;
+            return Some(json_valid_guard(
+                d,
+                None,
+                col,
+                format!("{probe} IS NOT NULL"),
+            ));
+        }
+        let ty = json_type_probe(d, None, col, path)?;
+        let numeric_lit = raw.trim().parse::<f64>().is_ok_and(|f| f.is_finite())
+            && (lit_ty != "text" || !raw.trim().is_empty());
+        if numeric_lit {
+            let num: f64 = raw.trim().parse().ok()?;
+            if num.abs() >= 9_007_199_254_740_992.0 {
+                return None;
+            }
+            let lit = raw.trim();
+            match d {
+                Dialect::Sqlite => {
+                    let ex = json_extract(d, None, col, path);
+                    Some(json_valid_guard(
+                        d,
+                        None,
+                        col,
+                        format!("({ex} {op} {lit} OR {ty} IN ('text', 'array'))"),
+                    ))
+                }
+                Dialect::Postgres => {
+                    let text = json_extract(d, None, col, path);
+                    Some(format!(
+                        "(CASE WHEN {ty} = 'number' THEN ({text})::float8 {op} {lit} \
+                         WHEN {ty} IN ('string', 'array') THEN true ELSE false END)"
+                    ))
+                }
+                Dialect::MySql | Dialect::Mssql | Dialect::Oracle => None,
+            }
+        } else if lit_ty == "text" {
+            if raw.contains('\'') || raw.contains('\\') {
+                return None;
+            }
+            match d {
+                Dialect::Sqlite => {
+                    let ex = json_extract(d, None, col, path);
+                    Some(json_valid_guard(
+                        d,
+                        None,
+                        col,
+                        format!("({ex} {op} '{raw}' OR {ty} = 'array')"),
+                    ))
+                }
+                // Equality alone: a string equals the literal or it
+                // does not (a looser collation keeps more, never
+                // fewer); ordering runs into collation, as in the
+                // child form.
+                Dialect::Postgres if op == "=" => {
+                    let text = json_extract(d, None, col, path);
+                    Some(format!(
+                        "(CASE WHEN {ty} = 'string' THEN {text} = '{raw}' \
+                         WHEN {ty} = 'array' THEN true ELSE false END)"
+                    ))
+                }
+                _ => None,
+            }
+        } else {
+            None
         }
     }
 
@@ -923,10 +1056,10 @@ impl Exporter {
     /// be absent (a bare structural path) as well as the bare
     /// `::`.
     /// Whether a JSON path under a column reads the column as JSON
-    /// on the strength of its declaration alone: the column hop
+    /// on the strength of its declaration alone: the column step
     /// (the first step) carries no `<json>` trait. Such a column is
     /// an assumption of the plan ([`ColumnTypes::json`]); with the
-    /// trait the graft is declared on the hop and holds on both
+    /// trait the graft is declared on the step and holds on both
     /// roads.
     fn note_json_column(&mut self, o: NodeId, col: &str) {
         let declared_on_hop = self.kids(o, "step").first().is_some_and(|s| {
@@ -1117,7 +1250,7 @@ impl Exporter {
     }
 
     /// [`table_branch`]; with `more`, the branch may go on after
-    /// `/table/*[…]` (a hop, a cell): the prefilter concerns its
+    /// `/table/*[…]` (a step, a cell): the prefilter concerns its
     /// first two steps only, and the steps after them are held to
     /// the whole-query gates.
     fn table_branch_lead(
@@ -1142,7 +1275,9 @@ impl Exporter {
             ));
         }
         if self.kid(t, "predicate").is_some() {
-            return Err(SqlError::Unsupported("a predicate on the table hop".into()));
+            return Err(SqlError::Unsupported(
+                "a predicate on the table step".into(),
+            ));
         }
         Ok((self.prop_s(t, "matcher"), self.kids(rows, "predicate")))
     }
@@ -1327,6 +1462,24 @@ impl Exporter {
                                         .into(),
                                 ));
                             }
+                            // An extractor answers a container as
+                            // its JSON text (SQLite `[1,2]`,
+                            // PostgreSQL `[1, 2]`), so a literal that
+                            // is such a text equalled the array or
+                            // the object itself, which has no value
+                            // in the graft: the push kept a row the
+                            // scan drops. No scalar's text opens
+                            // with a bracket or a brace that a
+                            // container's does not, so such a
+                            // literal rides the prefilter.
+                            if raw.starts_with('[') || raw.starts_with('{') {
+                                return Err(SqlError::Semantics(
+                                    "a text literal that opens like a JSON container \
+                                     could equal an array's or an object's own text \
+                                     in the extractor, which has no value in Quarb"
+                                        .into(),
+                                ));
+                            }
                             let lit = self.operand(kids[li], qual)?;
                             let extract = json_extract(dialect, qual, &col, &path);
                             return Ok(json_valid_guard(
@@ -1334,6 +1487,71 @@ impl Exporter {
                                 qual,
                                 &col,
                                 format!("{extract} = {lit}"),
+                            ));
+                        }
+                    }
+                    // The property form, `[/col/a::b = 'lit']`: the
+                    // same question on a scalar, and on an array of
+                    // scalars the list, which equals the literal when
+                    // any item does (an array that holds a container
+                    // is no property). SQLite says both in one
+                    // condition, exactly: the scalar branch by the
+                    // value's type and text, the array branch by
+                    // `json_each`. The other engines' array branches
+                    // are not verified live, so there the shape rides
+                    // the prefilter (PostgreSQL) or the scan.
+                    for (pi, li) in [(0usize, 1usize), (1, 0)] {
+                        if self.is_text_literal(kids[li])
+                            && let Some((col, path)) = self.json_property_path(kids[pi])
+                        {
+                            self.note_json_column(kids[pi], &col);
+                            let raw = self
+                                .prop(kids[li], "value")
+                                .map(|v| v.to_string())
+                                .unwrap_or_default();
+                            if raw.trim().parse::<f64>().is_ok() {
+                                return Err(SqlError::Semantics(
+                                    "a numeric-looking text literal against a \
+                                     JSON path compares numerically in Quarb \
+                                     (value coercion); no SQL extractor \
+                                     matches that"
+                                        .into(),
+                                ));
+                            }
+                            // `json_each` names its own columns; an
+                            // unqualified JSON column of one of those
+                            // names would read as them inside it.
+                            let shadowed = qual.is_none()
+                                && JSON_EACH_COLUMNS.contains(&col.to_ascii_lowercase().as_str());
+                            if dialect != Dialect::Sqlite || shadowed {
+                                return Err(SqlError::Semantics(
+                                    "a property of a JSON value may be a list (an \
+                                     array of scalars equals the literal when any \
+                                     item does); only SQLite's condition carries \
+                                     that branch whole; this shape rides the \
+                                     partial prefilter"
+                                        .into(),
+                                ));
+                            }
+                            let lit = self.operand(kids[li], qual)?;
+                            let qcol = match qual {
+                                Some(q) => format!("{q}.{col}"),
+                                None => col.clone(),
+                            };
+                            let at = format!("'$.{}'", path.join("."));
+                            let ty = format!("json_type({qcol}, {at})");
+                            let ex = json_extract(dialect, qual, &col, &path);
+                            return Ok(json_valid_guard(
+                                dialect,
+                                qual,
+                                &col,
+                                format!(
+                                    "(({ty} = 'text' AND {ex} = {lit}) OR ({ty} = 'array' \
+                                     AND EXISTS (SELECT 1 FROM json_each({qcol}, {at}) \
+                                     WHERE json_each.type = 'text' AND json_each.value = {lit}) \
+                                     AND NOT EXISTS (SELECT 1 FROM json_each({qcol}, {at}) \
+                                     WHERE json_each.type IN ('array', 'object'))))"
+                                ),
                             ));
                         }
                     }
@@ -1346,7 +1564,10 @@ impl Exporter {
                 // prefilter ladder covers these shapes.
                 if self.dialect.is_some() {
                     for side in [kids[0], kids[1]] {
-                        if self.json_path(side).is_some() || self.json_path_loose(side).is_some() {
+                        if self.json_path(side).is_some()
+                            || self.json_path_loose(side).is_some()
+                            || self.json_property_path(side).is_some()
+                        {
                             return Err(SqlError::Semantics(
                                 "a JSON-path comparison pushes whole only as \
                                  fixed-path string equality (Quarb coerces \
@@ -1768,7 +1989,7 @@ impl Exporter {
     }
 
     /// If `o` is the one JSON-column-path shape pushdown handles —
-    /// `/col/seg/seg…::`, a plain-navigation path (every hop `/`
+    /// `/col/seg/seg…::`, a plain-navigation path (every step `/`
     /// and a plain-identifier object key, no wildcards, no nested
     /// predicate), at least one segment past the column, ending in
     /// the bare `::` projection — return `(column, [json segments])`.
@@ -1809,6 +2030,59 @@ impl Exporter {
             }
             names.push(name);
         }
+        let col = names.remove(0);
+        Some((col, names))
+    }
+
+    /// The property form of a JSON-column path, `/col/seg…::key`:
+    /// plain-navigation steps as in [`json_path`], at least the
+    /// column's own, ending in the projection of a plain-identifier
+    /// property. It asks for the same value as `/col/seg…/key::`
+    /// where that is a scalar; on an array of scalars it is the
+    /// list (see [`json_property_prefilter`]). Returns
+    /// `(column, [json segments, the key last])`.
+    ///
+    /// [`json_path`]: Self::json_path
+    /// [`json_property_prefilter`]: Self::json_property_prefilter
+    fn json_property_path(&self, o: NodeId) -> Option<(String, Vec<String>)> {
+        if self.kind(o) != "path" {
+            return None;
+        }
+        let steps = self.kids(o, "step");
+        if steps.is_empty() {
+            return None;
+        }
+        let proj = self.kid(o, "projection")?;
+        if self.prop_s(proj, "kind") != "property" {
+            return None;
+        }
+        let key = self.prop(proj, "key")?.to_string();
+        let plain = |name: &str| {
+            !name.is_empty()
+                && name
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        };
+        if !plain(&key) {
+            return None;
+        }
+        let mut names = Vec::with_capacity(steps.len() + 1);
+        for s in &steps {
+            if self.prop_s(*s, "axis") != "/"
+                || self.prop_s(*s, "matcher-kind") != "name"
+                || self.kid(*s, "predicate").is_some()
+            {
+                return None;
+            }
+            let name = self.prop_s(*s, "matcher");
+            if !plain(&name) {
+                return None;
+            }
+            names.push(name);
+        }
+        names.push(key);
         let col = names.remove(0);
         Some((col, names))
     }
@@ -2485,7 +2759,7 @@ mod null_and_literal_tests {
 
     #[test]
     fn json_pushdown_only_string_equality() {
-        // Numeric comparison, `!=`, and a wildcard hop stay off the
+        // Numeric comparison, `!=`, and a wildcard step stay off the
         // pushdown path (they are not provably identical to the
         // graft), so they refuse and scan even with a dialect set.
         let d = Some(Dialect::Sqlite);
@@ -2574,6 +2848,144 @@ mod null_and_literal_tests {
         assert_eq!(
             p.where_sql,
             "(jsonb_typeof(payload::jsonb #> '{gift}') IS NOT NULL)"
+        );
+    }
+
+    #[test]
+    fn json_property_path_pushdown() {
+        // `[/col/a::b = 'lit']`, the property form: the scalar's
+        // question and, on an array of scalars, the list's (any item
+        // equals). SQLite's condition says both whole.
+        let q = "/orders/*[/payload/customer/geo::city = 'Lyon']::id";
+        assert_eq!(
+            pushdown(q, Some(Dialect::Sqlite)).unwrap().sql,
+            "SELECT id FROM orders WHERE (json_valid(payload) AND \
+             ((json_type(payload, '$.customer.geo.city') = 'text' AND \
+             json_extract(payload, '$.customer.geo.city') = 'Lyon') OR \
+             (json_type(payload, '$.customer.geo.city') = 'array' AND \
+             EXISTS (SELECT 1 FROM json_each(payload, '$.customer.geo.city') \
+             WHERE json_each.type = 'text' AND json_each.value = 'Lyon') AND \
+             NOT EXISTS (SELECT 1 FROM json_each(payload, '$.customer.geo.city') \
+             WHERE json_each.type IN ('array', 'object')))))"
+        );
+        // a property of the column's own value
+        assert!(
+            pushdown(
+                "/orders/*[/payload::city = 'Lyon']::id",
+                Some(Dialect::Sqlite)
+            )
+            .unwrap()
+            .sql
+            .contains("json_extract(payload, '$.city') = 'Lyon'")
+        );
+        // the other engines' array branches are not verified: no
+        // whole push there, and none with no dialect
+        for d in [
+            Dialect::Postgres,
+            Dialect::MySql,
+            Dialect::Mssql,
+            Dialect::Oracle,
+        ] {
+            assert!(pushdown(q, Some(d)).is_none(), "{d:?}");
+        }
+        assert!(pushdown(q, None).is_none());
+        // a numeric-looking literal compares by value: no whole push
+        assert!(
+            pushdown(
+                "/orders/*[/payload::total = '150']::id",
+                Some(Dialect::Sqlite)
+            )
+            .is_none()
+        );
+        // a column named as one of json_each's own columns would be
+        // read as that column inside the subquery
+        assert!(
+            pushdown(
+                "/orders/*[/value::city = 'Lyon']::id",
+                Some(Dialect::Sqlite)
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn partial_json_property_prefilters() {
+        let sqlite = |q: &str| partial_pushdown(q, Some(Dialect::Sqlite)).map(|p| p.where_sql);
+        // a comparison lets the arrays through with the text values:
+        // a list matches when any item does, and the engine decides
+        assert_eq!(
+            sqlite("/orders/*[/payload::total > 150]::id").unwrap(),
+            "(json_valid(payload) AND (json_extract(payload, '$.total') > 150 \
+             OR json_type(payload, '$.total') IN ('text', 'array')))"
+        );
+        assert_eq!(
+            sqlite("/orders/*[/payload/customer::tier < 'm']::id").unwrap(),
+            "(json_valid(payload) AND (json_extract(payload, '$.customer.tier') < 'm' \
+             OR json_type(payload, '$.customer.tier') = 'array'))"
+        );
+        // a bare property: present, as the child form
+        assert_eq!(
+            sqlite("/orders/*[/payload::gift]::id").unwrap(),
+            "(json_valid(payload) AND json_type(payload, '$.gift') IS NOT NULL)"
+        );
+        // `!=` keeps a row whose key is absent: its floor is the node
+        // the property is read on, and on the column itself there is
+        // none
+        assert_eq!(
+            sqlite("/orders/*[/payload/customer::tier != 'x']::id").unwrap(),
+            "(json_valid(payload) AND json_type(payload, '$.customer') IS NOT NULL)"
+        );
+        assert!(sqlite("/orders/*[/payload::status != 'x']::id").is_none());
+        // PostgreSQL: the equality as a prefilter, the arrays through
+        assert_eq!(
+            partial_pushdown(
+                "/orders/*[/payload/customer/geo::city = 'Lyon']::id",
+                Some(Dialect::Postgres)
+            )
+            .unwrap()
+            .where_sql,
+            "(CASE WHEN jsonb_typeof(payload::jsonb #> '{customer,geo,city}') = 'string' \
+             THEN (payload::jsonb #>> '{customer,geo,city}') = 'Lyon' \
+             WHEN jsonb_typeof(payload::jsonb #> '{customer,geo,city}') = 'array' \
+             THEN true ELSE false END)"
+        );
+        assert_eq!(
+            partial_pushdown(
+                "/orders/*[/payload::total > 150]::id",
+                Some(Dialect::Postgres)
+            )
+            .unwrap()
+            .where_sql,
+            "(CASE WHEN jsonb_typeof(payload::jsonb #> '{total}') = 'number' \
+             THEN ((payload::jsonb #>> '{total}'))::float8 > 150 \
+             WHEN jsonb_typeof(payload::jsonb #> '{total}') IN ('string', 'array') \
+             THEN true ELSE false END)"
+        );
+        // no type probe, no prefilter
+        assert!(
+            partial_pushdown("/orders/*[/payload::total > 150]::id", Some(Dialect::MySql))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn json_pushdown_refuses_a_container_looking_literal() {
+        // An extractor answers an array or an object as its JSON
+        // text, so `'[1,2]'` equalled the array itself, which has no
+        // value in the graft: the whole push kept a row the scan
+        // drops. It rides the prefilter (a superset, re-checked).
+        for q in [
+            "/orders/*[/data/a:: = '[1,2]']::id",
+            "/orders/*[/data/a:: = '{\"k\":1}']::id",
+        ] {
+            assert!(pushdown(q, Some(Dialect::Sqlite)).is_none(), "{q}");
+            assert!(pushdown(q, Some(Dialect::Postgres)).is_none(), "{q}");
+        }
+        assert_eq!(
+            partial_pushdown("/orders/*[/data/a:: = '[1,2]']::id", Some(Dialect::Sqlite))
+                .unwrap()
+                .where_sql,
+            "(json_valid(data) AND json_extract(data, '$.a') = '[1,2]')"
         );
     }
 

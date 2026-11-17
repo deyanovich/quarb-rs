@@ -73,9 +73,18 @@ fn mounted_sqlite_grafts_json_columns() {
     assert_eq!(run("/s/1/meta/geo/city::"), ["London"]);
     assert_eq!(run("/s/*[/meta/geo/city:: = \"Berlin\"]::id"), ["2"]);
     assert_eq!(run("/s/2/meta::device"), ["laptop"]);
+    // What the cell answers as properties it lists as its own: the
+    // names of the graft's root, as one step in (`:props` was empty
+    // at the graft and right at `/meta/geo`).
+    assert_eq!(run("/s/2/meta | :props"), ["device, geo"]);
+    assert_eq!(run("/s/2/meta/geo | :props"), ["city"]);
+    assert_eq!(run("/s/*/meta | :props | ... @| unique"), ["device", "geo"]);
+    // a cell that grafts nothing lists nothing
+    assert_eq!(run("/s/2/id | :props | ... @| count"), ["0"]);
+    assert_eq!(run("/s/2/note | :props | ... @| count"), ["0"]);
     // A TEXT column full of JSON declares nothing: its cell is a
     // leaf, a path through it is empty; the query's `<json>` at the
-    // hop reads it.
+    // step reads it.
     assert_eq!(run("/s/1/note/geo/city::"), Vec::<String>::new());
     assert_eq!(run("/s/1/note::"), [r#"{"geo":{"city":"Paris"}}"#]);
     assert_eq!(run("/s/1/note<json>/geo/city::"), ["Paris"]);
@@ -135,7 +144,7 @@ fn rows_read_as_documents_with_doc() {
 /// A leaf grafts only as declared (spec: Grafting): by its name's
 /// extension, by what its bytes say of themselves (an XML
 /// declaration, a DOCTYPE), by the mount's `?format=`, or by the
-/// query's `<NOTATION>` at the hop. A nameless leaf holding JSON
+/// query's `<NOTATION>` at the step. A nameless leaf holding JSON
 /// declares nothing and stays a leaf.
 #[test]
 fn a_leaf_grafts_only_as_declared() {

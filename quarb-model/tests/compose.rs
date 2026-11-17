@@ -102,7 +102,7 @@ fn a_ref_may_target_another_mount_directly() {
         values(&a, "/зализняк/*[::ключ = 'дом']::ключ-->/морфы/*::"),
         vec!["дом"]
     );
-    // the hop is labelled by the target path's last named segment
+    // the step is labelled by the target path's last named segment
     assert_eq!(
         values(&a, "/зализняк/*[::ключ = 'стол']--кузнецова/морфы/*::"),
         vec!["стол"]

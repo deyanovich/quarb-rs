@@ -669,7 +669,7 @@ fn verse_lines_carry_the_citation_coordinate() {
 /// tokens — UAX #29 word segments with their class as a trait,
 /// `::lower`, and document-wide `:::n` / `:::sentence`; the
 /// block's own prose and the renderers are unchanged, and a
-/// sibling hop stops at the sentence.
+/// sibling step stops at the sentence.
 #[test]
 fn corpus_reading_tokenizes_prose_blocks() {
     let mut m = TextModel::parse_plain(
@@ -715,7 +715,7 @@ fn corpus_reading_tokenizes_prose_blocks() {
     assert_eq!(values(&m, "//token[:: = \"Tom’s\"]:::n"), ["3"]);
     assert_eq!(values(&m, "//token[:: = \"Tom’s\"]::n"), ["3"]);
     // UAX #29 breaks after "Dr." — the sentence ordinal shows it,
-    // and the sibling hop stops there: the sentence
+    // and the sibling step stops there: the sentence
     // is the token's parent.
     assert_eq!(values(&m, "//token[:: = \"Dr\"]:::sentence"), ["2"]);
     assert_eq!(values(&m, "//token[:: = \"Smith\"]:::sentence"), ["3"]);

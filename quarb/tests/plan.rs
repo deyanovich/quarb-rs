@@ -73,7 +73,7 @@ fn a_root_anchored_branch_names_its_scope_step_by_step() {
             }),
         }
     );
-    // The wildcard hop under `t`: the leading equality lowered and
+    // The wildcard step under `t`: the leading equality lowered and
     // claimed by the catalog, the second predicate the engine's.
     assert_eq!(steps[1].scope, Some(vec!["t".into()]));
     assert_eq!(
@@ -100,7 +100,7 @@ fn estimates_compose_along_the_branch_and_across_branches() {
     assert_eq!(b.confidence, Confidence::Bound);
     assert_eq!(p.estimate(), Some(b));
     // A read past the catalog is unknown, and so is the branch; a
-    // bare hop by name past it is free.
+    // bare step by name past it is free.
     assert_eq!(plan("/t/*/*").branches[0].estimate(), None);
     assert!(plan("/t/*/c").branches[0].estimate().is_some());
     // Two branches add.

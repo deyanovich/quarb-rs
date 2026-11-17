@@ -32,7 +32,7 @@ pub enum Form {
     Command(Command),
     Projection(Projection),
     Arg(Arg),
-    /// A trait block on a hop (`<link>`, `<block || inline>`).
+    /// A trait block on a step (`<link>`, `<block || inline>`).
     Trait(TraitClause),
 }
 
@@ -167,7 +167,7 @@ impl Form {
                     1 => out.push(nav(q.branches.into_iter().next().expect("one"))),
                     _ => {
                         return Err(
-                            "a union cannot stand after a pipe; a hop walks one path per thread"
+                            "a union cannot stand after a pipe; a step walks one path per thread"
                                 .to_string(),
                         );
                     }
@@ -301,7 +301,7 @@ impl Form {
         })
     }
 
-    /// The form as a name — a push's, a hop's, a property's.
+    /// The form as a name — a push's, a step's, a property's.
     pub(crate) fn into_name(self) -> Result<String, String> {
         Ok(match self {
             Form::Projection(Projection::Property(Some(k)))
@@ -364,11 +364,11 @@ pub(crate) trait Expander {
 
 impl Form {
     /// The commands the form reads as after a pipe, for a quarq
-    /// that stands for it: a step as the hop `| /x`, a predicate as
+    /// that stands for it: a step as the navigation `| /x`, a predicate as
     /// the filter, a projection as `| ::x`, an operand as `| expr`.
     pub(crate) fn as_commands(&self) -> Vec<Command> {
         match self {
-            // a step or a group prints as the hop it is after a pipe
+            // a step or a group prints as the navigation it is after a pipe
             Form::Elem(e) => vec![Command::Nav(Branch {
                 steps: vec![e.clone()],
                 projection: None,

@@ -136,7 +136,7 @@ pub const ROUNDS: usize = 20;
 /// `graph:distance`): along the edges as folded, a seed reads zero,
 /// several seeds give the nearest, a node no seed reaches is `None`.
 /// Unweighted (every edge one) it is the breadth-first count of
-/// hops; weighted, Dijkstra over the folded weights, which must not
+/// steps; weighted, Dijkstra over the folded weights, which must not
 /// be negative (`Err` names the first that is).
 pub fn distance(edges: &Edges, seeds: &[usize]) -> Result<Vec<Option<f64>>, String> {
     let n = edges.len();
@@ -267,7 +267,7 @@ pub fn kcore(edges: &Edges) -> Vec<usize> {
 /// dividing its unit among them. Over the folded edges as given —
 /// every ordered pair — so an undirected graph, whose fold carries
 /// each edge both ways, is halved by the caller (each unordered pair
-/// once). Unweighted it counts hops; weighted it takes the folded
+/// once). Unweighted it counts steps; weighted it takes the folded
 /// weights as lengths (Dijkstra; a negative weight is an `Err`).
 pub fn betweenness(edges: &Edges, weighted: bool) -> Result<Vec<f64>, String> {
     let n = edges.len();
@@ -374,7 +374,7 @@ pub fn conncomp(edges: &Edges) -> Vec<usize> {
 impl Edges {
     /// The undirected reading: every edge in both directions, weight
     /// one, parallel edges one. What the undirected notions (bridges,
-    /// articulation points, triangles) read a directed hop as.
+    /// articulation points, triangles) read a directed step as.
     pub fn symmetric(&self) -> Edges {
         let n = self.n;
         Edges::fold(
@@ -629,7 +629,7 @@ impl Ord for Nearest {
 /// first and the node itself last, the seed's own route the
 /// one-element list, `None` where no seed reaches. Several seeds
 /// give the nearest. Along the edges as folded: unweighted, the
-/// fewest hops; weighted, Dijkstra over the folded weights (a
+/// fewest steps; weighted, Dijkstra over the folded weights (a
 /// negative one is an `Err`). Where two routes tie, the predecessor
 /// with the smaller index wins, so the route is deterministic for a
 /// given numbering (the engine numbers nodes in document order).
@@ -1344,7 +1344,7 @@ mod tests {
             let sq = Edges::fold(4, edges);
             assert_eq!(route(&sq, &[0], false).unwrap()[3], Some(vec![0, 1, 3]));
         }
-        // weighted: the light route, not the fewest hops
+        // weighted: the light route, not the fewest steps
         let w = Edges::fold(3, [(0, 1, Some(1.0)), (1, 2, Some(1.0)), (0, 2, Some(5.0))]);
         assert_eq!(route(&w, &[0], true).unwrap()[2], Some(vec![0, 1, 2]));
         assert_eq!(route(&w, &[0], false).unwrap()[2], Some(vec![0, 2]));

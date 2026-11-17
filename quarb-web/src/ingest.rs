@@ -743,7 +743,7 @@ pub fn finish(
             ""
         }
     ));
-    // The document order (spec: Text Readings, the web reading): the
+    // The document order (spec: Quarb Readings, the web reading): the
     // tree's pre-order with siblings by pagerank descending, ties by
     // name — ranked again now that the pageranks are known, in every
     // container the tree spans.

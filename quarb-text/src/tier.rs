@@ -178,7 +178,7 @@ impl TextModel {
     ///
     /// A title the document only declares (an HTML head's, a
     /// Markdown header's, a TEI header's, the properties of a Word
-    /// file) is none (ruling 2026-11-15; Text Readings, Corpus
+    /// file) is none (ruling 2026-11-15; Quarb Readings, Corpus
     /// Reading): the text level reads it as declared identity and
     /// has no node for it, and the word level follows the text
     /// level, so it leaves no sentence and no token and `::title`

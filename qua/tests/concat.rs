@@ -180,6 +180,45 @@ fn a_record_appends_fields_and_overwrites_only_with_the_bang() {
     assert!(refuse("= %(a = 1) ++ 2").contains("has no name"));
     assert!(refuse("= @(1) ++! 2").contains("'++!' overwrites a record's fields"));
     assert!(refuse("= \"a\" ++! %(a = 1)").contains("'++!' overwrites a record's fields"));
+    // only what `++` takes is sent to it (lang's finding,
+    // 2026-11-17: a number and a quarq were, and `++` refused them)
+    assert!(refuse("= @(1) ++! 2").contains("a list takes '++'"));
+    assert!(refuse("= \"a\" ++! %(a = 1)").contains("text takes '++'"));
+    let e = refuse("= 5 ++! %(a = 1)");
+    assert!(
+        e.contains("'++!' overwrites a record's fields; a number takes no concatenation"),
+        "{e}"
+    );
+    assert!(!refuse("= true ++! %(a = 1)").contains("takes '++'"));
+}
+
+#[test]
+fn a_written_quarq_is_overwritten_as_the_node_it_is() {
+    // a quarq a constructor built stands for its node
+    assert_eq!(
+        one("= syntax:step(\"/\"; \"row\") ++! %(axis = \"//\")"),
+        "q(//row)"
+    );
+    // a written quarq is its pipeline, as `syntax:node` reads it: a
+    // pipeline has no axis, and the refusal names the kind (it read
+    // "'++!' overwrites a record's fields; a quarq takes '++'",
+    // and `++` answered that a quarq takes no concatenation)
+    let e = refuse("= q(/row) ++! %(axis = \"//\")");
+    assert!(e.contains("a pipeline node has no property 'axis'"), "{e}");
+    assert_eq!(
+        e,
+        refuse("= syntax:node(q(/row); q(/row)) ++! %(axis = \"//\")")
+    );
+    let e = refuse("= q(/row) ++ %(axis = \"//\")");
+    assert!(e.contains("a pipeline node has no property 'axis'"), "{e}");
+    // a right side that is no row names no property
+    let e = refuse("= q(/row) ++! q(/*)");
+    assert!(
+        e.contains("named in a row") && !e.contains("takes '++'"),
+        "{e}"
+    );
+    let e = refuse("= q(/row) ++ q(/*)");
+    assert!(e.contains("quarqs do not concatenate"), "{e}");
 }
 
 #[test]

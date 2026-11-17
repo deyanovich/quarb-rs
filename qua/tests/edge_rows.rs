@@ -1,7 +1,7 @@
 //! An edge-declared row is its own edge (ruling 10-28, spec: Edge
 //! rows): two flight rows on one leg are two edges — two threads from
-//! the hop, `$-::no` naming each, `->flight @| count` counting rows,
-//! `@| edges` a row per row, the headless hop one thread per row
+//! the step, `$-::no` naming each, `->flight @| count` counting rows,
+//! `@| edges` a row per row, the headless step one thread per row
 //! either way. An edge statement's scope may carry a predicate.
 
 use std::path::{Path, PathBuf};
@@ -101,7 +101,7 @@ fn lines(dir: &Path, model: &str, query: &str) -> Vec<String> {
 fn two_rows_on_one_leg_are_two_edges() {
     let dir = fixture("two");
     let q = |query: &str| lines(&dir, "flights.model", query);
-    // the hop: one thread per row; the same node twice
+    // the step: one thread per row; the same node twice
     assert_eq!(q("/airports/LHR->flight @| count"), ["3"]);
     assert_eq!(q("/airports/LHR->flight::code"), ["JFK", "JFK", "CDG"]);
     // each thread's edge is its own row
@@ -127,7 +127,7 @@ fn two_rows_on_one_leg_are_two_edges() {
         q("/airports/LHR(->flight){1} | [::code = \"JFK\"] @| collapse @| count"),
         ["1"]
     );
-    // the headless hop: every row either way, one thread each
+    // the headless step: every row either way, one thread each
     assert_eq!(q("/airports/JFK--flight @| count"), ["3"]);
     assert_eq!(q("/airports/LHR--flight @| count"), ["5"]);
     assert_eq!(
@@ -189,7 +189,7 @@ fn a_label_by_property_names_each_edge_by_its_row() {
     let mut five = q("/flights/5->(origin || dest) | $-");
     five.sort();
     assert_eq!(five, ["dest", "origin"]);
-    // the ref: the hop from the row to its origin, under the carrier;
+    // the ref: the step from the row to its origin, under the carrier;
     // its edge is the row, so `$-::no` reads the flight either way
     assert_eq!(q("/flights/1->panam::code"), ["LHR"]);
     assert_eq!(q("/flights/2->swissair::code"), ["LHR"]);
@@ -217,7 +217,7 @@ fn an_edge_scope_may_carry_a_predicate() {
     );
 }
 
-/// A wildcard hop skips the references an edge statement consumed
+/// A wildcard step skips the references an edge statement consumed
 /// (spec: Edge rows): from an airport `<-*` is the carrier edges in,
 /// not the flight rows whose origin or dest it is; `<-origin` named
 /// still reaches the rows; a reference no edge consumed stays

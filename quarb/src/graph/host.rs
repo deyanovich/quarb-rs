@@ -157,7 +157,7 @@ impl<A: AstAdapter> Host for A {
         }
         match projection {
             // the property a path leads to is tested for presence:
-            // the hops asked above, the last read asks nothing
+            // the steps asked above, the last read asks nothing
             Some(p @ Projection::Property(Some(name))) => {
                 let mut found = false;
                 let holds = crate::value::ambient::with_presence(|| {
@@ -407,7 +407,7 @@ impl<A: AstAdapter> Host for A {
                             from,
                             trace,
                             outer,
-                            // The thread's witness travels with the hop, so
+                            // The thread's witness travels with the step, so
                             // step predicates on the way read `$*k` per
                             // thread (the results carry it on, below).
                             &c.ext.bindings,
@@ -421,8 +421,8 @@ impl<A: AstAdapter> Host for A {
                         .projection
                         .as_ref()
                         .map(|p| project(self, ext.node, p));
-                    // the branch's own projection is a step of the
-                    // lineage after the last hop
+                    // the branch's own projection is a level of the
+                    // lineage after the last step
                     let trail = match &branch.projection {
                         Some(p) if crate::graph::threads::recording() => {
                             crate::graph::threads::step(
@@ -455,9 +455,9 @@ impl<A: AstAdapter> Host for A {
                 }
             }
         }
-        // A hop folds the threads that arrive alike — one per (node,
+        // A step folds the threads that arrive alike — one per (node,
         // arrival, register), the tree axes a node set (spec:
-        // Expansion paths). A bare anchor is no hop: `| $$.H`,
+        // Expansion paths). A bare anchor is no step: `| $$.H`,
         // `| $$.H::name` re-seat each thread on its marked node and
         // keep every thread, as the no-merge rule keeps every walk —
         // two threads at one node with one register are two threads

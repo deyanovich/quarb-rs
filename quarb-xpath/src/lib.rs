@@ -29,7 +29,7 @@
 //!
 //! - `[n]` on an abbreviated `//` step: XPath expands `//name[n]`
 //!   to a per-parent `child::` step, positioning within each parent,
-//!   while Quarb positions within the hop's whole per-source result
+//!   while Quarb positions within the step's whole per-source result
 //!   list. The two agree when all matches share one parent. On the
 //!   child axis (`name[n]`) and the explicit descendant axis
 //!   (`descendant::name[n]`) the translation is exact.
@@ -314,7 +314,7 @@ fn lex(input: &str) -> Result<Vec<(Tok, usize)>, XPathError> {
 /// The divergence note for a positional predicate on an abbreviated
 /// `//` step.
 const ABBREV_INDEX_NOTE: &str = "[n] on //: XPath's abbreviated // positions within each \
-     parent; Quarb positions within the hop's whole result list \
+     parent; Quarb positions within the step's whole result list \
      (equal when all matches share one parent)";
 
 struct Parser {
@@ -483,7 +483,7 @@ impl Parser {
     /// One location step. Writes navigation into `out`; a terminal
     /// attribute / `text()` step is returned as a projection instead.
     fn step(&mut self, sep: &str, out: &mut String) -> Result<StepOut, XPathError> {
-        // Resolve an explicit axis to the Quarb hop syntax. XPath's
+        // Resolve an explicit axis to the Quarb step syntax. XPath's
         // abbreviated `//` expands to a per-parent `child::` step, so
         // positional predicates on it diverge from Quarb's per-source
         // list — an *explicit* descendant:: axis does not.
@@ -546,8 +546,8 @@ impl Parser {
                     Some(Tok::Name(n, false)) => {
                         write!(out, "{hop}{}", quarb_name(&n)).unwrap();
                     }
-                    // any node on the axis: the upward hops are
-                    // canonical bare (`\`, `\\`), the sibling hops
+                    // any node on the axis: the upward steps are
+                    // canonical bare (`\`, `\\`), the sibling steps
                     // keep their star (`>>*`, `<<*`)
                     Some(Tok::Star) => {
                         write!(out, "{hop}{}", wildcard(hop)).unwrap();
@@ -578,8 +578,8 @@ impl Parser {
             }
             Some(Tok::Dot) => return Ok(StepOut::Element),
             Some(Tok::DotDot) => {
-                // the parent hop, as the engine prints it: the bare
-                // backslash (`\*` is the same hop, and not the canon)
+                // the parent step, as the engine prints it: the bare
+                // backslash (`\*` is the same step, and not the canon)
                 write!(out, "\\").unwrap();
                 return Ok(StepOut::Element);
             }
@@ -939,8 +939,8 @@ enum StepOut {
     Projection(String),
 }
 
-/// The wildcard after a hop, as the engine's canon writes it: none
-/// after the upward hops, a star after the others.
+/// The wildcard after a step, as the engine's canon writes it: none
+/// after the upward steps, a star after the others.
 fn wildcard(hop: &str) -> &'static str {
     if hop.starts_with('\\') { "" } else { "*" }
 }
@@ -1018,7 +1018,7 @@ mod tests {
         assert_eq!(t("//image/.."), "//image\\");
         assert_eq!(t("//image/../title"), "//image\\/title");
         // any node on an axis, as the engine's canon writes it: bare
-        // on the upward hops, starred on the sibling hops
+        // on the upward steps, starred on the sibling steps
         assert_eq!(t("//image/parent::*"), "//image\\");
         assert_eq!(t("//image/ancestor::*"), "//image\\\\");
         assert_eq!(t("//title/following-sibling::*"), "//title>>*");

@@ -146,6 +146,35 @@ fn the_code_page_decodes_the_bytes_and_is_reported() {
 }
 
 #[test]
+fn a_date_is_read_at_the_precision_its_group_writes() {
+    // `\creatim` and `\revtim` are groups of fields: a year alone is
+    // the year, a year and month the month, each its calendar
+    // period (0.66's rule for every format; this reader padded them
+    // to the first of January, an instant the file never stated).
+    let rtf = |info: &str| {
+        format!(
+            "{{\\rtf1\\ansi{{\\info{{\\title Common Sense}}{info}}}\\pard These are the times.\\par}}"
+        )
+    };
+    let m = parse(rtf("{\\creatim\\yr1776}{\\revtim\\yr1776\\mo3}").as_bytes()).unwrap();
+    assert_eq!(values(&m, "^::published"), ["1776"]);
+    assert_eq!(values(&m, "^::published | type"), ["period"]);
+    assert_eq!(values(&m, "^::modified"), ["1776-03"]);
+    assert_eq!(values(&m, "^::modified | type"), ["period"]);
+    // the record keeps what the group states
+    assert_eq!(values(&m, "::head:creatim"), ["1776"]);
+    assert_eq!(values(&m, "::head:revtim"), ["1776-03"]);
+    // a day makes it the instant, with or without a time
+    let m = parse(
+        rtf("{\\creatim\\yr1776\\mo1\\dy10}{\\revtim\\yr1776\\mo2\\dy14\\hr9\\min30}").as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(values(&m, "^::published"), ["1776-01-10"]);
+    assert_eq!(values(&m, "^::published | type"), ["instant"]);
+    assert_eq!(values(&m, "^::modified"), ["1776-02-14T09:30:00"]);
+}
+
+#[test]
 fn not_rtf_is_refused() {
     assert!(parse(b"plain text").is_err());
 }

@@ -353,7 +353,7 @@ fn a_quantified_group_after_a_pipe_walks_with_its_facts() {
         &[
             &m[..],
             &[
-                "/hops/*[::id = 1](::to_id-->)+ | %(h = $-:hops; n = ::name)",
+                "/hops/*[::id = 1](::to_id-->)+ | %(h = $-:steps; n = ::name)",
                 "net.db",
             ],
         ]
@@ -364,7 +364,7 @@ fn a_quantified_group_after_a_pipe_walks_with_its_facts() {
         &[
             &m[..],
             &[
-                "/hops/*[::id = 1] | (::to_id-->)+ | %(h = $-:hops; n = ::name)",
+                "/hops/*[::id = 1] | (::to_id-->)+ | %(h = $-:steps; n = ::name)",
                 "net.db",
             ],
         ]

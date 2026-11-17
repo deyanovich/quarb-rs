@@ -13,10 +13,10 @@
 //! driver* — it connects, introspects its catalog into
 //! [`TableSpec`]s, and supplies rows.
 //!
-//! **Loading model: catalog eager, rows lazy, hops by key.** The
+//! **Loading model: catalog eager, rows lazy, steps by key.** The
 //! schema is read once at open. A table is read *whole* only when a
 //! query asks for all of it — navigating into its rows (`/t/*`), its
-//! `:::n-rows`, a walk — via the driver-supplied [`Fetcher`]. A hop
+//! `:::n-rows`, a walk — via the driver-supplied [`Fetcher`]. A step
 //! reads the rows it lands on: a `-->` or `->` target, `/t/KEY`, the
 //! referrers of `<-` and `<--`, through the driver's [`KeyFetcher`]
 //! (`WHERE key IN (…)`, one statement per frontier where the engine
@@ -200,7 +200,7 @@ pub type Fetcher = Box<dyn Fn(usize, &TableSpec) -> Result<Vec<RowSpec>, String>
 /// column — `Some(index)`, or `None` for the row key (the primary
 /// key, else the driver's row id) — holds one of `values`, in the
 /// table's own order (`SELECT … WHERE col IN (…) ORDER BY <key>`).
-/// A hop then reads the rows it lands on instead of the table. An
+/// A step then reads the rows it lands on instead of the table. An
 /// `Err` (a table whose rows have no stable key, a statement the
 /// server rejects) sends the model to the whole-table fetch for
 /// that table, so a driver may decline case by case.
@@ -392,7 +392,7 @@ pub struct RelationalModel {
     tables: Vec<LazyTable>,
     fetcher: Fetcher,
     key_fetcher: Option<KeyFetcher>,
-    /// The first k rows of a table, for a hop that keeps a prefix.
+    /// The first k rows of a table, for a step that keeps a prefix.
     prefix_fetcher: Option<PrefixFetcher>,
     /// The exact row count of a table not read.
     counter: Option<Counter>,
@@ -568,7 +568,7 @@ impl RelationalModel {
         model
     }
 
-    /// Give the lazy model a keyed row source: hops, key lookups
+    /// Give the lazy model a keyed row source: steps, key lookups
     /// and backlinks then read the rows they need, and a table is
     /// read whole only when a query asks for all of it.
     pub fn with_key_fetcher(mut self, key_fetcher: KeyFetcher) -> Self {
@@ -597,11 +597,11 @@ impl RelationalModel {
     /// come from `reader`, which fetches them under a WHERE the
     /// planner pushed down (the engine re-applies the predicates,
     /// so the listing may be any superset of the rows the query
-    /// keeps). Only the listing is filtered: a hop into the table
+    /// keeps). Only the listing is filtered: a step into the table
     /// still reads its row by key, and anything that needs the
     /// whole table reads it whole, so crosslinks and resolutions
     /// stay exact beside the prefilter. Requires a keyed source
-    /// for that guarantee to be cheap; without one the first hop
+    /// for that guarantee to be cheap; without one the first step
     /// into the table reads it whole.
     pub fn with_filtered_listing(mut self, table: &str, reader: Fetcher) -> Self {
         if let Some(t) = self.table_index(table) {
@@ -767,7 +767,7 @@ impl RelationalModel {
             .expect("just absorbed")
     }
 
-    /// The first `k` rows of `t` for a child hop that keeps a prefix
+    /// The first `k` rows of `t` for a child step that keeps a prefix
     /// (`/t/* @| [..k]`, `@| first(k)`): from the rows already here
     /// when the table is read whole or a prefix at least as long is
     /// cached, else through the driver's prefix read; `None` where
@@ -1120,7 +1120,7 @@ impl AstAdapter for RelationalModel {
     /// A child by name without the scan: a table by its name, a row
     /// by its key (`/books/7` reads one row, not the table), a cell
     /// by its column.
-    /// A child hop under a table with one leading equality on a
+    /// A child step under a table with one leading equality on a
     /// column (`/invoices/*[::customer = "Emma"]`): the rows holding
     /// the value, read by key when the table is not whole, in the
     /// table's order — the keyed read the model already makes for
@@ -1132,7 +1132,7 @@ impl AstAdapter for RelationalModel {
         if plan.axis != quarb::PlanAxis::Child || plan.name.is_some() {
             return quarb::adapter::select_by_hooks(self, from, plan);
         }
-        // A hop that keeps a prefix and tests nothing reads k rows
+        // A step that keeps a prefix and tests nothing reads k rows
         // (the pushdown scanning round, 2026-11-06).
         if plan.conjuncts.is_empty() {
             let rows = self.prefix(t, plan.limit?)?;
@@ -1163,7 +1163,7 @@ impl AstAdapter for RelationalModel {
         })
     }
 
-    /// From the catalog: under a table, a child hop's equality on a
+    /// From the catalog: under a table, a child step's equality on a
     /// column the table has, with a text or integer value, is the
     /// keyed read's to apply; anything else is the engine's.
     fn select_plan(&self, scope: &[&str], plan: &quarb::StepPlan<'_>) -> Option<Vec<bool>> {
@@ -1191,7 +1191,7 @@ impl AstAdapter for RelationalModel {
         )
     }
 
-    /// Under a table, a child hop's cost: the driver's estimator
+    /// Under a table, a child step's cost: the driver's estimator
     /// when the model has one (a warehouse's dry run, a planner's
     /// `EXPLAIN`), asked once per run for the table and the
     /// equalities the keyed read would apply; else, a table already
@@ -1205,7 +1205,7 @@ impl AstAdapter for RelationalModel {
         if plan.axis != quarb::PlanAxis::Child {
             return None;
         }
-        // A hop by name under a table is a row by key: at most one,
+        // A step by name under a table is a row by key: at most one,
         // read keyed. The estimator, when there is one, says what
         // that read costs; the rows are clamped to the key's.
         if let Some(name) = plan.name {
@@ -1528,7 +1528,7 @@ impl AstAdapter for RelationalModel {
         out
     }
 
-    /// The hops a step is about to take from `nodes`, read in one
+    /// The links a step is about to follow from `nodes`, read in one
     /// statement per key: the rows the outgoing keys point at, or
     /// the rows pointing here.
     fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {

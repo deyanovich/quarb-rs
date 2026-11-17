@@ -2,7 +2,7 @@
 //! any navigation operator hold designators — names, globs, regex
 //! literals — joined by `||`, `&&` and a leading `!`: `||` the
 //! union of the classes, `&&` their intersection, `!` the complement
-//! among the hop's own candidates, bare (`/(!id)` needs no wildcard
+//! among the step's own candidates, bare (`/(!id)` needs no wildcard
 //! before it). A single `|` between whole subpaths stays the path
 //! alternation; `(/…/)` stays the regex literal.
 
@@ -47,7 +47,7 @@ fn designators_join_by_union_intersection_and_complement() {
     assert_eq!(names("//(*.json || *.yaml)"), ["a.json", "b.yaml"]);
     assert_eq!(names("/record/(!id)"), ["name", "size"]);
     assert_eq!(names("/record/(!id && !size)"), ["name"]);
-    // the complement ranges over the hop's own candidates: the
+    // the complement ranges over the step's own candidates: the
     // descendants under `//`, so the containers are in
     assert_eq!(names("//(*.rs && !test_*)"), ["main.rs", "lib.rs", "a.rs"]);
     // regex designators, bare inside the algebra
@@ -70,13 +70,13 @@ fn the_parenthesis_stands_where_a_name_stands() {
     assert_eq!(names("/record/(!id)[:name = \"size\"]"), ["size"]);
     assert_eq!(names("/src/(!*.rs)/(!test_*)"), ["a.rs"]);
     // the sibling axes alike
-    // the one next sibling is the hop's only candidate: `!` reads
+    // the one next sibling is the step's only candidate: `!` reads
     // among it
     assert_eq!(names("/src/lib.rs>(!main.rs)"), ["test_a.rs"]);
     assert_eq!(names("/src/main.rs>(!lib.rs)"), Vec::<String>::new());
     assert_eq!(names("/src/lib.rs<(*.rs && !test_*)"), ["main.rs"]);
     assert_eq!(names("/src/main.rs>>(!*.rs)"), ["notes.txt", "util"]);
-    // the root is a candidate of the ancestors hop, unnamed, kept
+    // the root is a candidate of the ancestors step, unnamed, kept
     assert_eq!(names("/src/util/a.rs\\\\(!src)"), ["util", ""]);
 }
 

@@ -143,7 +143,7 @@ impl MysqlAdapter {
         let conn = Rc::new(RefCell::new(conn));
         // One row source with an optional WHERE: the whole read, the
         // listing under a pushed-down filter, and the keyed read a
-        // hop makes (`WHERE key IN (…)`) all derive from it.
+        // step makes (`WHERE key IN (…)`) all derive from it.
         let rt = Rc::new(rt);
         let (rt2, conn2) = (rt.clone(), conn.clone());
         let (rt3, conn3) = (rt.clone(), conn.clone());

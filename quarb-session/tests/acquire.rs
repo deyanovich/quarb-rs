@@ -203,7 +203,7 @@ fn corpus_prefix_and_format_tokenize() {
     };
     assert_eq!(count("//token<word> @| count"), ["8"]);
     // UAX #29 breaks after "Dr.", and the sentence tier (ruling
-    // #64) makes the break a parent boundary: the hop stops.
+    // #64) makes the break a parent boundary: the step stops.
     assert_eq!(count("//token[:: = \"Dr\"]>token>token @| count"), ["0"]);
     assert_eq!(
         count("//token[:: = \"Dr\"]\\\\?sentence>sentence/token[1]::"),

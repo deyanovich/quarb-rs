@@ -71,7 +71,7 @@ impl std::str::FromStr for Severity {
 
 /// One diagnostic: its severity, a short code in capitals naming
 /// the rule or the event (`QUANTIFIER_BOUND`, `SYNTAX`, `PUSHED`),
-/// the message, and the site that raised it (a command, a hop, a
+/// the message, and the site that raised it (a command, a step, a
 /// round, a mount, the query).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
@@ -157,7 +157,7 @@ pub const WALK: &str = "WALK";
 /// no numeric reading under `sqrt`, a boolean under `round`): each
 /// answered null; one warning per command, counting them.
 pub const NOT_NUMERIC: &str = "NOT_NUMERIC";
-/// Warning: a hop names a label that the surface its source
+/// Warning: a step names a label that the surface its source
 /// declares lacks (a table's keys); the labels there are named. A
 /// source that declares nothing raises nothing (ruling 2026-11-10).
 pub const UNKNOWN_LABEL: &str = "UNKNOWN_LABEL";

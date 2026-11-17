@@ -18,8 +18,8 @@ pub struct GraphLibrary;
 pub static GRAPH: GraphLibrary = GraphLibrary;
 
 const HOP: OperandSpec = OperandSpec {
-    name: "hop",
-    doc: "the edges collected, as a hop: ->link, <-link, --road, ->*, ~*, ->(a || b); ->* when left out",
+    name: "step",
+    doc: "the edges collected, as a step: ->link, <-link, --road, ->*, ~*, ->(a || b); ->* when left out",
     values: &[],
     required: false,
 };
@@ -27,7 +27,7 @@ const HOP: OperandSpec = OperandSpec {
 const COMMANDS: &[Synopsis] = &[
     Synopsis {
         name: "pagerank",
-        doc: "the rank of each node of the context over the induced subgraph by the hop's edges: from 1/N, n rounds of (1 - d)/N + d times the in-neighbours' rank over their out-degree, the dangling mass spread evenly; a self-loop ignored, a repeated edge once (its weights added under --weight); the ranks sum to one",
+        doc: "the rank of each node of the context over the induced subgraph by the step's edges: from 1/N, n rounds of (1 - d)/N + d times the in-neighbours' rank over their out-degree, the dangling mass spread evenly; a self-loop ignored, a repeated edge once (its weights added under --weight); the ranks sum to one",
         pipes: Pipe::Agg,
         operands: &[HOP],
         options: &[
@@ -61,7 +61,7 @@ const COMMANDS: &[Synopsis] = &[
     },
     Synopsis {
         name: "distance",
-        doc: "each node's shortest distance from the seed set along the hop's edges: an integer in hops, a quantity in the unit with --weight=UNIT; a seed reads 0, a node no seed reaches null, a seed outside the context counts for nothing",
+        doc: "each node's shortest distance from the seed set along the step's edges: an integer in steps, a quantity in the unit with --weight=UNIT; a seed reads 0, a node no seed reaches null, a seed outside the context counts for nothing",
         pipes: Pipe::Agg,
         operands: &[HOP],
         options: &[
@@ -83,7 +83,7 @@ const COMMANDS: &[Synopsis] = &[
     },
     Synopsis {
         name: "kcore",
-        doc: "each node's core number: the largest k such that the node is in the subgraph where every node keeps at least k neighbours, a neighbour counted once over the hop's edges in either direction; a node without neighbours is 0",
+        doc: "each node's core number: the largest k such that the node is in the subgraph where every node keeps at least k neighbours, a neighbour counted once over the step's edges in either direction; a node without neighbours is 0",
         pipes: Pipe::Agg,
         operands: &[HOP],
         options: &[],
@@ -92,7 +92,7 @@ const COMMANDS: &[Synopsis] = &[
     },
     Synopsis {
         name: "betweenness",
-        doc: "each node's betweenness centrality (Brandes): over every pair of other nodes, the share of the shortest paths between them that pass through the node, a pair with several shortest paths dividing its unit among them; each unordered pair once under an undirected hop, each ordered pair under a directed one; a node on no path between others is 0",
+        doc: "each node's betweenness centrality (Brandes): over every pair of other nodes, the share of the shortest paths between them that pass through the node, a pair with several shortest paths dividing its unit among them; each unordered pair once under an undirected step, each ordered pair under a directed one; a node on no path between others is 0",
         pipes: Pipe::Agg,
         operands: &[HOP],
         options: &[
@@ -120,7 +120,7 @@ const COMMANDS: &[Synopsis] = &[
     },
     Synopsis {
         name: "conncomp",
-        doc: "each node's connected component, numbered from 1 in the order in which the components' first nodes stand in the context: the strongly connected components under a directed hop, the connected components under an undirected one (--*, ~*); a node without an edge is its own component",
+        doc: "each node's connected component, numbered from 1 in the order in which the components' first nodes stand in the context: the strongly connected components under a directed step, the connected components under an undirected one (--*, ~*); a node without an edge is its own component",
         pipes: Pipe::Agg,
         operands: &[HOP],
         options: &[],
@@ -129,7 +129,7 @@ const COMMANDS: &[Synopsis] = &[
     },
     Synopsis {
         name: "artpoints",
-        doc: "true for each node whose removal disconnects the graph of the hop (an articulation point), false for every other: the edges are read without their direction, a repeated edge counts once and a self-loop never, a node without an edge is false",
+        doc: "true for each node whose removal disconnects the graph of the step (an articulation point), false for every other: the edges are read without their direction, a repeated edge counts once and a self-loop never, a node without an edge is false",
         pipes: Pipe::Agg,
         operands: &[HOP],
         options: &[],
@@ -147,7 +147,7 @@ const COMMANDS: &[Synopsis] = &[
     },
     Synopsis {
         name: "route",
-        doc: "each node's shortest route from the seeds along the hop's edges, the list of the nodes in order, the seed first and the node itself last, the seed's own route the list of itself; several seeds give the nearest, a node no seed reaches null, a seed outside the context counts for nothing; where several routes are shortest the one whose predecessor stands first in document order",
+        doc: "each node's shortest route from the seeds along the step's edges, the list of the nodes in order, the seed first and the node itself last, the seed's own route the list of itself; several seeds give the nearest, a node no seed reaches null, a seed outside the context counts for nothing; where several routes are shortest the one whose predecessor stands first in document order",
         pipes: Pipe::Agg,
         operands: &[HOP],
         options: &[
@@ -169,7 +169,7 @@ const COMMANDS: &[Synopsis] = &[
     },
     Synopsis {
         name: "closeness",
-        doc: "each node's closeness centrality along the hop: with r the other nodes it reaches and n the context's nodes, r/(n-1) times r over the sum of the distances (Wasserman and Faust), 1 for a node adjacent to every other, 0 for one reaching none; the distances as distance measures them, in the hop's direction",
+        doc: "each node's closeness centrality along the step: with r the other nodes it reaches and n the context's nodes, r/(n-1) times r over the sum of the distances (Wasserman and Faust), 1 for a node adjacent to every other, 0 for one reaching none; the distances as distance measures them, in the step's direction",
         pipes: Pipe::Agg,
         operands: &[HOP],
         options: &[
@@ -213,7 +213,7 @@ const COMMANDS: &[Synopsis] = &[
     },
     Synopsis {
         name: "modularity",
-        doc: "one float for the context: the modularity (Newman and Girvan) of the partition the attached regula named by --by gives, the share of the edges inside the parts minus the share a random graph of the same degrees would place there, in -1/2..1; a directed hop takes Leicht and Newman's directed form; a node with nothing attached under the name is a part of its own",
+        doc: "one float for the context: the modularity (Newman and Girvan) of the partition the attached regula named by --by gives, the share of the edges inside the parts minus the share a random graph of the same degrees would place there, in -1/2..1; a directed step takes Leicht and Newman's directed form; a node with nothing attached under the name is a part of its own",
         pipes: Pipe::Agg,
         operands: &[HOP],
         options: &[
@@ -241,7 +241,7 @@ const COMMANDS: &[Synopsis] = &[
     },
     Synopsis {
         name: "triangles",
-        doc: "each node's triangles: the pairs of its neighbours along the hop that are neighbours of each other, the edges read without direction, a repeated edge once and a self-loop never; the sum over the context is three times the graph's triangle count",
+        doc: "each node's triangles: the pairs of its neighbours along the step that are neighbours of each other, the edges read without direction, a repeated edge once and a self-loop never; the sum over the context is three times the graph's triangle count",
         pipes: Pipe::Agg,
         operands: &[HOP],
         options: &[OptionSpec {

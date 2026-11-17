@@ -105,7 +105,7 @@ fn mock_cluster() {
     // The links are read off the object they leave, and the cluster
     // records nothing of what points at one: walking a link back is
     // refused, never answered empty (spec: The adapter contract) —
-    // the backward hop, the headless one and the navop wildcard. The
+    // the backward step, the headless one and the navop wildcard. The
     // reverse arrow over a scope looks for the referrers itself.
     let refused = |q: &str| match quarb::run(q, &a) {
         Err(e) => e.to_string(),

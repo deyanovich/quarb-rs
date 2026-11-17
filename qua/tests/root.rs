@@ -104,7 +104,7 @@ fn what_lies_beside_the_root_is_not_mounted() {
         lines(&dir, &["/stages/*::from_id-->::name", "roads.db"]),
         ["Ephesus"]
     );
-    // rooted at the stages: the stations are not there, and the hop
+    // rooted at the stages: the stations are not there, and the step
     // that would leave the root answers nothing
     assert_eq!(
         lines(&dir, &["//*", "roads.db?root=/stages"]),

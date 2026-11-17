@@ -26,8 +26,8 @@ fn a_node_answered_grafts_its_subtree() {
         exp("macro &guard($p): /p//predicate; /row&guard(/a[::x > 1])::y"),
         "/row[::x > 1]::y"
     );
-    // a step answered continues the walk; several steps are
-    // consecutive hops in answer order
+    // a step answered continues the walk; several are
+    // consecutive steps in answer order
     assert_eq!(
         exp("macro &steps($p): /p//step; /root&steps(/a/b)::n"),
         "/root/a/b::n"
@@ -74,7 +74,7 @@ fn a_quarq_answered_grafts_its_content() {
         "/row[::n > 1 + 2]"
     );
     // one answer per thread, grafted in thread order: each
-    // projection node a hop after the pipe
+    // projection node a step after the pipe
     assert_eq!(
         exp("macro &cols(@c): /c/*; /row | &cols(::a, ::b)"),
         "/row | ::a | ::b"

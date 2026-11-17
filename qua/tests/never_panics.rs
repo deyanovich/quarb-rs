@@ -207,7 +207,7 @@ fn a_route_over_a_zero_weight_edge() {
         ],
     );
     assert_eq!(code, Some(0), "{err}");
-    // the seed alone, then one hop, then two
+    // the seed alone, then one step, then two
     assert_eq!(out, "1\n2\n3");
 }
 

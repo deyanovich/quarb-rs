@@ -619,7 +619,7 @@ fn nested_predicates_read_the_thread_witness() {
         ),
         vec![2, 5]
     );
-    // A pipe hop's step predicate reads the same witness: from
+    // A piped step's predicate reads the same witness: from
     // each thread, climb to every ancestor and step to its .rs
     // children other than the witness itself, at depth 2. Only
     // w.rs's thread reaches one (z.rs, under b); x.rs's and
@@ -669,7 +669,7 @@ fn quantified_crosslinks_on_a_cycle() {
     // mgr cycle: x.rs (2) → z.rs (5) → w.rs (7) → x.rs (2)
     let t = MockTree::cyclic();
     // Simple paths: the anchor is visited, so the cycle cannot
-    // close — the chain stops after two hops, bound or no bound.
+    // close — the chain stops after two steps, bound or no bound.
     assert_eq!(run("//x.rs(->mgr)+", &t), vec![5, 7]);
     assert_eq!(run("//x.rs(->mgr)+?", &t), vec![5]);
     assert_eq!(run("//x.rs(->mgr)+!", &t), vec![7]);
@@ -729,11 +729,11 @@ fn label_algebra() {
     assert_eq!(run("//w.rs<-(ref && doc)", &t), vec![2, 2]);
     assert_eq!(run("//z.rs<-(!doc)", &t), vec![2]);
     assert_eq!(run("//z.rs<-(ref && doc)", &t), Vec::<u64>::new());
-    // a quantifier applies to the hop whatever it carries
+    // a quantifier applies to the step whatever it carries
     let c = MockTree::cyclic();
     assert_eq!(run("/a/x.rs->(mgr && !x){2}", &c), vec![7]);
     assert_eq!(run("/a/x.rs(->(mgr || x)){2}", &c), vec![7]);
-    // the plain alternation is the union of two hops under its
+    // the plain alternation is the union of two steps under its
     // older spelling, one thread per edge, as the class union is
     // (spec: the edge model); collapsed, both are the node set
     assert_eq!(run("/a/x.rs->(ref|doc)", &t), vec![7, 5, 7]);
@@ -753,12 +753,12 @@ fn dot_wildcard_and_sugar() {
     // `(/.){2}` — grandchildren; `/{2}` is sugar for it.
     assert_eq!(run("(/.){2}", &t), vec![2, 3, 5, 6]);
     assert_eq!(run("/{2}", &t), run("(/.){2}", &t));
-    // A named hop takes a brace quantifier directly.
+    // A named step takes a brace quantifier directly.
     let lists = MockTree::lists();
     assert_eq!(run("/div/ul/li(/ul/li){1}", &lists), vec![5]);
     // Outside a pattern a lone `.` is refused with the three readings
     // it could have meant (ruling 2026-11-08); the quoted name is the
-    // literal (no such node here), the parent hop and a dotted name
+    // literal (no such node here), the parent step and a dotted name
     // stay what they are.
     for q in ["/.", "/b->.", "/b/."] {
         let e = parse(&lex(q).unwrap()).unwrap_err().to_string();
@@ -938,7 +938,7 @@ fn group_in_a_predicate_path() {
     // x.rs has an outgoing ref chain; y.txt does not.
     assert_eq!(run("/a/*[(->ref)+]", &t), vec![2]);
     let cyc = MockTree::cyclic();
-    // every node on the mgr cycle reaches something in two hops
+    // every node on the mgr cycle reaches something in two steps
     assert_eq!(run("//*[(->mgr){2}]", &cyc), vec![2, 5, 7]);
 }
 
@@ -946,7 +946,7 @@ fn group_in_a_predicate_path() {
 fn group_predicates_filter_before_reach() {
     // mgr cycle: x.rs (2) → z.rs (5) → w.rs (7) → 2
     let t = MockTree::cyclic();
-    // nearest satisfying: w.rs is two hops out; without the
+    // nearest satisfying: w.rs is two steps out; without the
     // predicate, +? would stop at z.rs (tier one).
     assert_eq!(run("//x.rs(->mgr)+[:name = w.rs]?", &t), vec![7]);
     assert_eq!(run("//x.rs(->mgr)+?", &t), vec![5]);
@@ -1180,7 +1180,7 @@ fn set_walk_and_exact_walk_on_a_diamond() {
     assert_eq!(run("//a(->e)* @| collapse", &t).len(), 4);
     // The exact walk (a count, a range, a floor above one, the
     // distal reach) asks about acyclic walks of a given length:
-    // x.rs stands three hops out along a, y.txt, deep, and is the
+    // x.rs stands three steps out along a, y.txt, deep, and is the
     // farthest end.
     assert_eq!(run("//a(->e)+!", &t), vec![2]);
     assert_eq!(run("//a(->e){3}", &t), vec![2]);
@@ -1302,7 +1302,7 @@ fn the_graph_as_a_table() {
     assert!(take_refusal().is_none());
     // a wrong operand refuses naming the forms
     assert!(vals("//a(->e)* @| edges(:name)", &t).is_empty());
-    assert!(take_refusal().unwrap().contains("the collecting hop"));
+    assert!(take_refusal().unwrap().contains("the collecting step"));
     assert!(vals("//a(->e)* @| edges(->e; --weight=furlong)", &t).is_empty());
     assert!(take_refusal().unwrap().contains("no unit"));
 }
@@ -1397,14 +1397,14 @@ fn every_walk_is_its_own_thread() {
         vec!["4_km", "6_km"]
     );
     assert_eq!(
-        show("//a(->e){;100_km}[:name = \"x.rs\"] | $-:hops"),
+        show("//a(->e){;100_km}[:name = \"x.rs\"] | $-:steps"),
         vec!["1", "3"]
     );
     assert_eq!(
-        show("//a(->e){1;3}[:name = \"x.rs\"] | $-:hops"),
+        show("//a(->e){1;3}[:name = \"x.rs\"] | $-:steps"),
         vec!["1", "3"]
     );
-    // a hop from two threads to one node is two threads, as a join's
+    // a step from two threads to one node is two threads, as a join's
     // rows are; collapse(-e) keeps them apart by arriving edge
     assert_eq!(show("//a->e->e | :name"), vec!["deep", "deep"]);
     assert_eq!(show("//a->e->e @| collapse | :name"), vec!["deep"]);
@@ -1544,7 +1544,7 @@ fn the_acyclic_promise_expands_by_node_and_round() {
         QueryResult::Nodes(ns) => assert!(ns.is_empty()),
     }
     assert!(take_refusal().unwrap().contains("frontier bound (30)"));
-    // a wildcard hop reads the promise off the edges it crosses
+    // a wildcard step reads the promise off the edges it crosses
     assert_eq!(run("/c1(->*){22} @| collapse", &t), vec![144]);
     assert_eq!(run("/c1(->*)+!", &t), vec![144]);
     assert!(take_refusal().is_none());
@@ -1576,7 +1576,7 @@ fn the_acyclic_promise_expands_by_node_and_round() {
         "{msg}"
     );
     assert!(
-        msg.contains("the walk from /a returns to /a/x.rs after 3 hops"),
+        msg.contains("the walk from /a returns to /a/x.rs after 3 steps"),
         "{msg}"
     );
     assert_eq!(run("//a(->e){3}", &MockTree::diamond()), vec![2]);
@@ -1659,8 +1659,8 @@ fn navop_star_walks_every_edge() {
     assert_eq!(run("/a/x.rs(~*){2}", &t), vec![3, 0, 6]);
     assert_eq!(run("/a/x.rs(~*)+[:name = \"deep\"]?", &t), vec![6]);
     // The deep form: the walk over every edge, then the matching
-    // hop — w.rs by name is the child of deep, five hops out; the
-    // nearest edges are a's and ref's; the farthest hop is the one
+    // step — w.rs by name is the child of deep, five steps out; the
+    // nearest edges are a's and ref's; the farthest step is the one
     // from z.rs back to b.
     assert_eq!(run("/a/x.rs~~w.rs", &t), vec![7]);
     assert_eq!(run("/a/x.rs~~?*", &t), vec![1, 7]);
@@ -1695,13 +1695,13 @@ fn a_budget_sums_an_edge_weight_along_the_walk() {
     assert_eq!(run("//a(->e){;100_km}[:name != \"a\"]?", &t), vec![3]);
     assert_eq!(run("//a(->e){;100_km}[:name = \"deep\"]?", &t), vec![6]);
     // a count brace beside the budget takes the exact walk, and the
-    // lightest of what it admits: two hops are deep by y (3 km) and
+    // lightest of what it admits: two steps are deep by y (3 km) and
     // deep by x (16 km)
     assert_eq!(run("//a(->e){2}{;100_km}?", &t), vec![6]);
     // The heaviest within the budget: x by y, deep at 6 km.
     assert_eq!(run("//a(->e){;7_km}!", &t), vec![2]);
     // The total, read by the one command after the group, in the
-    // budget's unit; the hops and the round beside it.
+    // budget's unit; the steps and the round beside it.
     assert_eq!(
         vals("//a(->e){;100_km}[:name = \"deep\"]? | $-:total", &t),
         vec![Value::Quantity {
@@ -1711,13 +1711,13 @@ fn a_budget_sums_an_edge_weight_along_the_walk() {
         }]
     );
     assert_eq!(
-        vals("//a(->e){;100_km}[:name = \"deep\"]? | $-:hops", &t),
+        vals("//a(->e){;100_km}[:name = \"deep\"]? | $-:steps", &t),
         vec![Value::Int(2)]
     );
     // One command only: the next one sees no edge.
     assert_eq!(
         vals(
-            "//a(->e){;100_km}[:name = \"deep\"]? | $-:hops | $-:hops",
+            "//a(->e){;100_km}[:name = \"deep\"]? | $-:steps | $-:steps",
             &t
         ),
         vec![Value::Null]
@@ -1759,7 +1759,7 @@ fn a_budget_sums_an_edge_weight_along_the_walk() {
     assert!(take_refusal().unwrap().contains("negative weight"));
     // The exact form has no meaning for a sum.
     assert!(lex("//a(->e){5_km}").is_err());
-    // The facts on a counted walk: hops and the round, no total —
+    // The facts on a counted walk: steps and the round, no total —
     // one thread per walk, deep by x and by y.
     assert_eq!(
         vals("//a(->e){2}[:name = \"deep\"] | $-:round", &t),
@@ -1770,9 +1770,21 @@ fn a_budget_sums_an_edge_weight_along_the_walk() {
         vec![Value::Null, Value::Null]
     );
     // Inside the group's predicate the facts read too.
-    assert_eq!(run("//a(->e)+[$-:hops = 2]", &t), vec![6, 6]);
+    assert_eq!(run("//a(->e)+[$-:steps = 2]", &t), vec![6, 6]);
     // Outside any group the facts are null.
-    assert_eq!(vals("//a->e | $-:hops", &t), vec![Value::Null, Value::Null]);
+    assert_eq!(
+        vals("//a->e | $-:steps", &t),
+        vec![Value::Null, Value::Null]
+    );
+    // The fact was `:hops` until 0.67 (the term hop was renamed step,
+    // ruling 2026-11-17): the old name is refused with the new.
+    let e = parse(&lex("//a(->e)+ | $-:hops").unwrap())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("'$-:hops' is retired: the steps a walk took are '$-:steps'"),
+        "{e}"
+    );
     // The canonical text keeps the budget as written.
     assert_eq!(
         crate::syntax::unparse::unparse(&parse(&lex("//a(->e){;100_km}?").unwrap()).unwrap()),
@@ -1783,7 +1795,7 @@ fn a_budget_sums_an_edge_weight_along_the_walk() {
 #[test]
 fn edge_accessor() {
     let t = MockTree::weighted();
-    // `$-::prop` filters BY the edge in the hop's own predicate:
+    // `$-::prop` filters BY the edge in the step's own predicate:
     // a's heavy outgoing edges only.
     assert_eq!(run("//a->e[$-::qty > 1]", &t), vec![2]);
     // Bare `$-` reads the label.
@@ -1793,12 +1805,12 @@ fn edge_accessor() {
     // Null where no edge is in scope: nothing has walked one.
     assert!(run("/a[$-::qty = 4]", &t).is_empty());
     // Edge property in a projection-bearing predicate command after
-    // the hop is NOT in scope (the edge belongs to the hop).
+    // the step is NOT in scope (the edge belongs to the step).
     assert_eq!(
         vals("//a->e[$-::qty > 1]:name", &t),
         vec![Value::Str("x.rs".into())]
     );
-    // The command after a plain hop reads the edge the thread most
+    // The command after a plain step reads the edge the thread most
     // recently walked (spec: Arrived-by Edge), as it does after a
     // quantified group's exit: the label bare, the property
     // projected.
@@ -1810,14 +1822,14 @@ fn edge_accessor() {
         vals("//a->e | $-::qty", &t),
         vec![Value::Int(4), Value::Int(1)]
     );
-    // A tree hop walks the child edge: `//a` arrives by `[child]`.
+    // A tree step walks the child edge: `//a` arrives by `[child]`.
     assert_eq!(vals("//a | $-", &t), vec![Value::Str("[child]".into())]);
 }
 
 #[test]
 fn headless_hop_is_one_thread_per_edge() {
     // x.rs (2) has e→deep (6), and e←a (1), e←deep (6): deep is
-    // linked both ways, so the headless hop reaches it twice — one
+    // linked both ways, so the headless step reaches it twice — one
     // thread per edge (spec: Expansion paths), the edge context
     // keeping each edge's true direction.
     let t = MockTree::diamond();
@@ -1853,7 +1865,7 @@ fn pattern_breadcrumbs() {
         ),
         vec![Value::Int(48)]
     );
-    // Bare $- pushes the label; tree hops push [child].
+    // Bare $- pushes the label; tree steps push [child].
     assert_eq!(
         vals("(/a .($-)){1} | $.", &t),
         vec![Value::Str("[child]".into())]
@@ -1899,12 +1911,12 @@ fn per_path_results() {
 #[test]
 fn structural_edge_labels() {
     let t = MockTree::sample();
-    // Every hop defines $-: tree, sibling, and reach walks.
+    // Every step defines $-: tree, sibling, and reach walks.
     assert_eq!(run("/a[$- = \"[child]\"]", &t), vec![1]);
     assert_eq!(run("//w.rs\\deep[$- = \"[parent]\"]", &t), vec![6]);
     assert_eq!(run("/a/x.rs>y.txt[$- = \"[next]\"]", &t), vec![3]);
     assert_eq!(run("/a/y.txt<x.rs[$- = \"[prev]\"]", &t), vec![2]);
-    // Before any hop, $- is null (nothing walked).
+    // Before any step, $- is null (nothing walked).
     assert!(run("/a[$- = \"[parent]\"]", &t).is_empty());
 }
 
@@ -1966,7 +1978,7 @@ fn predicates() {
     assert_eq!(run("//*[:depth > 2]", &t), vec![7]);
 }
 
-/// `[n]` selects by position among the hop's results (per source
+/// `[n]` selects by position among the step's results (per source
 /// node, as filtered by the brackets to its left) — not by
 /// sibling position, which is `[:index = n]`.
 #[test]
@@ -1998,7 +2010,7 @@ fn index_predicate_positions_among_hop_results() {
     assert_eq!(run("/p[1]", &t), vec![2]);
     assert_eq!(run("/p[2]", &t), vec![3]);
     assert_eq!(run("/sect/p[2]", &t), vec![7]);
-    // a descendant hop yields one list per source node, so a
+    // a descendant step yields one list per source node, so a
     // root-anchored //p[1] is the first p in the whole tree
     assert_eq!(run("//p[1]", &t), vec![2]);
     assert_eq!(run("//p[4]", &t), vec![7]);
@@ -2021,7 +2033,7 @@ fn index_predicate_positions_among_hop_results() {
     assert_eq!(run("//p[-5]", &t), Vec::<u64>::new());
 }
 
-/// `[a..b]` keeps the inclusive positional span of the hop's
+/// `[a..b]` keeps the inclusive positional span of the step's
 /// results; either end may be omitted or negative, and ends
 /// clamp to the list.
 #[test]
@@ -2734,7 +2746,7 @@ fn nav_command_resumes_navigation() {
     // A path-shaped command fans out per thread — the pipeline
     // spelling of a path continuation.
     assert_eq!(run("/* | /*", &t), vec![2, 3, 5, 6]);
-    // The register rides across the hop: collect at both
+    // The register rides across the step: collect at both
     // levels, lay out as a record.
     let vs = vals("/* | .dir(:name) | /* | .file(:name) | %.", &t);
     assert_eq!(vs.len(), 4);
@@ -2759,10 +2771,10 @@ fn nav_command_resumes_navigation() {
     // path-side and the pipe-side mark spellings feed it.
     assert_eq!(run("/a .m /x.rs | $$.m/y.txt", &t), vec![3]);
     assert_eq!(run("/a | .m | /x.rs | $$.m/y.txt", &t), vec![3]);
-    // Arrows hop crosslinks as commands too.
+    // Arrows step crosslinks as commands too.
     assert_eq!(run("/a/x.rs | ->ref", &t), vec![7]);
     // File-first: a projection enters value mode, the push
-    // returns to navigation mode, and the hop is legal again.
+    // returns to navigation mode, and the step is legal again.
     assert_eq!(run("/a | :name | . | /*", &t), vec![2, 3]);
 }
 
@@ -2773,10 +2785,10 @@ fn nav_command_mode_discipline() {
             .expect_err("should refuse")
             .to_string()
     };
-    // Value mode: a hop would drop the live topic.
+    // Value mode: a step would drop the live topic.
     assert!(refuse("/a:name | /b").contains("value mode"));
     assert!(refuse("/a | :name | /b").contains("value mode"));
-    // Hops are per-thread: neither `@|` nor `$|` takes them.
+    // Steps are per-thread: neither `@|` nor `$|` takes them.
     assert!(refuse("/a @| /b").contains("per-thread"));
     assert!(refuse("/a | ... $| /b").contains("iteration pipe"));
 }
@@ -3027,7 +3039,7 @@ fn pushes_return_to_navigation_mode() {
     let t = MockTree::sample();
     // A computed push files the value (and shows it as the
     // topic, as ever) — but the thread is back in navigation
-    // mode: the hop is legal, and it rebuilds the capsae with
+    // mode: the step is legal, and it rebuilds the capsae with
     // the filed value safe in the register.
     let vs = vals("/* | .dir(:name) | /*[:name = x.rs] | %.", &t);
     assert_eq!(vs.len(), 1);
@@ -3161,7 +3173,7 @@ fn a_count_behind_a_descendant_lead_step_streams_and_agrees() {
 #[test]
 fn fork_keeps_the_register_provenance() {
     let t = MockTree::sample();
-    // The cross-capsa scenario: after a hop the capsa stands
+    // The cross-capsa scenario: after a step the capsa stands
     // elsewhere, but the regula still says where it was read.
     let rows = traced("/a/x.rs | .n(:name) | ->ref | $.n", &t);
     assert_eq!(rows[0].node, NodeId(7));
@@ -3499,7 +3511,7 @@ fn attached_read_survives_filters_and_walks() {
     let t = MockTree::sample();
     // Identity, not location: w.rs's thread is filtered away, its
     // attachment stays readable — through the link, and standing
-    // on the node after a hop.
+    // on the node after a step.
     assert_eq!(
         vals(
             "//*<file> | .:v(:index * 10) | [:name = \"x.rs\"] | ->ref:.v",
@@ -3720,7 +3732,7 @@ fn edge_ends_are_node_operands() {
             ("t".to_string(), Value::Str("w.rs".into())),
         ])]
     );
-    // The undirected hop reads the ends as stored: from w.rs the
+    // The undirected step reads the ends as stored: from w.rs the
     // edge's source is still x.rs.
     assert_eq!(
         vals("//*<file>[:name = \"w.rs\"] | --ref | $-:source:name", &t),
@@ -3804,7 +3816,7 @@ fn graph_pagerank_is_row_aligned_over_the_induced_subgraph() {
             Value::Str("deep".into())
         ]
     );
-    // `->*` when the hop is left out: the same here
+    // `->*` when the step is left out: the same here
     assert_eq!(vals("//a(->e)* @| collapse @| graph:pagerank", &t), ranks);
     // the induced rule: deep alone is a graph of one, rank one
     assert_eq!(
@@ -3843,7 +3855,7 @@ fn graph_pagerank_is_row_aligned_over_the_induced_subgraph() {
         vec![ranks[3].clone()]
     );
     // what refuses: a value context, the plain pipe, an alternation
-    // of hops, the reserved option, a value context
+    // of steps, the reserved option, a value context
     // a value-mode thread still stands on its node: the positions
     // are ranked whatever the topic; only a thread standing nowhere
     // refuses
@@ -3862,7 +3874,7 @@ fn graph_pagerank_is_row_aligned_over_the_induced_subgraph() {
     let why = refused("//a(->e)* | graph:pagerank(->e)", &t).unwrap();
     assert!(why.contains("aggregation pipe"), "{why}");
     let why = refused("//a(->e)* @| graph:pagerank((->e|->f))", &t).unwrap();
-    assert!(why.contains("one hop"), "{why}");
+    assert!(why.contains("one step"), "{why}");
     let why = refused("//a(->e)* @| graph:pagerank(->e; --teleport=/a)", &t).unwrap();
     assert!(why.contains("reserved"), "{why}");
 }
@@ -3941,7 +3953,7 @@ fn graph_distance_counts_hops_or_sums_weights_from_the_seeds() {
 fn graph_kcore_peels_undirected_distinct_neighbours() {
     let t = MockTree::roads();
     // the 4-cycle a - x.rs - deep - y.txt - a: every node in core 2,
-    // whichever way the hop reads the edges
+    // whichever way the step reads the edges
     assert_eq!(
         vals("//a(->e)* @| collapse @| graph:kcore(->e)", &t),
         vec![Value::Int(2); 4]
@@ -4011,7 +4023,7 @@ fn a_mark_re_seat_keeps_every_thread() {
     let t = MockTree::roads();
     // a .A --e .H --e: five walks (x.rs has two edges to deep),
     // three through x.rs and two through y.txt, their registers
-    // alike within a group; re-seating on H keeps the five (a hop
+    // alike within a group; re-seating on H keeps the five (a step
     // would fold the alike), collapse folds them to the two H
     assert_eq!(
         vals("/a .A --e .H --e | $$.H @| count", &t),
@@ -4025,7 +4037,7 @@ fn a_mark_re_seat_keeps_every_thread() {
         vals("/a .A --e .H --e | $$.H @| collapse @| count", &t),
         vec![Value::Int(2)]
     );
-    // a hop still folds the alike: x.rs and y.txt both to `a`
+    // a step still folds the alike: x.rs and y.txt both to `a`
     assert_eq!(vals("/a/* | \\ @| count", &t), vec![Value::Int(1)]);
 }
 
@@ -4285,7 +4297,7 @@ fn artpoints_and_bridges_read_the_hop_undirected() {
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0][..2], ["/a", "/a/x.rs"]);
     assert_eq!(rows[1][..2], ["/a", "/a/y.txt"]);
-    // the direction of the hop is no matter, and a weight refuses
+    // the direction of the step is no matter, and a weight refuses
     assert_eq!(
         table_of("//a(->e)*[:name != \"deep\"] @| graph:bridges(<-e)", &t)
             .1
@@ -4298,7 +4310,7 @@ fn artpoints_and_bridges_read_the_hop_undirected() {
 #[test]
 fn routes_are_lists_of_nodes_seed_first() {
     let t = MockTree::roads();
-    // by hops: deep is reached through x.rs or y.txt alike, and the
+    // by steps: deep is reached through x.rs or y.txt alike, and the
     // predecessor that stands first in document order wins
     let routes = vals("//a(->e)* @| collapse @| graph:route(->e; --from=/a)", &t);
     assert_eq!(list_strs(&routes[0]), ["/a"]);
@@ -4496,7 +4508,7 @@ fn a_declared_graph_answers_once_the_context_is_the_scope() {
     assert_eq!(d.kept.borrow().len(), 2);
 }
 
-// ── draft.191: a predicate on a hop operand, reading through a reference ──
+// ── draft.191: a predicate on a step operand, reading through a reference ──
 
 #[test]
 fn a_hop_operand_takes_the_walks_predicate() {
@@ -4508,7 +4520,7 @@ fn a_hop_operand_takes_the_walks_predicate() {
     // `$-` the edge: the roads longer than 2 km
     let (_, rows) = table_of("//a(->e)* @| edges(->e[$-::len > 2_km])", &t);
     assert_eq!(rows.len(), 3, "{rows:?}");
-    // the library reads the same hop: without the 12 km road deep is
+    // the library reads the same step: without the 12 km road deep is
     // reached through y.txt alone, so x.rs cuts nothing and deep's
     // route runs through y.txt
     let routes = vals(
@@ -4516,7 +4528,7 @@ fn a_hop_operand_takes_the_walks_predicate() {
         &t,
     );
     assert_eq!(list_strs(&routes[3]), ["/a", "/a/y.txt", "/b/deep"]);
-    // an undirected hop filtered by the edge: the 3 km road back from
+    // an undirected step filtered by the edge: the 3 km road back from
     // deep keeps the cycle whole, so nothing cuts; under 3 km only
     // a-y.txt-deep remain, a path whose middle node cuts
     let cut = vals(
@@ -4569,7 +4581,7 @@ fn the_parser_reads_a_property_through_a_reference() {
 #[test]
 fn closeness_communities_modularity_and_triangles() {
     let t = MockTree::roads();
-    // closeness along ->e: a reaches the three others in 1, 1, 2 hops
+    // closeness along ->e: a reaches the three others in 1, 1, 2 steps
     let c = vals("//a(->e)* @| collapse @| graph:closeness(->e)", &t);
     let Value::Float(a) = c[0] else {
         panic!("{c:?}")

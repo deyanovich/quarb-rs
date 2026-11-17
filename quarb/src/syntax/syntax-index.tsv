@@ -1,27 +1,27 @@
 # id	glyph	name_en	name_ru	anchor	entry	kind	does_en	does_ru	(anchor = a label where the glyph is defined, or see:ID for a rounded or second spelling; entry = the Language Reference page the row belongs to; kind = what sort of syntax the row is; does_en, does_ru = one sentence on what it does, on the canonical rows alone, which `qua man GLYPH` prints)
-child	/	child hop	хоп к детям	sec:basic-navigation	child-hop	hop	Steps down to the children of the position that carry the name that follows.	Шагает вниз, к детям позиции, которые носят идущее следом имя.
+child	/	child step	шаг к детям	sec:basic-navigation	child-step	step	Steps down to the children of the position that carry the name that follows.	Шагает вниз, к детям позиции, которые носят идущее следом имя.
 desc	//	descendant path	путь по потомкам	sec:descendants-ancestors	descendant-path	path	Reaches every descendant of the position that carries the name, at any depth.	Достигает каждого потомка позиции с этим именем, на любой глубине.
 desc-prox	//?	proximal descendant path	ближайший путь по потомкам	sec:descendants-ancestors	descendant-path	path	Reaches the matching descendants at the shallowest depth below the position, ties included.	Достигает совпавших потомков на наименьшей глубине под позицией, включая равные.
 desc-dist	//!	distal descendant path	дальний путь по потомкам	sec:descendants-ancestors	descendant-path	path	Reaches the matching descendants at the deepest depth below the position.	Достигает совпавших потомков на наибольшей глубине под позицией.
-parent	\	parent hop	хоп к родителю	sec:basic-navigation	parent-hop	hop	Steps up to the parent of the position, or to the parent only if it carries the name that follows.	Шагает вверх, к родителю позиции, или только к родителю с идущим следом именем.
+parent	\	parent step	шаг к родителю	sec:basic-navigation	parent-step	step	Steps up to the parent of the position, or to the parent only if it carries the name that follows.	Шагает вверх, к родителю позиции, или только к родителю с идущим следом именем.
 anc	\\	ancestor path	путь по предкам	sec:descendants-ancestors	ancestor-path	path	Reaches every ancestor of the position, nearest first, or those that carry the name.	Достигает каждого предка позиции, начиная с ближайшего, или тех, что носят имя.
 anc-prox	\\?	proximal ancestor path	ближайший путь по предкам	sec:descendants-ancestors	ancestor-path	path	Reaches the nearest ancestor that matches.	Достигает ближайшего совпавшего предка.
 anc-dist	\\!	distal ancestor path	дальний путь по предкам	sec:descendants-ancestors	ancestor-path	path	Reaches the farthest ancestor that matches.	Достигает самого дальнего совпавшего предка.
-next	>	next sibling	следующий сиблинг	sec:basic-navigation	next-sibling	hop	Steps to the immediate next sibling of the position, if it carries the name.	Шагает к непосредственно следующему сиблингу позиции, если он носит имя.
-prev	<	previous sibling	предыдущий сиблинг	sec:basic-navigation	previous-sibling	hop	Steps to the immediate previous sibling of the position, if it carries the name.	Шагает к непосредственно предыдущему сиблингу позиции, если он носит имя.
+next	>	next sibling	следующий сиблинг	sec:basic-navigation	next-sibling	step	Steps to the immediate next sibling of the position, if it carries the name.	Шагает к непосредственно следующему сиблингу позиции, если он носит имя.
+prev	<	previous sibling	предыдущий сиблинг	sec:basic-navigation	previous-sibling	step	Steps to the immediate previous sibling of the position, if it carries the name.	Шагает к непосредственно предыдущему сиблингу позиции, если он носит имя.
 following	>>	following siblings	последующие сиблинги	sec:sibling-reach	following-siblings	path	Reaches every sibling after the position that carries the name, in document order.	Достигает каждого сиблинга после позиции с этим именем, в порядке документа.
 preceding	<<	preceding siblings	предшествующие сиблинги	sec:sibling-reach	preceding-siblings	path	Reaches every sibling before the position that carries the name.	Достигает каждого сиблинга перед позицией с этим именем.
 fol-prox	>>?	proximal following sibling	ближайший последующий сиблинг	sec:sibling-reach	following-siblings	path	Reaches the nearest following sibling that matches.	Достигает ближайшего совпавшего сиблинга после позиции.
 fol-dist	>>!	distal following sibling	дальний последующий сиблинг	sec:sibling-reach	following-siblings	path	Reaches the farthest following sibling that matches.	Достигает самого дальнего совпавшего сиблинга после позиции.
 pre-prox	<<?	proximal preceding sibling	ближайший предшествующий сиблинг	sec:sibling-reach	preceding-siblings	path	Reaches the nearest preceding sibling that matches.	Достигает ближайшего совпавшего сиблинга перед позицией.
 pre-dist	<<!	distal preceding sibling	дальний предшествующий сиблинг	sec:sibling-reach	preceding-siblings	path	Reaches the farthest preceding sibling that matches.	Достигает самого дальнего совпавшего сиблинга перед позицией.
-link	->	link hop	хоп по ссылке	sec:crosslink-nav-syntax	link-hop	hop	Follows the outgoing crosslink edges of the position that carry the label, to their targets.	Идёт по исходящим рёбрам-ссылкам позиции с этой меткой, к их целям.
-rlink	<-	reverse link hop	обратный хоп по ссылке	sec:crosslink-nav-syntax	link-hop	hop	Follows the incoming crosslink edges that carry the label, to the nodes that point at the position.	Идёт по входящим рёбрам-ссылкам с этой меткой, к узлам, указывающим на позицию.
-ulink	--	undirected link hop	ненаправленный хоп по ссылке	sec:crosslink-nav-syntax	link-hop	hop	Follows the crosslink edges that carry the label in either direction.	Идёт по рёбрам-ссылкам с этой меткой в любом направлении.
-navstar	~⟨name⟩	navop wildcard	подстановочный знак нав-опа	sec:navop-star	navop-wildcard	hop	Follows every edge that touches the position and matches the name, tree edge or crosslink, in either direction.	Идёт по каждому ребру, касающемуся позиции и совпадающему с именем, ребру дерева или ссылке, в любом направлении.
+link	->	link step	шаг по ссылке	sec:crosslink-nav-syntax	link-step	step	Follows the outgoing crosslink edges of the position that carry the label, to their targets.	Идёт по исходящим рёбрам-ссылкам позиции с этой меткой, к их целям.
+rlink	<-	reverse link step	обратный шаг по ссылке	sec:crosslink-nav-syntax	link-step	step	Follows the incoming crosslink edges that carry the label, to the nodes that point at the position.	Идёт по входящим рёбрам-ссылкам с этой меткой, к узлам, указывающим на позицию.
+ulink	--	undirected link step	ненаправленный шаг по ссылке	sec:crosslink-nav-syntax	link-step	step	Follows the crosslink edges that carry the label in either direction.	Идёт по рёбрам-ссылкам с этой меткой в любом направлении.
+navstar	~⟨name⟩	navop wildcard	подстановочный знак нав-опа	sec:navop-star	navop-wildcard	step	Follows every edge that touches the position and matches the name, tree edge or crosslink, in either direction.	Идёт по каждому ребру, касающемуся позиции и совпадающему с именем, ребру дерева или ссылке, в любом направлении.
 navstar-deep	~~⟨name⟩	navop wildcard at any depth	подстановочный знак нав-опа на любой глубине	sec:navop-star	navop-wildcard	path	Walks over edges of any kind and ends at one that matches the name, at any depth.	Идёт по рёбрам любого рода и заканчивает на ребре, совпавшем с именем, на любой глубине.
-resolve	-->	cross-reference resolution	разрешение перекрёстной ссылки	sec:resolution-syntax	resolution	hop	Resolves the projected value into the node it names and moves there.	Разрешает спроецированное значение в узел, который оно называет, и переходит туда.
-rresolve	<--	reverse cross-reference resolution	обратное разрешение перекрёстной ссылки	sec:reverse-resolution	resolution	hop	Finds the nodes whose property resolves to the position.	Находит узлы, чьё свойство разрешается в позицию.
+resolve	-->	cross-reference resolution	разрешение перекрёстной ссылки	sec:resolution-syntax	resolution	step	Resolves the projected value into the node it names and moves there.	Разрешает спроецированное значение в узел, который оно называет, и переходит туда.
+rresolve	<--	reverse cross-reference resolution	обратное разрешение перекрёстной ссылки	sec:reverse-resolution	resolution	step	Finds the nodes whose property resolves to the position.	Находит узлы, чьё свойство разрешается в позицию.
 tsearch	^//	tree search	поиск по дереву	sec:search-syntax	tree-search	path	Lands on every matching node of the tree, the root's descendants.	Встаёт на каждый совпавший узел дерева, на потомков корня.
 root	^	root anchor	якорь корня	sec:anchors-syntax	root-anchor	anchor	Starts a branch at the root of the arbor.	Начинает ветвь в корне арбора.
 leaf	$	leaf anchor	якорь листа	sec:name-matching	-	retired		
@@ -37,8 +37,8 @@ node-anchor	((!⟨expr⟩))	node-id anchor	якорь по идентифика�
 anchored	^␣	anchored operand	заякоренный операнд	sec:anchored-operands	root-anchor	anchor	Evaluates an operand's path from the root instead of from the node under test.	Вычисляет путь операнда от корня, а не от проверяемого узла.
 wild	*	wildcard	джокер	sec:name-matching	wildcard	name	Stands for any name after a navigation operator, and for any run of characters inside a name.	Заменяет любое имя после оператора навигации и любую цепочку символов внутри имени.
 regex	(/␣/)	regex literal	литерал регулярного выражения	sec:pattern-literals	regex-literal	name	Matches names, or a value after a pattern comparison, by a regular expression.	Сопоставляет имена, или значение после сравнения с образцом, с регулярным выражением.
-athop	/@⟨name⟩	at-leading hop name	имя хопа с @	sec:name-characters	hop-names	name	Names a child whose name begins with an at sign, which admits kaiv's array namespaces into a path.	Называет ребёнка, чьё имя начинается со знака @: так в путь входят пространства имён массивов kaiv.
-trait	<␣>	trait filter	фильтр по трейту	sec:trait-filters	trait-filter	filter	Keeps the nodes a hop reaches that wear the trait.	Оставляет те узлы, достигнутые хопом, которые носят трейт.
+atstep	/@⟨name⟩	at-leading step name	имя шага с @	sec:name-characters	step-names	name	Names a child whose name begins with an at sign, which admits kaiv's array namespaces into a path.	Называет ребёнка, чьё имя начинается со знака @: так в путь входят пространства имён массивов kaiv.
+trait	<␣>	trait filter	фильтр по трейту	sec:trait-filters	trait-filter	filter	Keeps the nodes a step reaches that wear the trait.	Оставляет те узлы, достигнутые шагом, которые носят трейт.
 tdot	<.>	one trait segment	один сегмент трейта	sec:trait-segments	trait-filter	filter	Stands for exactly one segment of a trait's name.	Заменяет ровно один сегмент имени трейта.
 tstar	<*>	any trait segments	любые сегменты трейта	sec:trait-segments	trait-filter	filter	Stands for any segments of a trait's name.	Заменяет любые сегменты имени трейта.
 prop	::	property projection	проекция свойства	sec:field-projections-syntax	property-projection	projection	Reads a property of the position into a value, or the node's own value when no name follows.	Читает свойство позиции в значение, или собственное значение узла, если имя не следует.
@@ -93,24 +93,24 @@ r-nodeprev	((..))	rounded penultimate mark	округлённая предпос
 invoking	$$	invoking capsa	вызывающая капса	sec:correlated-subcontexts	-	retired		
 joined	$$⟨k⟩	joined node	присоединённый узел	sec:correlation-operator	joined-node	sigil	Reads the node a correlation bound, the witness of its k-th joined expression.	Читает узел, привязанный корреляцией, свидетеля её k-го присоединяемого выражения.
 edge	$-	arrived-by edge	ребро прихода	sec:edge-accessor	edge-accessor	sigil	Reads the label of the edge the thread most recently walked.	Читает метку ребра, по которому нить прошла последним.
-edges	@-	final-hop edges	рёбра последнего хопа	sec:edge-accessor	edge-accessor	sigil	Lists the labels of all the edges that reached the current node on the walk's final hop.	Перечисляет метки всех рёбер, достигших текущего узла на последнем хопе обхода.
-edgefact	$-:⟨round⟩	edge fact	факт ребра	sec:edge-accessor	edge-accessor	sigil	Reads a fact of the walk that brought the thread here: its hops, its total, its costs or its weights.	Читает факт обхода, приведшего нить сюда: его хопы, сумму, стоимости или веса.
+edges	@-	final-step edges	рёбра последнего шага	sec:edge-accessor	edge-accessor	sigil	Lists the labels of all the edges that reached the current node on the walk's final step.	Перечисляет метки всех рёбер, достигших текущего узла на последнем шаге обхода.
+edgefact	$-:⟨round⟩	edge fact	факт ребра	sec:edge-accessor	edge-accessor	sigil	Reads a fact of the walk that brought the thread here: its steps, its total, its costs or its weights.	Читает факт обхода, приведшего нить сюда: его шаги, сумму, стоимости или веса.
 xread	⟨X⟩:.⟨r⟩	node read	чтение узла	sec:cross-capsa-reads	cross-capsa-read	sigil	Reads the regula attached to the node that the expression before the colon reaches.	Читает регулу, прикреплённую к узлу, которого достигает выражение перед двоеточием.
 attach	.:⟨name⟩	attaching push	прикрепляющий пуш	sec:cross-capsa-reads	cross-capsa-read	push	Files a value in the capsa under the name and attaches it to the current node, where any thread that reaches the node can read it.	Кладёт значение в капсу под именем и прикрепляет его к текущему узлу, где его прочтёт любая нить, достигшая узла.
-group	(␣)	group	группа	sec:path-patterns-syntax	path-group	group	Groups hops into one unit, for an alternation or a quantifier to apply to.	Объединяет хопы в одну единицу, к которой применяется альтернация или квантификатор.
-alt	(/⟨a⟩|/⟨b⟩)	path alternation	альтернация путей	sec:path-patterns-syntax	path-alternation	group	Takes either of several hops, each with its own navigation operator.	Берёт любой из нескольких хопов, каждый со своим оператором навигации.
+group	(␣)	group	группа	sec:path-patterns-syntax	path-group	group	Groups steps into one unit, for an alternation or a quantifier to apply to.	Объединяет шаги в одну единицу, к которой применяется альтернация или квантификатор.
+alt	(/⟨a⟩|/⟨b⟩)	path alternation	альтернация путей	sec:path-patterns-syntax	path-alternation	group	Takes either of several steps, each with its own navigation operator.	Берёт любой из нескольких шагов, каждый со своим оператором навигации.
 union	||	union	объединение	sec:traits	edge-label-algebra	group	Unites two classes of traits, labels or names in their algebra.	Объединяет два класса трейтов, меток или имён в их алгебре.
-quant	{⟨m⟩;⟨n⟩}	quantifier	квантификатор	sec:path-patterns-syntax	path-quantifier	quantifier	Repeats a group of hops between a least and a greatest number of times.	Повторяет группу хопов от наименьшего до наибольшего числа раз.
+quant	{⟨m⟩;⟨n⟩}	quantifier	квантификатор	sec:path-patterns-syntax	path-quantifier	quantifier	Repeats a group of steps between a least and a greatest number of times.	Повторяет группу шагов от наименьшего до наибольшего числа раз.
 qbudget	{;⟨100_km⟩}	budget quantifier	бюджетный квантификатор	sec:path-patterns-syntax	weighted-quantifier	quantifier	Bounds a walk by the total of a weight, a quantity in the braces.	Ограничивает обход суммой веса, величиной в фигурных скобках.
 qrule	{⟨abs⟩:⟨a⟩;⟨b⟩}	cost function	функция стоимости	par:cost-rule	weighted-quantifier	quantifier	Names how a walk's weights fold into its cost, otherwise than by their sum.	Называет, как веса обхода складываются в его стоимость, если не суммой.
 qstack	{⟨m⟩}{;⟨Q⟩}	stacked braces	стопка скобок	par:stacked-braces	weighted-quantifier	quantifier	Bounds one walk by several braces at once, each on its own measure.	Ограничивает один обход несколькими скобками сразу, каждая по своей мере.
 qunit	{*_⟨km⟩}	star unit	звёздочная единица	par:budget-quantifier	weighted-quantifier	quantifier	Names the weight a walk totals by its unit alone, with no bound.	Называет вес, который суммирует обход, одной единицей, без границы.
-qplus	+	one or more	один и более	sec:path-patterns-syntax	path-quantifier	quantifier	Repeats a group of hops one or more times.	Повторяет группу хопов один или более раз.
-qstar	*	zero or more	ноль и более	sec:path-patterns-syntax	path-quantifier	quantifier	Repeats a group of hops zero or more times.	Повторяет группу хопов ноль или более раз.
+qplus	+	one or more	один и более	sec:path-patterns-syntax	path-quantifier	quantifier	Repeats a group of steps one or more times.	Повторяет группу шагов один или более раз.
+qstar	*	zero or more	ноль и более	sec:path-patterns-syntax	path-quantifier	quantifier	Repeats a group of steps zero or more times.	Повторяет группу шагов ноль или более раз.
 qprox	?	proximal reach	ближайший охват	sec:path-patterns-syntax	proximal-distal	quantifier	Keeps only the nearest matches of a walk, the shortest paths.	Оставляет только ближайшие совпадения обхода, кратчайшие пути.
 qdist	!	distal reach	дальний охват	sec:path-patterns-syntax	proximal-distal	quantifier	Keeps only the farthest matches of a walk, the longest paths.	Оставляет только самые дальние совпадения обхода, длиннейшие пути.
 pred	[␣]	predicate	предикат	sec:predicates-syntax	predicate	predicate	Keeps the nodes or the threads for which the condition holds.	Оставляет те узлы или нити, для которых выполняется условие.
-index	[⟨n⟩]	index predicate	индексный предикат	sec:index-predicates	index-predicate	predicate	Keeps a hop's matches by position: one, several or a range, counted from either end.	Оставляет совпадения хопа по позиции: одно, несколько или диапазон, считая с любого конца.
+index	[⟨n⟩]	index predicate	индексный предикат	sec:index-predicates	index-predicate	predicate	Keeps a step's matches by position: one, several or a range, counted from either end.	Оставляет совпадения шага по позиции: одно, несколько или диапазон, считая с любого конца.
 eq	=	equal to	равно	sec:relations	comparison	operator	Holds when the two values are equal.	Истинно, когда два значения равны.
 ne	!=	not equal to	не равно	sec:relations	comparison	operator	Holds when the two values are not equal.	Истинно, когда два значения не равны.
 lt	<	less than	меньше	sec:relations	comparison	operator	Holds when the left value is less than the right.	Истинно, когда левое значение меньше правого.
@@ -127,7 +127,7 @@ or	||	or	или	sec:predicate-logic	boolean-operators	operator	Holds when either
 not	!	not	не	sec:predicate-logic	boolean-operators	operator	Holds when the condition does not.	Истинно, когда условие не выполняется.
 coalesce	⟨a⟩ ?? ⟨b⟩	null default	умолчание при null	sec:null-default	null-default	operator	Gives the left value unless it is null, and the right value then.	Даёт левое значение, если оно не null, а иначе правое.
 cond	(⟨c⟩ ? ⟨t⟩ : ⟨e⟩)	conditional	условное выражение	sec:conditional	conditional	operator	Selects one of two values by a condition, evaluating only the branch taken.	Выбирает одно из двух значений по условию, вычисляя только выбранную ветвь.
-vmatch	=>	value match	сопоставление значений	sec:value-match	value-match	hop	Hops from a node to the nodes of a scope whose property equals one of its own.	Переходит от узла к тем узлам области, чьё свойство равно его собственному.
+vmatch	=>	value match	сопоставление значений	sec:value-match	value-match	step	Steps from a node to the nodes of a scope whose property equals one of its own.	Переходит от узла к тем узлам области, чьё свойство равно его собственному.
 scrut	(⟨x⟩ ?= ⟨k⟩ ? ⟨r⟩ : ⟨e⟩)	switch	переключатель	sec:scrutinee-conditional	switch	operator	Compares one value against several keys in turn and gives the result of the first arm that matches, or the else.	Сравнивает одно значение с несколькими ключами по очереди и даёт результат первой совпавшей ветви, а иначе else.
 corr	<=>	correlation	корреляция	sec:correlation-operator	correlation	operator	Joins each driving node to the first node of the joined expression that satisfies the condition, and drops a driver with none.	Соединяет каждый ведущий узел с первым узлом присоединяемого выражения, удовлетворяющим условию, и отбрасывает ведущий узел без такого.
 ocorr	<=>?	outer correlation	внешняя корреляция	sec:correlation-operator	correlation	operator	Joins each driving node to its first witness and keeps a driver with none, its partner null.	Соединяет каждый ведущий узел с его первым свидетелем и сохраняет ведущий узел без свидетеля, с партнёром null.
@@ -182,22 +182,22 @@ m-unit	unit	unit declaration	объявление единицы	sec:model-unit	
 m-units	units	unit library import	импорт библиотеки единиц	sec:model-unit	model	model	Imports a file of unit declarations.	Импортирует файл объявлений единиц.
 m-tree	tree	tree declaration	объявление дерева	sec:model-tree	model	model	Names a tree of the model by the identity under which other trees refer to it.	Называет дерево модели идентификатором, под которым на него ссылаются другие деревья.
 m-mount	mount	mount statement	оператор монтирования	sec:model-mount	model	model	Names a source the model opens itself.	Называет источник, который модель открывает сама.
-r-parent	/..	rounded parent hop	округлённый хоп к родителю	see:parent	parent-hop	hop		
+r-parent	/..	rounded parent step	округлённый шаг к родителю	see:parent	parent-step	step		
 r-anc	/...	rounded ancestor path	округлённый путь по предкам	see:anc	ancestor-path	path		
 r-anc-prox	/...?	rounded proximal ancestor reach	округлённый ближайший охват предков	see:anc-prox	ancestor-path	path		
 r-anc-dist	/...!	rounded distal ancestor reach	округлённый дальний охват предков	see:anc-dist	ancestor-path	path		
-r-next	;-	rounded next sibling	округлённый следующий сиблинг	see:next	next-sibling	hop		
-r-prev	-;	rounded previous sibling	округлённый предыдущий сиблинг	see:prev	previous-sibling	hop		
+r-next	;-	rounded next sibling	округлённый следующий сиблинг	see:next	next-sibling	step		
+r-prev	-;	rounded previous sibling	округлённый предыдущий сиблинг	see:prev	previous-sibling	step		
 r-following	;;-	rounded following siblings	округлённые последующие сиблинги	see:following	following-siblings	path		
 r-fol-prox	;;-?	rounded proximal following sibling	округлённый ближайший последующий сиблинг	see:fol-prox	following-siblings	path		
 r-fol-dist	;;-!	rounded distal following sibling	округлённый дальний последующий сиблинг	see:fol-dist	following-siblings	path		
 r-preceding	-;;	rounded preceding siblings	округлённые предшествующие сиблинги	see:preceding	preceding-siblings	path		
 r-pre-prox	-;;?	rounded proximal preceding sibling	округлённый ближайший предшествующий сиблинг	see:pre-prox	preceding-siblings	path		
 r-pre-dist	-;;!	rounded distal preceding sibling	округлённый дальний предшествующий сиблинг	see:pre-dist	preceding-siblings	path		
-r-link	:-	rounded link hop	округлённый хоп по ссылке	see:link	link-hop	hop		
-r-rlink	-:	rounded reverse link	округлённый обратный хоп	see:rlink	link-hop	hop		
-r-resolve	:--	rounded cross-reference resolution	округлённое разрешение перекрёстной ссылки	see:resolve	resolution	hop		
-r-rresolve	--:	rounded reverse cross-reference resolution	округлённое обратное разрешение перекрёстной ссылки	see:rresolve	resolution	hop		
+r-link	:-	rounded link step	округлённый шаг по ссылке	see:link	link-step	step		
+r-rlink	-:	rounded reverse link	округлённый обратный шаг	see:rlink	link-step	step		
+r-resolve	:--	rounded cross-reference resolution	округлённое разрешение перекрёстной ссылки	see:resolve	resolution	step		
+r-rresolve	--:	rounded reverse cross-reference resolution	округлённое обратное разрешение перекрёстной ссылки	see:rresolve	resolution	step		
 r-quant	(+⟨m⟩;⟨n⟩)	rounded quantifier	округлённый квантификатор	see:quant	path-quantifier	quantifier		
 r-trait	(:␣)	rounded trait filter	округлённый фильтр по трейту	see:trait	trait-filter	filter		
 r-pred	(?␣)	rounded predicate	округлённый предикат	see:pred	predicate	predicate		
@@ -284,10 +284,10 @@ comment	#	comment	комментарий	sec:fragments	comment	comment	Starts a 
 bcomment	(!!␣)	block comment	блочный комментарий	sec:fragments	comment	comment	Encloses a comment the parser skips, anywhere whitespace may stand.	Заключает комментарий, который разбор пропускает, везде, где может стоять пробел.
 option	--⟨name⟩=⟨v⟩	option	опция	sec:call-operands	options	call	Sets an option of a command, in the shell's spelling, after the operands.	Задаёт опцию команды в написании оболочки, после операндов.
 subctx	(␣)	subcontext body	тело подконтекста	sec:subcontext-bodies	subcontext	group	Holds a pipeline run from the thread's position and reduced to one value.	Содержит конвейер, который запускается от позиции нити и сводится к одному значению.
-dotwild	.	dot wildcard	точечный шаблон	sec:path-patterns-syntax	dot-wildcard	name	Matches one hop name of any spelling, inside a path group.	Совпадает с одним именем хопа любого написания, внутри группы пути.
+dotwild	.	dot wildcard	точечный шаблон	sec:path-patterns-syntax	dot-wildcard	name	Matches one step name of any spelling, inside a path group.	Совпадает с одним именем шага любого написания, внутри группы пути.
 traitalg	<⟨a⟩ && !⟨b⟩>	trait algebra	алгебра трейтов	sec:traits	trait-algebra	filter	Combines traits with and, or and not inside the angle brackets.	Сочетает трейты через и, или и не внутри угловых скобок.
-labelalg	->(⟨a⟩ || !⟨b⟩)	label algebra	алгебра лейблов	sec:traits	edge-label-algebra	filter	Selects the crosslinks to follow by and, or and not over their labels.	Выбирает ссылки для хопа через и, или и не над их метками.
-namealg	(⟨a⟩ || !⟨b⟩)	name algebra	алгебра имён	sec:name-algebra	name-algebra	filter	Selects the names a hop matches by and, or and not over names, globs and regex literals.	Выбирает имена для хопа через и, или и не над именами, глобами и регулярными литералами.
-hopname	⟨name⟩	hop name	имя хопа	sec:name-characters	hop-names	name	Names what a hop matches: a bare name, a position, a quoted name or a designator.	Называет то, с чем совпадает хоп: голое имя, позицию, имя в кавычках или обозначение.
+labelalg	->(⟨a⟩ || !⟨b⟩)	label algebra	алгебра лейблов	sec:traits	edge-label-algebra	filter	Selects the crosslinks to follow by and, or and not over their labels.	Выбирает ссылки для шага через и, или и не над их метками.
+namealg	(⟨a⟩ || !⟨b⟩)	name algebra	алгебра имён	sec:name-algebra	name-algebra	filter	Selects the names a step matches by and, or and not over names, globs and regex literals.	Выбирает имена для шага через и, или и не над именами, глобами и регулярными литералами.
+stepname	⟨name⟩	step name	имя шага	sec:name-characters	step-names	name	Names what a step matches: a bare name, a position, a quoted name or a designator.	Называет то, с чем совпадает шаг: голое имя, позицию, имя в кавычках или обозначение.
 plit	*"␣"*	pattern literal	литерал шаблона	sec:pattern-literals	pattern-literal	name	Matches a text by a glob of quoted strings and stars, after a pattern comparison.	Сопоставляет текст с глобом из строк в кавычках и звёздочек, после сравнения с образцом.
 usearch	*//	universal search	поиск по арбору	sec:search-syntax	tree-search	path	Lands on every matching node of the arbor, the root and the nodes outside the tree included.	Встаёт на каждый совпавший узел арбора, включая корень и узлы вне дерева.

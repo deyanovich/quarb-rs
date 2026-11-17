@@ -43,7 +43,7 @@ fn catalog_and_rows() {
 #[test]
 #[ignore = "needs QUARB_MSSQL pointing at a music database"]
 fn fk_machinery() {
-    // the two-hop join as a path, over sys.foreign_key_columns
+    // the two-step join as a path, over sys.foreign_key_columns
     assert_eq!(
         values("/tracks/1::album_id-->::artist_id-->::name"),
         ["Holst"]

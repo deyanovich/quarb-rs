@@ -88,7 +88,7 @@ fn a_foreign_key_labels_its_edge_without_the_suffix() {
     );
     assert_eq!(qua(&dir, "/employees/1<-manager::name"), ["Bo", "Cy"]);
     // the value keeps its column name; the edge accessor says the
-    // label, on the hop and on the resolution alike
+    // label, on the step and on the resolution alike
     assert_eq!(qua(&dir, "/employees/6::manager_id"), ["4"]);
     assert_eq!(
         qua(&dir, "/employees/*->*[$- = \"manager\"] @| count"),
@@ -213,7 +213,7 @@ fn a_pushed_down_prefilter_keeps_every_edge() {
         qua_model(&dir, "org.model", "/employees/*[::id = 1]<-manager::name"),
         ["Bo", "Cy"]
     );
-    // The catalog's own edge too (no model): the hop into the table
+    // The catalog's own edge too (no model): the step into the table
     // goes by key beside the prefilter.
     assert_eq!(
         qua(&dir, "/employees/*[::name = \"Dee\"]->manager::name"),

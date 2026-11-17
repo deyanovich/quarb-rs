@@ -99,7 +99,7 @@ pub struct WebAdapter<S: WebStore> {
     grafts: RefCell<HashMap<PageKey, Rc<TextModel>>>,
     rows: RefCell<HashMap<PageKey, Rc<LightRow>>>,
     /// Crosslink lists per row, kept for the session: the engine
-    /// asks for a hop's edges once per successor (to label the
+    /// asks for a step's edges once per successor (to label the
     /// arrival), so a hub's list would otherwise be fetched once
     /// per backlink.
     links_out: RefCell<HashMap<PageKey, Rc<Vec<(String, NodeId)>>>>,
@@ -257,7 +257,7 @@ impl<S: WebStore> WebAdapter<S> {
         Some(g)
     }
 
-    /// The rows a crosslink hop is about to read, hydrated in one
+    /// The rows a crosslink step is about to read, hydrated in one
     /// statement per chunk (a hub's six thousand backlinks are one
     /// round trip, not six thousand).
     fn hydrate(&self, keys: &[PageKey]) {
@@ -682,7 +682,7 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
         }
     }
 
-    /// An edge's own properties (spec: Text Readings, the web
+    /// An edge's own properties (spec: Quarb Readings, the web
     /// reading): `hreflang` on an altlang, `position` on a
     /// breadcrumb — the first edge of the label between the two
     /// pages.
@@ -1458,7 +1458,7 @@ impl<S: WebStore> AstAdapter for WebAdapter<S> {
     }
 }
 
-/// A resource's traits beside `resource` (spec: Text Readings, the
+/// A resource's traits beside `resource` (spec: Quarb Readings, the
 /// web reading): the extension of the URL's last path segment,
 /// lowercased (`pdf`, `png`, `zip`), and `external` where the host
 /// is not the site's.

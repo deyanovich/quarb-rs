@@ -1,7 +1,7 @@
 //! `graft(NOTATION)` — grafting on demand (spec: Composition,
 //! Grafting): a text topic parses as the notation named, or as it
 //! declares itself, and the thread then stands on the parsed
-//! document's root in navigation mode, so a hop walks on into what a
+//! document's root in navigation mode, so a step walks on into what a
 //! program or a column handed over as text. A text that does not
 //! parse as asked refuses; a null topic stays null.
 
@@ -66,7 +66,7 @@ fn per_thread_over_a_column_of_texts_with_the_register_kept() {
         ]
     );
     // A null topic stays null, as for every command: the thread
-    // stands where it stood, and a hop from there finds no `t`.
+    // stands where it stood, and a step from there finds no `t`.
     assert_eq!(
         run("/rows/* | .id(::id) | ::body | graft(json) | %(id = $.id; t = /t::)").unwrap(),
         vec![
@@ -224,7 +224,7 @@ fn readings_refuse_what_they_do_not_read() {
 #[test]
 fn a_graft_inside_a_subcontext_opens_the_way_for_a_hop() {
     // The static mode along an inline pipe: after graft the thread
-    // stands on the parsed root, and the next stage may hop.
+    // stands on the parsed root, and the next stage may step.
     assert_eq!(
         run("/rows/* | %(id = ::id; t = (::body | graft(json) | /t::))").unwrap(),
         vec![
@@ -237,7 +237,7 @@ fn a_graft_inside_a_subcontext_opens_the_way_for_a_hop() {
         run("/rows/*[(::body | graft(json) | /t::) = 2]/id::").unwrap(),
         vec!["2"]
     );
-    // ... and a hop with nothing filed before it still refuses.
+    // ... and a step with nothing filed before it still refuses.
     let e = refuse("/rows/* | %(t = (::body | /t::))");
     assert!(e.contains("cannot navigate in value mode"), "{e}");
 }

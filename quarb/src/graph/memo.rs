@@ -83,11 +83,11 @@ pub(crate) fn backlinks_of(
     v
 }
 
-/// Whether a hop at `node` that walks links back is refused (spec:
+/// Whether a step at `node` that walks links back is refused (spec:
 /// The adapter contract): the source has links there it cannot
 /// walk back, and an empty answer would read as "nothing points
 /// here". `op` is the operator as written (`<-`, `--`, `~`),
-/// `label` the one label the hop names, if it names exactly one.
+/// `label` the one label the step names, if it names exactly one.
 /// Records the refusal; the caller answers nothing.
 pub(crate) fn backward_refused(
     adapter: &impl AstAdapter,
@@ -108,7 +108,7 @@ pub(crate) fn backward_refused(
     true
 }
 
-/// The one label a link hop names (`<-owner`), `None` for a
+/// The one label a link step names (`<-owner`), `None` for a
 /// wildcard, a pattern or a label selection.
 pub(crate) fn named_label(step: &Step) -> Option<&str> {
     match &step.matcher {

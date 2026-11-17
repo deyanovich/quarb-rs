@@ -1,7 +1,7 @@
 //! `@| tree` (spec: The tree): the context drawn as Unix `tree`
 //! draws a directory — every context node a starting point, the
 //! mount root the top line, a dotted stub for a skipped path, the
-//! crosslinks one hop deep, and the operands (depth, traits, props,
+//! crosslinks one step deep, and the operands (depth, traits, props,
 //! `%`, columns).
 
 use quarb::{AstAdapter, NodeId, QueryResult, Value};

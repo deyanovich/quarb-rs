@@ -135,7 +135,7 @@ pub fn resolve_links(
             .to_string(),
         Dialect::Postgres => "UPDATE links l SET to_id = r.redirect_to FROM pages r WHERE r.id = l.to_id AND r.kind = 'redirect' AND r.redirect_to IS NOT NULL".to_string(),
     };
-    // Chains: at most three hops.
+    // Chains: at most three steps.
     let mut m = 0;
     for _ in 0..3 {
         let k = store.execute(&through)?;
@@ -144,7 +144,7 @@ pub fn resolve_links(
             break;
         }
     }
-    // Resources (spec: Text Readings, the web reading): a link whose
+    // Resources (spec: Quarb Readings, the web reading): a link whose
     // target is no page of the site and no redlink points at a node
     // of kind `resource`, one per URL, named by its site path or its
     // URL, after every page in the tree.
@@ -206,7 +206,7 @@ pub fn index(store: &dyn SqlStore) -> Result<Vec<String>, String> {
 /// in byte order of their names, depth from 1. Returns
 /// (id, parent, depth, rank).
 /// The tree's pre-order with siblings by pagerank descending, ties
-/// by name (spec: Text Readings, the web reading): a site's document
+/// by name (spec: Quarb Readings, the web reading): a site's document
 /// order puts the most linked pages first at every level, so
 /// `//page[..10]` and every search result come most-linked first.
 /// Each node is (id, parent, name, pagerank).

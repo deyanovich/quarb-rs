@@ -1380,10 +1380,16 @@ impl Lower {
         }
     }
 
-    /// A `\yrN\moN\dyN\hrN\minN` group as an ISO date-time.
+    /// A `\yrN\moN\dyN\hrN\minN` group as an ISO date at the
+    /// precision the group is written at: a year alone is `1776`, a
+    /// year and month `1776-03`, and with a day the date-time (the
+    /// hour and the minute zero where none is written). A reader of
+    /// the date gives a reduced one its calendar period, as every
+    /// format's does; padded to the first of January it read as an
+    /// instant the file never stated.
     fn time_group(&mut self) -> String {
         let mut depth = 1usize;
-        let (mut y, mut mo, mut d, mut h, mut mi) = (0, 1, 1, 0, 0);
+        let (mut y, mut mo, mut d, mut h, mut mi) = (0, None, None, 0, 0);
         while self.pos < self.toks.len() {
             let tok = &self.toks[self.pos];
             self.pos += 1;
@@ -1397,8 +1403,8 @@ impl Lower {
                 }
                 Tok::Word(w, Some(n)) => match w.as_str() {
                     "yr" => y = *n,
-                    "mo" => mo = *n,
-                    "dy" => d = *n,
+                    "mo" => mo = Some(*n),
+                    "dy" => d = Some(*n),
                     "hr" => h = *n,
                     "min" => mi = *n,
                     _ => {}
@@ -1409,7 +1415,14 @@ impl Lower {
         if y == 0 {
             return String::new();
         }
-        format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:00")
+        match (mo, d) {
+            (None, None) => format!("{y:04}"),
+            (Some(mo), None) => format!("{y:04}-{mo:02}"),
+            (mo, Some(d)) => {
+                let mo = mo.unwrap_or(1);
+                format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:00")
+            }
+        }
     }
 }
 

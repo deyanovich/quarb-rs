@@ -23,7 +23,7 @@ fn values(a: &FirebaseAdapter, q: &str) -> Vec<String> {
 #[ignore = "needs network"]
 fn opaque_navigation_and_properties() {
     let a = FirebaseAdapter::connect(&target()).unwrap();
-    // /v0 and /v0/item refuse enumeration; named hops pass through.
+    // /v0 and /v0/item refuse enumeration; named steps pass through.
     assert_eq!(
         values(&a, "/item/1 | %(::title; ::by)"),
         [r#"{"title": "Y Combinator", "by": "pg"}"#]

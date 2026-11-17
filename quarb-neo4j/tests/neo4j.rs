@@ -42,7 +42,7 @@ fn catalog_and_rows() {
 #[test]
 #[ignore = "needs QUARB_NEO4J pointing at a fixture-loaded server"]
 fn relationships_are_crosslinks() {
-    // one hop, chain, and the reverse direction
+    // one step, chain, and the reverse direction
     assert_eq!(values("/Person/3->REPORTS_TO::name"), vec!["Bob"]);
     assert_eq!(
         values("/Person/3->REPORTS_TO->REPORTS_TO::name"),

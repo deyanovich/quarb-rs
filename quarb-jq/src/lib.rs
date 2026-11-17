@@ -601,7 +601,7 @@ impl Parser {
     }
 
     /// A navigation path starting at `.`: `.a.b[0]["k"][]?[1:3]…`,
-    /// emitted as Quarb hops. Returns whether the path ends in a
+    /// emitted as Quarb steps. Returns whether the path ends in a
     /// slice (whose elements Quarb streams where jq boxes an array).
     fn nav_path(&mut self, out: &mut String) -> Result<bool, JqError> {
         self.expect(Tok::Dot, "'.'")?;
@@ -687,7 +687,7 @@ impl Parser {
             let n = start.ok_or_else(|| JqError::Syntax(0, "empty [] index".into()))?;
             if n >= 0 {
                 // An array's items are named by their position from
-                // one, so jq's `.[0]` is the name hop `/1`.
+                // one, so jq's `.[0]` is the name step `/1`.
                 write!(out, "/{}", n + 1).unwrap();
             } else {
                 write!(out, "/*[{n}]").unwrap();

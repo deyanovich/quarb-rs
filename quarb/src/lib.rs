@@ -6,7 +6,7 @@
 //! arbor model.
 //!
 //! It currently implements tree navigation in full (child, descendant,
-//! parent, ancestor, and sibling hops; proximal/distal reach; root and
+//! parent, ancestor, and sibling steps; proximal/distal reach; root and
 //! leaf anchors; literal, glob, and `~(...)` regex name matching;
 //! `<trait>` filters), scalar projection (`::` properties, `:` core
 //! metadata, `:::` adapter metadata), `[...]` predicates (comparisons,
@@ -183,7 +183,7 @@ pub fn validate_step_body(body: &str) -> Result<()> {
 }
 
 /// Whether `node` would match the step body as a step of a path:
-/// decided at the node, the predicates evaluated there, no hop.
+/// decided at the node, the predicates evaluated there, nothing walked.
 pub fn node_matches_step_body(adapter: &impl AstAdapter, node: NodeId, body: &StepBody) -> bool {
     graph::steps::node_matches_elem(adapter, node, &body.0)
 }

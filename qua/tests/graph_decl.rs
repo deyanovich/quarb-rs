@@ -56,7 +56,7 @@ fn bridges_artpoints_and_routes_over_a_declared_edge() {
     assert!(ok, "{err}");
     assert_eq!(out.matches("\"source\"").count(), 1, "{out}");
     assert!(out.contains("/stations/"), "{out}");
-    // the route from Ephesus to the Euphrates, by hops through Sardis
+    // the route from Ephesus to the Euphrates, by steps through Sardis
     let (out, err, ok) = qua(
         &dir,
         &["/stations/* @| graph:route(--stage; --from=/stations/*[::id = 1])"],
@@ -105,11 +105,11 @@ fn a_declared_graph_is_reported_and_decides_nothing() {
         err.contains("info NOT_PUSHED (graph): the context is 3 of the 4 nodes of /stations/*, computed over 3 nodes"),
         "{err}"
     );
-    // another hop is another graph
+    // another step is another graph
     let (_, err, ok) = qua(&dir, &["/stations/* @| graph:artpoints(->stage)"]);
     assert!(ok, "{err}");
     assert!(
-        err.contains("info NOT_PUSHED (graph): the hop or the options differ from the declared artpoints(--stage) on /stations/*"),
+        err.contains("info NOT_PUSHED (graph): the step or the options differ from the declared artpoints(--stage) on /stations/*"),
         "{err}"
     );
     // a measure the model does not declare says nothing of graphs
@@ -169,7 +169,7 @@ fn a_hop_takes_a_predicate_and_a_reference_reads_its_node() {
         "Ephesus > Sardis > Euphrates",
         "{out}"
     );
-    // the windowed declaration is read: the same hop text matches
+    // the windowed declaration is read: the same step text matches
     let (out, err, ok) = qua(
         &dir,
         &["/stations/* @| graph:conncomp(--stage[$-::parasangs > 50])"],
@@ -203,7 +203,7 @@ fn closeness_communities_modularity_and_triangles_over_the_stations() {
         c[0] == 0.0 && (c[1] - 1.0 / 3.0).abs() < 1e-12 && c[2] == 1.0 && c[3] == 1.0,
         "{out}"
     );
-    // closeness: Sardis reaches the three others in one hop each
+    // closeness: Sardis reaches the three others in one step each
     let (out, err, ok) = qua(&dir, &["/stations/* @| graph:closeness(--stage)"]);
     assert!(ok, "{err}");
     let c: Vec<f64> = out.lines().map(|l| l.parse().unwrap()).collect();

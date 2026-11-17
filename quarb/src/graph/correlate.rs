@@ -38,7 +38,7 @@ pub(crate) fn eval_query_outer(
 /// [`eval_query`]'s capsa-level form: the final capsae plus the
 /// static value-vs-node typing, before reduction to a result.
 /// The count an adapter answers for a query that is a chain of
-/// bare child hops from `start` (or the root) ending in one step (a literal name or `*`, at
+/// bare child steps from `start` (or the root) ending in one step (a literal name or `*`, at
 /// most one leading equality, no other predicates, no traits, no
 /// marks) closed by `@| count` and nothing else — `/invoices/* @|
 /// count`, `//token[::lower = "tom"] @| count`.
@@ -1341,7 +1341,7 @@ pub(crate) fn union_branches(
         // forms fork one navigation per pocket; the invoker's
         // register (references included) also seeds the navigation,
         // so nested predicates and deeper anchors keep seeing them.
-        // A body forks the capsa it serves, as a hop does: the same
+        // A body forks the capsa it serves, as a step does: the same
         // register and captures ride in; the node is new.
         let top = GraphExt::at(start);
         let seed_register: &[Reg] = outer.map(|s| s.register).unwrap_or(&[]);

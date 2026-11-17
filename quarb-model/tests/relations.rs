@@ -54,7 +54,7 @@ fn an_aliased_node_is_the_source_wearing_a_role() {
 #[test]
 fn a_relation_walks_both_ways_from_one_declaration() {
     let a = ops(MODEL);
-    // Forward: from an error, the deploys that preceded it. The hop
+    // Forward: from an error, the deploys that preceded it. The step
     // is named for what it lands on.
     let mut got = values(&a, "/errors/error[::msg = 'disk full']->deploy::rev");
     got.sort();

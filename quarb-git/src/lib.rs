@@ -32,10 +32,13 @@
 //! Everything is read through git plumbing over subprocess
 //! (`rev-list`, `rev-parse`, `ls-tree`, `cat-file`, ...) — no
 //! libgit2, no new dependencies — lazily, one object on first
-//! touch. The tree and the commits are kept for the adapter's
-//! lifetime; a blob's content is read again at each read, through
-//! one open `cat-file --batch` pipe, so a large file is never held.
-//! The adapter never writes.
+//! touch. A walk along `parent` reads ahead: a commit the walk
+//! arrives at is read together with the next of its ancestors (one
+//! `rev-list -n k`, k doubling), so a walk of n commits starts
+//! about log n git processes and not n. The tree and the commits
+//! are kept for the adapter's lifetime; a blob's content is read
+//! again at each read, through one open `cat-file --batch` pipe, so
+//! a large file is never held. The adapter never writes.
 
 use quarb::{AstAdapter, NodeId, Value};
 use std::cell::RefCell;
@@ -102,6 +105,21 @@ pub struct GitAdapter {
     decoding: quarb::source::SourceDecoding,
     nodes: RefCell<Vec<Node>>,
     commits: RefCell<HashMap<String, CommitInfo>>,
+    /// The parents of the commits held that are not held themselves:
+    /// where a walk goes next (see `commit_info`).
+    frontier: RefCell<std::collections::HashSet<String>>,
+    /// How many commits the last read along a walk took.
+    ahead: std::cell::Cell<usize>,
+    /// The commits the listed refs point at, in the listings' order,
+    /// and where each one not yet asked for stands in it: where a
+    /// sweep of the refs goes next (see `commit_info`).
+    tips: RefCell<Vec<String>>,
+    tip_at: RefCell<HashMap<String, usize>>,
+    /// How many commits the last read along a sweep of the refs took.
+    tips_ahead: std::cell::Cell<usize>,
+    /// The git processes started for commit headers (the tests'
+    /// measure of what a walk costs).
+    header_reads: std::cell::Cell<usize>,
     /// hash → its `/commits/<hash>` node.
     commit_nodes: RefCell<HashMap<String, NodeId>>,
     /// Whether `/commits` has been enumerated (rev-list --all).
@@ -183,6 +201,8 @@ impl Drop for GitAdapter {
 }
 
 const ROOT: NodeId = NodeId(0);
+/// The most commits one read along a walk takes.
+const AHEAD_MOST: usize = 1024;
 const BRANCHES: NodeId = NodeId(1);
 const TAGS: NodeId = NodeId(2);
 const COMMITS: NodeId = NodeId(3);
@@ -226,6 +246,12 @@ impl GitAdapter {
                 },
             ]),
             commits: RefCell::new(HashMap::new()),
+            frontier: RefCell::new(std::collections::HashSet::new()),
+            ahead: std::cell::Cell::new(1),
+            tips: RefCell::new(Vec::new()),
+            tip_at: RefCell::new(HashMap::new()),
+            tips_ahead: std::cell::Cell::new(1),
+            header_reads: std::cell::Cell::new(0),
             commit_nodes: RefCell::new(HashMap::new()),
             enumerated: RefCell::new(false),
             changed: RefCell::new(HashMap::new()),
@@ -384,11 +410,82 @@ impl GitAdapter {
         id
     }
 
+    /// Hold a commit's header, and note where a walk from it goes:
+    /// its parents not yet held.
+    fn learn(&self, hash: &str, info: CommitInfo) {
+        let mut commits = self.commits.borrow_mut();
+        let mut frontier = self.frontier.borrow_mut();
+        frontier.remove(hash);
+        for p in &info.parents {
+            if !commits.contains_key(p) {
+                frontier.insert(p.clone());
+            }
+        }
+        commits.insert(hash.to_string(), info);
+    }
+
+    /// Note the commit a listed ref points at, for the sweep of the
+    /// listing to read it with its neighbours.
+    fn note_tip(&self, hash: &str) {
+        if self.commits.borrow().contains_key(hash) {
+            return;
+        }
+        let mut tips = self.tips.borrow_mut();
+        let mut tip_at = self.tip_at.borrow_mut();
+        if !tip_at.contains_key(hash) {
+            tip_at.insert(hash.to_string(), tips.len());
+            tips.push(hash.to_string());
+        }
+    }
+
+    /// The git processes started so far for commit headers: one per
+    /// keyed commit, one per read along a walk, one per listing.
+    #[doc(hidden)]
+    pub fn header_reads(&self) -> usize {
+        self.header_reads.get()
+    }
+
     /// A commit's parsed header, fetched on first touch.
+    ///
+    /// A commit that is the parent of one already held is a walk
+    /// arriving: it is read together with the next of its ancestors,
+    /// twice as many as the walk's last read took, up to
+    /// [`AHEAD_MOST`] (one `rev-list -n k` from it, the listing's own
+    /// format and parser, so the values are the listing's). A walk of
+    /// n commits then starts about log n processes. It started one
+    /// `git show` a commit: 400 commits took 1.7 s and a history of
+    /// 1,568 took 5.8 s, where listing all of it takes 0.08 s. A
+    /// commit asked for by name alone is still one commit read.
+    ///
+    /// A commit a listed ref points at is a sweep of the refs
+    /// arriving (`/tags/* | ::subject`): it is read together with
+    /// the commits of the refs that follow it in the listing, by
+    /// the same doubling (one `rev-list --no-walk` of them). The
+    /// sweep started one `git show` a ref: 448 tags on 167 commits
+    /// took 0.7 s, where reading those commits together takes
+    /// 0.03 s. A ref asked for by name is one read of two commits.
     fn commit_info(&self, hash: &str) -> Option<CommitInfo> {
         if let Some(i) = self.commits.borrow().get(hash) {
             return Some(i.clone());
         }
+        if self.frontier.borrow().contains(hash) {
+            let k = (self.ahead.get() * 2).min(AHEAD_MOST);
+            self.ahead.set(k);
+            self.read_ancestry(hash, k);
+            if let Some(i) = self.commits.borrow().get(hash) {
+                return Some(i.clone());
+            }
+        }
+        let tip = self.tip_at.borrow().get(hash).copied();
+        if let Some(at) = tip {
+            let k = (self.tips_ahead.get() * 2).min(AHEAD_MOST);
+            self.tips_ahead.set(k);
+            self.read_tips(at, k);
+            if let Some(i) = self.commits.borrow().get(hash) {
+                return Some(i.clone());
+            }
+        }
+        self.header_reads.set(self.header_reads.get() + 1);
         let out = self
             .git(&[
                 "show",
@@ -399,19 +496,89 @@ impl GitAdapter {
             ])
             .ok()?;
         let info = parse_info(&out)?;
-        self.commits
-            .borrow_mut()
-            .insert(hash.to_string(), info.clone());
+        self.learn(hash, info.clone());
         Some(info)
+    }
+
+    /// `hash` and the next `k - 1` of its ancestors, newest first,
+    /// in one `rev-list`: the commits a walk from `hash` reads next.
+    fn read_ancestry(&self, hash: &str, k: usize) {
+        self.header_reads.set(self.header_reads.get() + 1);
+        let n = k.to_string();
+        let Ok(out) = self.git(&[
+            "rev-list",
+            "--encoding=UTF-8",
+            "-n",
+            &n,
+            "--format=%an%x00%ae%x00%at%x00%cn%x00%s%x00%B%x00%T%x00%P%x00%ai%x1e",
+            hash,
+        ]) else {
+            return;
+        };
+        for (h, body) in split_commit_records(&out) {
+            if self.commits.borrow().contains_key(h) {
+                continue;
+            }
+            if let Some(info) = parse_info(body) {
+                self.learn(h, info);
+            }
+        }
+    }
+
+    /// The listed refs' commits from the one at `at` on, those not
+    /// held and not yet asked for, `k` at most, in one
+    /// `rev-list --no-walk`: the commits a sweep of the refs reads
+    /// next. Each is asked for here once: what git does not answer
+    /// (a tag of a tree names no commit) is left to the single read.
+    fn read_tips(&self, at: usize, k: usize) {
+        let batch: Vec<String> = {
+            let tips = self.tips.borrow();
+            let commits = self.commits.borrow();
+            let mut tip_at = self.tip_at.borrow_mut();
+            let mut batch = Vec::new();
+            for h in &tips[at..] {
+                if batch.len() == k {
+                    break;
+                }
+                if tip_at.remove(h).is_some() && !commits.contains_key(h) {
+                    batch.push(h.clone());
+                }
+            }
+            batch
+        };
+        // one commit alone is the single read's
+        if batch.len() < 2 {
+            return;
+        }
+        self.header_reads.set(self.header_reads.get() + 1);
+        let mut args = vec![
+            "rev-list",
+            "--no-walk",
+            "--encoding=UTF-8",
+            "--format=%an%x00%ae%x00%at%x00%cn%x00%s%x00%B%x00%T%x00%P%x00%ai%x1e",
+        ];
+        args.extend(batch.iter().map(String::as_str));
+        let Ok(out) = self.git(&args) else {
+            return;
+        };
+        for (h, body) in split_commit_records(&out) {
+            if self.commits.borrow().contains_key(h) {
+                continue;
+            }
+            if let Some(info) = parse_info(body) {
+                self.learn(h, info);
+            }
+        }
     }
 
     /// Enumerate every commit reachable from any ref: one
     /// `rev-list --all` with the header format, parsed in bulk.
-    /// The first `k` commits of `rev-list --all`, for a hop that keeps
+    /// The first `k` commits of `rev-list --all`, for a step that keeps
     /// a prefix (the pushdown scanning round, 2026-11-06): the walk
     /// stops at k, the nodes keyed by hash so the full enumeration
     /// finds them again; nothing cached as the listing.
     fn commits_prefix(&self, k: usize) -> Vec<NodeId> {
+        self.header_reads.set(self.header_reads.get() + 1);
         let n = k.to_string();
         let out = self
             .git(&[
@@ -426,7 +593,7 @@ impl GitAdapter {
         let mut ids = Vec::new();
         for (hash, body) in split_commit_records(&out) {
             if let Some(info) = parse_info(body) {
-                self.commits.borrow_mut().insert(hash.to_string(), info);
+                self.learn(hash, info);
             }
             ids.push(self.commit_node(hash));
         }
@@ -441,6 +608,7 @@ impl GitAdapter {
         {
             return c.clone();
         }
+        self.header_reads.set(self.header_reads.get() + 1);
         let out = self
             .git(&[
                 "rev-list",
@@ -457,6 +625,9 @@ impl GitAdapter {
             ids.push(self.commit_node(hash));
         }
         *self.enumerated.borrow_mut() = true;
+        // every reachable commit is held: no walk has anywhere to
+        // read ahead to
+        self.frontier.borrow_mut().clear();
         *self.nodes.borrow()[COMMITS.0 as usize]
             .children
             .borrow_mut() = Some(ids.clone());
@@ -519,6 +690,7 @@ impl GitAdapter {
             };
             let deref = f.next().unwrap_or("");
             let commit = if deref.is_empty() { oid } else { deref };
+            self.note_tip(commit);
             ids.push(self.push_node(
                 Kind::Ref {
                     name: name.to_string(),

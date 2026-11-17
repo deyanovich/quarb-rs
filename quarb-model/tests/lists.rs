@@ -1,5 +1,5 @@
 //! A list-valued property as a reference source: a row's marks
-//! resolve per element — `-->` lands on the first, the hop forks
+//! resolve per element — `-->` lands on the first, the step forks
 //! one per element, every element backlinks, and an edge over a
 //! list field connects the whole product.
 
@@ -54,7 +54,7 @@ fn a_list_property_resolves_per_element() {
     let a = marks();
     // `-->` lands on the first element
     assert_eq!(values(&a, "/rows/*[::w = 'дом']::marks-->::"), vec!["①"]);
-    // the hop forks, one landing per element
+    // the step forks, one landing per element
     assert_eq!(values(&a, "/rows/*[::w = 'дом']--mark::"), vec!["①", "②"]);
     // every element backlinks, on the alias role
     assert_eq!(

@@ -3,7 +3,7 @@
 //! PATH as the tree. Paths print relative to it, `//` sweeps it,
 //! document order runs over it, a declared graph's scope is read
 //! inside it. What lies above or beside the root is not mounted at
-//! all, not reachable through a crosslink either: a hop that would
+//! all, not reachable through a crosslink either: a step that would
 //! leave the root answers nothing, as a link to a dangling redirect
 //! stays on the redirect. Explicit only, never inferred; a PATH no
 //! node matches refuses at mount.

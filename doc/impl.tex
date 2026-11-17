@@ -435,14 +435,14 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
 \texttt{quarb-relational} & The shared relational model: tables
   as root children, rows named by primary key, columns as
   properties, declared foreign keys driving
-  \texttt{-->} resolution (chained hops instead of
+  \texttt{-->} resolution (chained steps instead of
   JOINs), \texttt{->}/\texttt{<-} crosslinks labeled by column,
   \texttt{<--(::fk)} reverse resolution from the declared keys
   (\texttt{reverse\_resolve} on the relational model), and the
   table-naming reference label for undeclared references (required
   where a column declares no key). Loading is catalog-
-  eager, rows-lazy, hops by key: a table is read whole only when a
-  query lists it (\texttt{/t/*}, \texttt{:::n-rows}); a hop reads
+  eager, rows-lazy, steps by key: a table is read whole only when a
+  query lists it (\texttt{/t/*}, \texttt{:::n-rows}); a step reads
   the rows it lands on through the driver's keyed source
   (\texttt{WHERE key IN (\dots)}, one statement per frontier; such
   a row carries no row id until the table is read, never a
@@ -451,7 +451,7 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   untouched tables are never read (\texttt{:::loaded},
   \texttt{:::n-loaded} report the state). Engine
   adapters are thin catalog drivers over it. Depends on
-  \texttt{quarb}. The pushdown scanning round (2026-11-06): a child hop keeping
+  \texttt{quarb}. The pushdown scanning round (2026-11-06): a child step keeping
   a prefix reads \texttt{LIMIT k} in the whole read's order
   through the driver's prefix fetcher (declined where no order
   backs the cut), and \texttt{@| count} on a table not read is
@@ -693,12 +693,12 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   \texttt{web:<dir|archive|site.db|postgres://…>},
   \texttt{--diagnostics=info} / \texttt{--no-pushdown}. \\
 \texttt{quarb-trace} & The \texttt{quarb/trace} viz contract as
-  Rust: the payload types (arbor snapshot, steps, threads,
+  Rust: the payload types (arbor snapshot, stages, threads,
   snapshots, window and stubs, positions, ribbons, lookahead
   verdicts, results) and their kaiv writer; no dependencies, no
   reader. \texttt{quarb::trace::trace} fills one by
   \emph{replaying} the query rather than instrumenting the
-  evaluator: one hop per live thread through the evaluator's own
+  evaluator: one step per live thread through the evaluator's own
   \texttt{navigate\_paths} (candidates with the predicates
   stripped, survivors with them --- the fork, the verdicts, the
   walked edges), \texttt{apply\_command} per thread for filters and
@@ -904,7 +904,14 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   node value. References are inherent:
   \texttt{::parent\textasciitilde>},
   \texttt{->parent} (merges fan out), \texttt{<-parent}
-  (children, from the enumeration). The diff surface: tree
+  (children, from the enumeration). Reads are lazy, one object on
+  first touch; a walk along \texttt{parent} reads ahead (a commit
+  it arrives at comes with the next of its ancestors, one
+  \texttt{rev-list -n k}, k doubling to 1024), so a walk of n
+  commits starts about log n git processes; a sweep of a ref
+  listing (\texttt{/tags/* | ::subject}) reads ahead alike, a
+  ref's commit with the commits of the refs after it (one
+  \texttt{rev-list --no-walk}). The diff surface: tree
   entries carry the \texttt{<changed>} trait when their path is
   in the commit's diff vs its first parent (trees by prefix), so
   \texttt{git log -- path} is
@@ -1053,7 +1060,7 @@ provenance, the members of a group, the captures of the last match,
 and one \texttt{ext: X}. The \texttt{Attachment} trait names what a
 scope may see of the attachment beside the attachment itself: a
 \texttt{View} (the graph's: whether the thread stands on a node), a
-\texttt{Crossing} (the edge a hop is crossing, for \texttt{\$-}), a
+\texttt{Crossing} (the edge a step is crossing, for \texttt{\$-}), a
 \texttt{Witness} (what a correlation search tries in place of the
 thread's own bindings), and a \texttt{Key} (what a context is indexed
 by). The calculator's attachment is the unit type, so a calculator
@@ -1195,7 +1202,7 @@ ladder's transfer reductions are cost reductions.
 \section{Current Query Subset}
 
 The engine implements essentially the whole language. A query is a
-root-anchored sequence of hops, each an axis followed by a name:
+root-anchored sequence of steps, each an axis followed by a name:
 
 \begin{xltabular}{\textwidth}{>{\raggedright\arraybackslash}p{0.36\textwidth} X}
 \toprule
@@ -1529,7 +1536,7 @@ root-anchored sequence of hops, each an axis followed by a name:
     keeps its \emph{witness}, so \texttt{\$\$k} in pipeline commands
     projects the joined side into output (\texttt{SELECT a.x, b.y});
     the witness travels into every path a command's operand or pipe
-    hop navigates, so a nested step predicate
+    step navigates, so a nested step predicate
     (\texttt{(\^{}/c/*[::b\_id = \$\$1::id])}) reads the same
     thread's binding rather than re-searching the trace
     (2026-08-18) \\
@@ -1611,7 +1618,7 @@ root-anchored sequence of hops, each an axis followed by a name:
     wherever a run is in progress --- predicates included; a
     quantified push's fixpoint counts the node's attachments;
     \texttt{@| nodes} adds them as columns \\
-\texttt{@| graph:pagerank(hop; --damping --rounds --weight)}, \texttt{graph:distance(hop; --from --weight)}, \texttt{graph:kcore(hop)}
+\texttt{@| graph:pagerank(step; --damping --rounds --weight)}, \texttt{graph:distance(step; --from --weight)}, \texttt{graph:kcore(step)}
   & \live the graph library (2026-10-31; spec: The graph library):
     the engine's own command library, \texttt{graph/library.rs}
     (prefix \texttt{graph}, synopses with \texttt{InputSlot::Context},
@@ -1622,7 +1629,7 @@ root-anchored sequence of hops, each an axis followed by a name:
     value per position over the induced subgraph
     (\texttt{edges.rs}: \texttt{pagerank\_values},
     \texttt{distance\_values}, \texttt{kcore\_values}, the edge list
-    folded by the hop as \texttt{edges} collects it), and each
+    folded by the step as \texttt{edges} collects it), and each
     thread keeps its place with its position's value as the topic.
     The algorithms are the crate \texttt{quarb-lib-graph} (pure
     functions over index triples; the web level's stored rank calls
@@ -1638,7 +1645,7 @@ root-anchored sequence of hops, each an axis followed by a name:
     the web level reports page to page where a fragment link lands
     navigation on a section. The bare \texttt{@| pagerank} table of
     0.44 is retired (its pointer names \texttt{graph:pagerank}) \\
-\texttt{graph:artpoints(hop)}, \texttt{graph:bridges(hop)}, \texttt{graph:route(hop; --from --weight)}, \texttt{graph:betweenness(hop; --edges)}, \texttt{graph SCOPE(hop) \{ measure; \}}
+\texttt{graph:artpoints(step)}, \texttt{graph:bridges(step)}, \texttt{graph:route(step; --from --weight)}, \texttt{graph:betweenness(step; --edges)}, \texttt{graph SCOPE(step) \{ measure; \}}
   & \live the graph library's second shipment (2026-10-31; spec
     draft.189: The graph library, Graph Declarations, Other bounds):
     \texttt{GraphTable::\{Artpoints, Bridges, Route\}} and
@@ -1672,23 +1679,23 @@ root-anchored sequence of hops, each an axis followed by a name:
     calls for a scope it does not redeclare, so a model's
     \texttt{mount} reads the site's stored column and
     \texttt{--diagnostics=info} says \texttt{PUSHED (graph)} there too. \texttt{declared\_measure} matches a
-    command to a declaration by the command's fingerprint (hop,
+    command to a declaration by the command's fingerprint (step,
     weight and options, the declared measure parsed through the
     engine's own parser) and by the scope test (the declared path
     read as a node operand from the root equals the context's
     positions as a set), and reports \texttt{info PUSHED (graph)} /
-    \texttt{NOT\_PUSHED (graph)} with the reason. A declared hop with
+    \texttt{NOT\_PUSHED (graph)} with the reason. A declared step with
     a predicate is not read yet (the declaration is reported as not
     read) \\
 \texttt{edges(->link[::lang = "en"])}, \texttt{graph:conncomp(--*[\$-::since > d])}, \texttt{:source::code}, \texttt{map(::code)}
-  & \live a predicate on a hop operand and reading through a
-    reference (2026-11-01; spec draft.191): a hop operand takes
-    exactly the predicate (and traits) a walk's hop takes, kept on
+  & \live a predicate on a step operand and reading through a
+    reference (2026-11-01; spec draft.191): a step operand takes
+    exactly the predicate (and traits) a walk's step takes, kept on
     \texttt{Hop::filter} and applied in \texttt{collect\_rows} through
     the walk's own \texttt{apply\_predicates} (the node arrived at
     the topic, \texttt{\$-} the edge, \texttt{trait\_clauses\_ok} for
     traits), in \texttt{edges}, every library command and the
-    declared graph's hop, whose fingerprint now carries the step; the
+    declared graph's step, whose fingerprint now carries it whole; the
     \texttt{--label} special case of the argument parser reads the
     traits and predicates after the name. The graph methods of
     \texttt{Host} take the trace for it. \texttt{Operand::Through}
@@ -1699,11 +1706,11 @@ root-anchored sequence of hops, each an axis followed by a name:
     a bare projection whose topic is a node reference reads it too,
     so \texttt{map(::code)} over a route and \texttt{(:source |
     ::code)} read the named nodes. Attachments read through as before \\
-\texttt{graph:closeness(hop; --harmonic)}, \texttt{graph:communities(hop; --resolution)}, \texttt{graph:modularity(hop; --by=:.c)}, \texttt{graph:triangles(hop; --coefficient)}
+\texttt{graph:closeness(step; --harmonic)}, \texttt{graph:communities(step; --resolution)}, \texttt{graph:modularity(step; --by=:.c)}, \texttt{graph:triangles(step; --coefficient)}
   & \live the graph library's third shipment (2026-11-01; spec
     draft.191): closeness in Wasserman and Faust's form or the
     harmonic (\texttt{quarb-lib-graph::closeness} over
-    \texttt{distance} per source, in the hop's direction), the
+    \texttt{distance} per source, in the step's direction), the
     Leiden communities (\texttt{communities}: deterministic local
     moving in index order with ties to the earlier community,
     refinement from singletons, aggregation until nothing moves,
@@ -1876,7 +1883,7 @@ root-anchored sequence of hops, each an axis followed by a name:
     through \texttt{steps::unknown\_property} and
     \texttt{unknown\_label}: the one projection, for a projection
     and a predicate that read a property null (\texttt{project}),
-    and a link hop whose named label no link of the node carries
+    and a link step whose named label no link of the node carries
     (\texttt{link\_edges}; the navop wildcard is not asked, its
     name being a child's or the parent's as well). A warning, so it
     prints by default and the exit stays 0; once per declaring
@@ -2170,7 +2177,7 @@ root-anchored sequence of hops, each an axis followed by a name:
     chain reaches the root) gates what would reach out: links,
     backlinks, edge rows, resolutions, index lookups, selections and
     the non-tree nodes drop whatever lies above or beside the root, so
-    a hop that would leave it answers nothing. A declared graph's
+    a step that would leave it answers nothing. A declared graph's
     scope is read inside it (the web level's \texttt{//page(->link)}
     still matches). quarb-open takes \texttt{root=} off any target
     before the source opens (\texttt{open\_mount}) and renders the
@@ -2382,11 +2389,11 @@ pub trait AstAdapter {
     /// Whether the links into `node` are ones this source cannot
     /// walk back: it answers `links` and provides no `backlinks`
     /// (a document store whose references live in the referring
-    /// documents). The engine then refuses the hop that needs the
+    /// documents). The engine then refuses the step that needs the
     /// backward direction (`<-`, `--`, the navop wildcard, `edges`
     /// over any of them) rather than answer an empty set that
     /// would read as "nothing points here". `label` is the one
-    /// label the hop names, `None` for a wildcard, a pattern or a
+    /// label the step names, `None` for a wildcard, a pattern or a
     /// selection: a layer that walks some labels back itself (a
     /// model's declared references) answers for those and hands
     /// the rest down. A source with no links at all says no.
@@ -2394,7 +2401,7 @@ pub trait AstAdapter {
         -> bool { false }
 
     /// Whether the link from `source` under `label` is a reference
-    /// an edge declaration consumed: a bare wildcard hop (`->*`,
+    /// an edge declaration consumed: a bare wildcard step (`->*`,
     /// `<-*`, `--*`, the crosslink part of `~`) skips it, the label
     /// named still walks it (spec: Edge rows). A model's `edge
     /// /flights/*: ::origin -- ::dest` consumes the two references
@@ -2641,7 +2648,7 @@ Three observations that the filesystem work has already forced:
   off the syntax tree, per branch and per step, the axis the fast
   path covers, the literal name, the equality conjuncts lowered,
   the literal path to the step's base where every step before it
-  was a bare child hop by name, and what the adapter says from its
+  was a bare child step by name, and what the adapter says from its
   catalog: \texttt{select\_plan} (which conjuncts it would apply)
   and \texttt{estimate} (nodes, bytes, requests, latency,
   confidence), composed along a branch (\texttt{Estimate::then})
@@ -2676,7 +2683,7 @@ Three observations that the filesystem work has already forced:
 
 \item \textbf{A mount may be latent.} The mount adapter declares a
   mount by name, target and opener (\texttt{MountAdapter::declare})
-  and opens it the first time a query reaches it: a hop by its
+  and opens it the first time a query reaches it: a step by its
   name, a listing of the root's children (so an unanchored
   \texttt{//x} opens every mount before the scope memo is built),
   a reference landing on a declared identity. \texttt{tree\_identities}
@@ -2702,12 +2709,12 @@ Three observations that the filesystem work has already forced:
   the catalog is a lookup by literal path
   (\texttt{CatalogLookup}: a folder's own listing, one member's
   header), so \texttt{Estimate::at\_catalog} narrows the price
-  to the path the plan records — a bare hop by name is one entry,
+  to the path the plan records — a bare step by name is one entry,
   the reading step under it is priced by that entry's catalog, a
   path the catalog cannot place (a node inside a document) is a
   bounded unknown under the whole; a mount table prices a root
   step across its mounts; a database file is left to its store's
-  estimator once open, and a hop by name under a table is a row
+  estimator once open, and a step by name under a table is a row
   by key, at most one. The plan lowers the leading predicate as a
   comparison (\texttt{Conjunct::Compare}: any operator, any
   literal; a text equality stays \texttt{Equals}, the index's) and

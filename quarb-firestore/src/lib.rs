@@ -561,7 +561,7 @@ impl AstAdapter for FirestoreAdapter {
     }
 
     /// The links are read off the node they leave, and nothing here
-    /// records what points at a document: the hop back is refused rather
+    /// records what points at a document: the step back is refused rather
     /// than answered empty (spec: The adapter contract).
     fn backlinks_unsupported(&self, node: NodeId, _label: Option<&str>) -> bool {
         matches!(self.nodes.borrow()[node.0 as usize].kind, Kind::Doc { .. })

@@ -85,7 +85,7 @@ fn non_text_columns_decode() {
     assert_eq!(v("/events/1::big"), ["100000000000000000000"]);
 }
 
-// A hop reads the rows it lands on (`WHERE key IN (…)`), not the
+// A step reads the rows it lands on (`WHERE key IN (…)`), not the
 // table; the answers are those of a table read whole.
 #[test]
 fn hops_read_by_key() {

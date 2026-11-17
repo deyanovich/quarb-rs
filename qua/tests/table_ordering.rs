@@ -225,7 +225,7 @@ fn the_rounded_minus_in_keyed_parentheses_is_the_descending_core_field() {
         table(&[HAMLET, EMMA])
     );
     // `<-author` is the crosslink key (none here: every key null,
-    // the order kept); `/rows/*-:author` the rounded hop
+    // the order kept); `/rows/*-:author` the rounded step
     assert_eq!(
         one(&format!("{TABLE} @| sort_by(<-author)")),
         table(&[ILIAD, EMMA, HAMLET])

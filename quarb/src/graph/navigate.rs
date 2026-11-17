@@ -7,7 +7,7 @@ use crate::syntax::ast::End;
 
 /// The graph layer's per-thread state: the position, the marks
 /// pocketed on the walk, the correlation witness and the edges the
-/// last hop arrived by. Copied on a fork, never shared.
+/// last step arrived by. Copied on a fork, never shared.
 #[derive(Clone)]
 pub(crate) struct GraphExt {
     /// The position: the node the thread stands on.
@@ -16,7 +16,7 @@ pub(crate) struct GraphExt {
     /// per trace context; null for an outer context no tuple
     /// admitted), for `$*k` in pipeline commands.
     pub(crate) bindings: Vec<Option<NodeId>>,
-    /// The edges that reached this node on the walk's final hop —
+    /// The edges that reached this node on the walk's final step —
     /// the `@-` operand, aggregated across merged crossings.
     pub(crate) arrived: Vec<EdgeCtx>,
     /// No position (spec: Aggregating Pipe): the one thread a
@@ -27,7 +27,7 @@ pub(crate) struct GraphExt {
     pub(crate) unplaced: bool,
     /// The walk that ended here (spec: Edge facts): set at a
     /// quantified group's exit, read by the one command after it
-    /// (`$-:round`, `$-:hops`, `$-:total`), cleared when that
+    /// (`$-:round`, `$-:steps`, `$-:total`), cleared when that
     /// command has run.
     pub(crate) walk: Option<WalkFacts>,
     /// The thread's lineage for `@| threads` (spec: The Pipeline,
@@ -36,7 +36,7 @@ pub(crate) struct GraphExt {
 }
 
 /// What a walk knows of the edge it crossed (spec: Edge facts): the
-/// round in which it was crossed, the hops the walk had taken
+/// round in which it was crossed, the steps the walk had taken
 /// through it, and under a budget the weight summed so far — the
 /// base value, and the magnitude and unit as the budget wrote them.
 #[derive(Clone, Debug, PartialEq)]
@@ -46,7 +46,7 @@ pub(crate) struct WalkFacts {
     /// (base value, base unit, written magnitude, written unit)
     pub(crate) total: Option<(f64, String, f64, String)>,
     /// The costs under every brace in brace order (spec: Def. Walk,
-    /// the braces stack): a count brace's hop count, a budget brace's
+    /// the braces stack): a count brace's step count, a budget brace's
     /// cost as a quantity; one entry under a single brace.
     pub(crate) costs: Vec<Value>,
     /// A digest of the walk's history (the nodes it crossed), so
@@ -57,11 +57,11 @@ pub(crate) struct WalkFacts {
 
 impl WalkFacts {
     /// The fact a glued core key names on the edge accessor:
-    /// `$-:round`, `$-:hops`, `$-:total` (null outside a budget).
+    /// `$-:round`, `$-:steps`, `$-:total` (null outside a budget).
     pub(crate) fn fact(&self, key: &str) -> Option<Value> {
         match key {
             "round" => Some(Value::Int(self.round as i64)),
-            "hops" => Some(Value::Int(self.hops as i64)),
+            "steps" => Some(Value::Int(self.hops as i64)),
             "total" => Some(match &self.total {
                 Some((value, base, mag, unit)) => Value::Quantity {
                     value: *value,
@@ -352,9 +352,9 @@ pub(crate) fn anchor_nodes(
 }
 
 /// The edge the current thread most recently walked — the `$-`
-/// operand's referent, defined after every hop (a hop walks a
+/// operand's referent, defined after every step (a step walks a
 /// labeled edge; the tree is the distinguished subset). Crosslink
-/// and resolution hops carry their stored label and direction;
+/// and resolution steps carry their stored label and direction;
 /// structural relations carry the engine-reserved bracketed labels
 /// (`[child]`, `[parent]`, `[next]`, `[prev]`) in walked direction —
 /// brackets cannot appear in a bare name, so the namespace cannot

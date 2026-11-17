@@ -206,3 +206,28 @@ fn a_session_mounts_what_its_model_states() {
         "notes-1.0\nf.json"
     );
 }
+
+/// A standing session answers the moment it is asked. It napped
+/// 200 ms between two looks at its socket, so a query that followed
+/// another waited out the nap: every answer took 0.2 s whatever it
+/// asked, and a one-line file answered slower with a session than
+/// without one (found on 0.66.0). The fastest of ten is far under
+/// that nap; the fastest, so a loaded machine does not fail it.
+#[test]
+fn a_standing_session_answers_without_a_fixed_wait() {
+    let dir = fixture("wait");
+    let a = dir.join("a");
+    assert_eq!(qua(&a, &["/n::", "f.json"]), "7");
+    let fastest = (0..10)
+        .map(|_| {
+            let asked = std::time::Instant::now();
+            assert_eq!(qua(&a, &["/n::", "f.json"]), "7");
+            asked.elapsed()
+        })
+        .min()
+        .unwrap();
+    assert!(
+        fastest < std::time::Duration::from_millis(100),
+        "the fastest of ten answers took {fastest:?}"
+    );
+}

@@ -1,5 +1,5 @@
 //! A title the document only declares is no sentence at the word
-//! level (ruling 2026-11-15; Text Readings, Corpus Reading).
+//! level (ruling 2026-11-15; Quarb Readings, Corpus Reading).
 //!
 //! The text level reads a declared title (an HTML head's, a Markdown
 //! header's, a TEI header's, LaTeX's `\title`, an RTF file's `\info`)

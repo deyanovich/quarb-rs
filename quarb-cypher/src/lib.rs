@@ -1,7 +1,7 @@
 //! `quarb-cypher` — what the Cypher-speaking adapters share: the
 //! literal and identifier spellings, the statements every store
 //! answers the same way, and the per-node relationship cache a
-//! hop fills in one statement. The transports stay with the
+//! step fills in one statement. The transports stay with the
 //! adapters (HTTP, Bolt, the Redis protocol, SQL, an embedded
 //! engine); this crate holds the Cypher.
 
@@ -63,8 +63,8 @@ pub fn label_listing_stmt(label: &str, order: &str) -> String {
 }
 
 /// A node's relationships once read, per direction — `links` and
-/// `backlinks` answer from here, and a hop's prefetch fills it for
-/// every node of the hop in one statement per chunk.
+/// `backlinks` answer from here, and a step's prefetch fills it for
+/// every node of the step in one statement per chunk.
 #[derive(Default)]
 pub struct EdgeCache {
     edges: RefCell<HashMap<(NodeId, bool), Vec<(String, NodeId)>>>,

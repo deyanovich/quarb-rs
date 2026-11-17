@@ -775,7 +775,7 @@ impl AstAdapter for CsvStream {
     }
 
     /// A prefix the plan asks for (`@| [..n]`, `first(n)` right after
-    /// the hop): the first n rows' ids, nothing read.
+    /// the step): the first n rows' ids, nothing read.
     fn select(&self, from: NodeId, plan: &quarb::StepPlan<'_>) -> Option<quarb::Selection> {
         let k = plan.limit?;
         if !self.rows_plan(from, plan) {

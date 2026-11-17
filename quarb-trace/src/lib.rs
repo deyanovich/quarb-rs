@@ -80,10 +80,14 @@ pub struct Edge {
     pub label: Option<String>,
 }
 
+/// One stage of the query: a row of `/query/@stages`. A stage that
+/// navigates is of the kind `step`, the language's word for it (the
+/// kind was `hop` and the row a step through 0.0-draft.2; the term
+/// hop was renamed step, ruling 2026-11-17).
 #[derive(Debug, Clone, Default)]
-pub struct Step {
-    pub step: i64,
-    /// hop | projection | agg | group | filter | command
+pub struct Stage {
+    pub stage: i64,
+    /// step | projection | agg | group | filter | command
     pub kind: String,
     pub expr: String,
     pub axis: Option<String>,
@@ -193,7 +197,7 @@ pub struct Lookahead {
 pub struct Payload {
     pub meta: Meta,
     pub arbor: Arbor,
-    pub steps: Vec<Step>,
+    pub stages: Vec<Stage>,
     pub threads: Vec<Thread>,
     pub groups: Vec<Group>,
     pub snapshots: Vec<Snapshot>,
@@ -207,7 +211,7 @@ pub struct Payload {
 }
 
 pub const CONTRACT: &str = "quarb/trace";
-pub const VERSION: &str = "0.0-draft.2";
+pub const VERSION: &str = "0.0-draft.3";
 
 // ---------------------------------------------------------------
 // kaiv writer
@@ -332,9 +336,9 @@ impl Payload {
             w.line("[]");
             w.line("");
         }
-        for s in &self.steps {
-            w.line("[/query/@steps]");
-            w.int("step", s.step);
+        for s in &self.stages {
+            w.line("[/query/@stages]");
+            w.int("stage", s.stage);
             w.str("kind", &s.kind);
             w.str("expr", &s.expr);
             w.opt_str("axis", &s.axis);
@@ -356,7 +360,7 @@ impl Payload {
                 w.line("!bool\nstaged=true");
             }
         }
-        if !self.steps.is_empty() {
+        if !self.stages.is_empty() {
             w.line("[]");
             w.line("");
         }

@@ -260,7 +260,7 @@ pub(crate) struct RunState {
     /// The prefix the pipeline keeps right after the one branch's
     /// last step (`@| [..n]`, `@| [n]`, `@| first(n)`), computed once
     /// per top-level query (ruling 2026-11-05: a slice right after the
-    /// step ends the reading at n): the hop hands it to the adapter
+    /// step ends the reading at n): the step hands it to the adapter
     /// in the step plan's `limit`; an adapter that lists its rows
     /// lazily stops there, every other ignores it.
     pub(crate) prefix_limit: Option<usize>,
@@ -278,7 +278,7 @@ pub(crate) struct RunState {
     /// a nested pipeline ([`fresh_group`]), whose own commands
     /// reduce their own context.
     pub(crate) fold_ordinal: Option<usize>,
-    /// Whether the hop in progress is that last step, with no test of
+    /// Whether the step in progress is that last one, with no test of
     /// its own that would thin the prefix after the adapter cut it.
     pub(crate) limit_armed: bool,
     /// The unresolved external references of the run: identifiers

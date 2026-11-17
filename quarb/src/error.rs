@@ -82,7 +82,7 @@ impl QuarbError {
         self
     }
 
-    /// With the site that raised it (a command, a hop, a round, a
+    /// With the site that raised it (a command, a step, a round, a
     /// mount, the query).
     pub fn with_site(mut self, site: impl Into<String>) -> QuarbError {
         self.diag.get_or_insert_with(Default::default).site = Some(site.into());

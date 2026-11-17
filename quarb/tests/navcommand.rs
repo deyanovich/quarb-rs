@@ -19,7 +19,7 @@ fn refuse(q: &str) -> String {
 #[test]
 fn nav_commands_round_trip() {
     for q in [
-        // plain hop, descent, projection endings
+        // plain step, descent, projection endings
         "/teams/* | /members/*",
         "/teams/* | /members/*::name",
         // collect along the way — the Data Model page's hero
@@ -78,7 +78,7 @@ fn parenthesized_paths_stay_expressions() {
     // A parenthesized path is a value expression (existence /
     // first-value operand semantics), not navigation — and it
     // must round-trip WITH its parentheses, or the reparse would
-    // read it as a hop.
+    // read it as a step.
     assert_eq!(canon("/a | (/kids/*::name)"), "/a | (/kids/*::name)");
 }
 

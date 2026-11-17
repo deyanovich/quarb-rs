@@ -65,7 +65,7 @@ fn a_dash_led_last_field_is_the_option_segment_in_every_parenthesis() {
 
 #[test]
 fn the_trailing_separator_keeps_the_operand_reading() {
-    // the three spellings of the hop as an item say the same; the
+    // the three spellings of the step as an item say the same; the
     // path group is canonical
     let group = canonical("/a | @((--author))");
     assert_eq!(canonical("/a | @(--author;)"), group);
@@ -82,7 +82,7 @@ fn the_trailing_separator_keeps_the_operand_reading() {
     assert_eq!(canonical("= %(k = 1;)"), canonical("= %(k = 1)"));
     assert_eq!(one("= #(%(1; 2);) | dim"), "@(1; 2)");
     assert_eq!(one("= 3 | round(1;)"), "3.0");
-    // a command's operand: the hop handed headless, the three spellings
+    // a command's operand: the step handed headless, the three spellings
     let group = canonical("/a | join((--author))");
     assert_eq!(canonical("/a | join(--author;)"), group);
     assert_eq!(canonical("/a | join((--author);)"), group);

@@ -56,7 +56,7 @@ fn a_roles_node_answers_the_sources_identity() {
 #[test]
 fn collapse_sees_one_node_for_a_role_and_its_source() {
     let a = model(MODEL);
-    // three books, two by homer: the hop lands on homer's role node
+    // three books, two by homer: the step lands on homer's role node
     // twice and austen's once — collapse keeps two
     assert_eq!(
         values(&a, "/books/* | ->author @| collapse @| count"),

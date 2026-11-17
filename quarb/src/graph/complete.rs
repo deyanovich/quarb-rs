@@ -5,7 +5,7 @@
 //! `|` the scalars, after `$` the register spellings — the same
 //! stdlib registry the highlighter reads, so a new built-in
 //! completes without a second edit. The **data tier** adds a live
-//! adapter: hop-name candidates enumerate the actual children at
+//! adapter: step-name candidates enumerate the actual children at
 //! the cursor's path prefix, and `::` candidates include the
 //! adapter's aliased annotations, so a git mount
 //! offers `::short` and a JSON mount offers nothing invented.
@@ -45,7 +45,7 @@ pub enum Kind {
     ContextCommand,
     /// A capsa accessor (`$.`, `@.`, `%.`, …).
     Accessor,
-    /// A child hop name from the mounted arbor.
+    /// A child step name from the mounted arbor.
     Child,
     /// A property/annotation key (`::…`), aliased or core.
     Property,
@@ -110,7 +110,7 @@ fn context(text: &str, word_start: usize) -> Cx {
     if (head.ends_with('<') && !head.ends_with("<=")) || head.ends_with("(:") {
         return Cx::Trait;
     }
-    // The pointy hops and their rounded spellings (`:-`, `-:`, the
+    // The pointy steps and their rounded spellings (`:-`, `-:`, the
     // sibling `;-` / `-;`; `../` and `:--` / `--:` end in `/` and
     // `--` / `-:` already).
     if head.ends_with('/')
@@ -223,9 +223,9 @@ pub fn complete_with(text: &str, cursor: usize, adapter: &dyn AstAdapter) -> Vec
     out
 }
 
-/// Walk the plain-hop prefix before `word_start` down from the
+/// Walk the plain-step prefix before `word_start` down from the
 /// root: `/a/b/` resolves to the b-nodes. Anything fancier than
-/// name hops (predicates, links, searches) falls back to the
+/// name steps (predicates, links, searches) falls back to the
 /// walked-so-far set — candidates stay real, just broader.
 fn resolve_prefix(text: &str, word_start: usize, adapter: &dyn AstAdapter) -> Vec<NodeId> {
     let head = &text[..word_start];

@@ -1,4 +1,4 @@
-//! The pushdown scanning round (2026-11-06): a child hop that keeps
+//! The pushdown scanning round (2026-11-06): a child step that keeps
 //! a prefix reads k rows (`SELECT … ORDER BY rowid LIMIT k`), a
 //! count on a table not read is the server's `count(*)`, and the
 //! rows a prefix read are the rows the whole read finds again.

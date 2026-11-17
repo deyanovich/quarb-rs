@@ -61,7 +61,7 @@ struct Container {
     /// node itself).
     members: Vec<Member>,
     /// Per member: the role it plays — `ip` in `/ips/ip` — which
-    /// names the child *and* labels every hop that lands on it, and
+    /// names the child *and* labels every step that lands on it, and
     /// the trait it carries, the role unless declared.
     roles: Vec<(String, String)>,
     /// member key string → member index, over the whole container;
@@ -115,7 +115,7 @@ impl Container {
 /// needs the containers materialized and one pass over each scope.
 struct Fabric {
     /// base node → the derived node aliasing it, and that
-    /// container's role. A hop that would land on the raw node lands
+    /// container's role. A step that would land on the raw node lands
     /// on the alias instead, so the role a model declared is the one
     /// the label uses.
     alias: HashMap<NodeId, (NodeId, String)>,
@@ -146,7 +146,7 @@ struct Fabric {
     edge_back: HashMap<NodeId, Vec<(String, NodeId, NodeId)>>,
     /// Every label the fabric walks back under (a declared ref's, a
     /// relation's, an edge's backward reading): over a base that
-    /// cannot walk its own links back, a hop naming one of these is
+    /// cannot walk its own links back, a step naming one of these is
     /// still the model's to answer (`backlinks_unsupported`).
     back_labels: HashSet<String>,
     /// (source, label, target) → the scope node the edge was made
@@ -161,7 +161,7 @@ struct Fabric {
     /// NAME` on a property the base declares renames: hidden, the
     /// ref's edge under NAME standing for them.
     renamed: HashSet<(NodeId, String, NodeId)>,
-    /// (scope row, label) of every link a wildcard hop skips: the
+    /// (scope row, label) of every link a wildcard step skips: the
     /// references an `edge` statement over the same container
     /// consumed through its two fields — under the ref's own label,
     /// the field's name and the base's foreign-key label, whichever
@@ -215,7 +215,7 @@ pub struct ModelAdapter<A: AstAdapter> {
     units: Result<BTreeMap<String, (f64, String)>, String>,
     /// The measures of the declared graphs the engine computed over
     /// their scope and offered back (spec: Graph Declarations): per
-    /// (scope, hop, measure), each node's value. The model has no
+    /// (scope, step, measure), each node's value. The model has no
     /// store of its own, so this is how it maintains a measure:
     /// once computed, answered from here for the mount's life.
     graph_measures: RefCell<HashMap<(String, String, String), HashMap<NodeId, Value>>>,
@@ -260,10 +260,10 @@ fn index_key(v: &Value) -> Option<String> {
 impl<A: AstAdapter> ModelAdapter<A> {
     /// The crosslinks with each edge's identity (spec: Edge rows): a
     /// declared pair edge is its scope row, a declared ref's edge is
-    /// the source row whose field it resolves (`$-::no` on the hop
+    /// the source row whose field it resolves (`$-::no` on the step
     /// reads that row); a relation and the base's own links carry
     /// none of their own. `base_rows` reads the base's own: its
-    /// link rows for the hop, its edge rows for the graph as a table
+    /// link rows for the step, its edge rows for the graph as a table
     /// (the web level's page-to-page edges).
     fn rows_through(
         &self,
@@ -1263,7 +1263,7 @@ impl<A: AstAdapter> ModelAdapter<A> {
         }
     }
 
-    /// The role of a derived member node, the label a hop landing
+    /// The role of a derived member node, the label a step landing
     /// on it carries.
     fn role_at(&self, node: NodeId) -> Option<String> {
         match self.decode(node) {
@@ -1439,7 +1439,7 @@ impl<A: AstAdapter> ModelAdapter<A> {
                         }
                     }
                 }
-                // A hop to a base target is labelled by the last
+                // A step to a base target is labelled by the last
                 // named segment of the target path (`--кузнецова`);
                 // a derived target by the role of the node it lands on.
                 let path_label = scope_role(&decl.path);
@@ -1457,7 +1457,7 @@ impl<A: AstAdapter> ModelAdapter<A> {
                 // An edge statement over the same container consumes
                 // this reference through its field: every scope row's
                 // link under it, the base's own foreign-key link
-                // included, is one a wildcard hop skips.
+                // included, is one a wildcard step skips.
                 let consumed = self.model.edges.iter().any(|e| {
                     scope_container(&e.scope) == scope_container(&decl.scope)
                         && (e.field_a == decl.field || e.field_b == decl.field)
@@ -1495,7 +1495,7 @@ impl<A: AstAdapter> ModelAdapter<A> {
                     // A list-valued property (a page's tags) refers
                     // to one node per element: the first element is
                     // what `-->` resolves to, every element gets its
-                    // hop and its backlink.
+                    // step and its backlink.
                     let elements: Vec<Value> = match value {
                         l @ Value::List(_) => l.into_items().unwrap_or_default(),
                         other => vec![other],
@@ -1506,11 +1506,11 @@ impl<A: AstAdapter> ModelAdapter<A> {
                             continue;
                         };
                         // `as NAME` labels both ways; else the role the
-                        // hop arrives at
+                        // step arrives at
                         let fwd = label.clone().unwrap_or_else(|| {
                             self.role_at(target).unwrap_or_else(|| path_label.clone())
                         });
-                        // Backward the hop lands on the source node — on
+                        // Backward the step lands on the source node — on
                         // the alias if a `node` gave it a role, else on
                         // the raw node, named by the path that found it.
                         let (back_node, back) = match (f.alias.get(&node), &label) {
@@ -1602,7 +1602,7 @@ impl<A: AstAdapter> ModelAdapter<A> {
             // case where the condition is fixed (`the target whose
             // identity is this value`) and so can go unwritten; a
             // `rel` says its own, which is why it may hold for many
-            // targets and fork threads like any other hop.
+            // targets and fork threads like any other step.
             for decl in &self.model.rels {
                 let fwd = scope_role(&decl.target);
                 let back = scope_role(&decl.source);
@@ -2702,7 +2702,7 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
             .collect()
     }
 
-    /// A wildcard hop skips the references an edge statement
+    /// A wildcard step skips the references an edge statement
     /// consumed (spec: Edge rows): the fabric marked every scope
     /// row's link under them. The row may be asked for through the
     /// alias a `node` statement gave it.
@@ -2787,9 +2787,9 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
     /// Over a base that cannot walk its links back (spec: The adapter
     /// contract) the model still walks back what it declares: a
     /// value node's backlinks are the fabric's alone, and at a base
-    /// node a hop naming a label the fabric walks back under — a
+    /// node a step naming a label the fabric walks back under — a
     /// ref's, a relation's, an edge's — is answered from the fabric.
-    /// Any other hop there (a wildcard, a pattern, a label of the
+    /// Any other step there (a wildcard, a pattern, a label of the
     /// base's own) needs the base's backlinks, and the base's answer
     /// stands. The base is asked first: the fabric is built only
     /// over a base that says it cannot.
@@ -2920,12 +2920,12 @@ impl<A: AstAdapter> AstAdapter for ModelAdapter<A> {
         if self.plan_names_declared(plan) {
             return None;
         }
-        // A child hop sees the derived containers (`children_named`
+        // A child step sees the derived containers (`children_named`
         // does); a descendant search is the base's, except from the
         // root, from a derived node, or under aliases, where the
         // walk answers.
         match plan.axis {
-            // A prefix a child hop keeps under a source's own node
+            // A prefix a child step keeps under a source's own node
             // (`/t/* @| [..k]`, the pushdown scanning round,
             // 2026-11-06) is the source's to cut, as under a
             // descendant search; the model's own hooks answer the rest.
@@ -3260,7 +3260,7 @@ impl<A: AstAdapter> ModelAdapter<A> {
                 };
                 if dimensionless(&base) {
                     return Err(format!(
-                        "{what}: weights(::{name}) is dimensionless — the hop count is the unit \
+                        "{what}: weights(::{name}) is dimensionless — the step count is the unit \
                          weight, outside the set"
                     ));
                 }

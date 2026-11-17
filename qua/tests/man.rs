@@ -215,6 +215,21 @@ fn a_pipe_is_its_page_and_its_commands() {
             && !missing.contains("retired"),
         "{missing}"
     );
+    // the navigation's kind is `step` (the term was "hop" until
+    // 0.67, ruling 2026-11-17): the old word is answered with the new
+    let (steps, ok) = qua(&["man", "syntax", "step"]);
+    assert!(
+        ok && steps.lines().any(|l| l.starts_with("-> ")) && steps.contains("link step"),
+        "{steps}"
+    );
+    assert_eq!(qua(&["man", "syntax", "steps"]).0, steps);
+    for old in ["hop", "hops"] {
+        let (retired, ok) = qua(&["man", "syntax", old]);
+        assert!(
+            !ok && retired.contains("a hop is a step since 0.67, 'man syntax step'"),
+            "{retired}"
+        );
+    }
 }
 
 /// A word neither table has: the commands near it, the glyphs it is

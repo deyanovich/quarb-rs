@@ -23,7 +23,7 @@ pub struct Query {
     /// pipeline commands written before the first `<=>`. Those commands
     /// run first, the join binds against the capsae as they then
     /// stand (register, marks, node), and the rest of the pipeline
-    /// follows — a join forks the capsa it leaves, as a hop does.
+    /// follows — a join forks the capsa it leaves, as a step does.
     pub join_at: usize,
     /// Meaningful on a correlation entry: `true` when the marker
     /// following it was `<=>?` — the outer join. The entry's
@@ -98,7 +98,7 @@ pub enum Anchor {
 }
 
 /// Which end of an edge: the node the declaration points from, or
-/// the one it points to — whichever way the hop walked it.
+/// the one it points to — whichever way the step walked it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum End {
     Source,
@@ -391,7 +391,7 @@ pub enum Command {
     /// projection, a push (`| .`) files the topic and navigation
     /// resumes. A trailing projection moves the thread to scalar
     /// mode exactly like a branch projection. Refused under `@|`
-    /// and `$|`: hops are per-thread.
+    /// and `$|`: steps are per-thread.
     Nav(Branch),
     /// `$| command` — the iteration pipe, the scope-dual of `@|`: where
     /// `@|` hands its command ALL topics at once (the context), `$|`
@@ -744,7 +744,7 @@ pub enum Projection {
     AdapterMeta(String),
 }
 
-/// One element of a navigation path: a plain hop, a parenthesized
+/// One element of a navigation path: a plain step, a parenthesized
 /// path-pattern group (alternation + quantifier), or — inside a
 /// group — a breadcrumb push.
 #[derive(Debug, Clone)]
@@ -765,14 +765,14 @@ pub enum PathElem {
     /// thread's mark array, under `name` when one is given; a bare
     /// `.` marks anonymously (the slot is still `((.N))`-addressable,
     /// and `((.))`/`((@))` see it). A name is an identifier or a
-    /// quoted string — positions number themselves. Not a hop:
+    /// quoted string — positions number themselves. Not a step:
     /// navigation continues from the same node.
     Mark(Option<String>),
     Step(Step),
     Group(Group),
     /// `.(body)` / `.name(body)` inside a path pattern: evaluate the
     /// body from the path's current node (with `$-` in scope after
-    /// an edge hop), reduce to a scalar, and push it onto the
+    /// an edge step), reduce to a scalar, and push it onto the
     /// expansion path's register. A pattern that pushes yields one
     /// result per path, the register carried into the result capsa.
     Push {
@@ -931,11 +931,11 @@ pub struct Step {
     pub axis: Axis,
     pub matcher: Matcher,
     /// The name algebra (spec: Name algebra): designators joined
-    /// by `&&`, `||` and a leading `!`, in CNF. On a crosslink hop
+    /// by `&&`, `||` and a leading `!`, in CNF. On a crosslink step
     /// it is the label selection, `->(a && !b)`, read over the
     /// labels; on every other axis it reads the node's name,
-    /// `/(*.rs && !test_*)`, the complement among the hop's own
-    /// candidates. Empty when the matcher alone names the hop; the
+    /// `/(*.rs && !test_*)`, the complement among the step's own
+    /// candidates. Empty when the matcher alone names the step; the
     /// matcher is `Any` when it is set.
     pub labels: Vec<LabelClause>,
     /// `<...>` trait filters. Multiple clauses are ANDed together.
@@ -950,13 +950,13 @@ pub struct Step {
 #[derive(Debug, Clone)]
 pub enum Predicate {
     /// `[n]` — keep the `n`-th node (1-based; negative counts from
-    /// the end, `[-1]` is the last) of the hop's result list from
+    /// the end, `[-1]` is the last) of the step's result list from
     /// one source node, as filtered by the predicates to its left.
-    /// Position among the hop's results, *not* sibling position —
+    /// Position among the step's results, *not* sibling position —
     /// that is spelled `[:index = n]`. Out of range selects
     /// nothing.
     Index(i64),
-    /// `[a..b]` — keep the inclusive positional range of the hop's
+    /// `[a..b]` — keep the inclusive positional range of the step's
     /// result list, under the same rules as `Index`. Either end may
     /// be omitted (`[2..]`, `[..3]`) or negative (`[2..-1]`); ends
     /// clamp to the list.
@@ -965,7 +965,7 @@ pub enum Predicate {
     Expr(PredExpr),
     /// `[2; 4; 5]`, `[1; 3..4; -1]` — a position list (spec: Index
     /// Predicates): positions and ranges, each read as `Index` /
-    /// `Range`, the selection kept in the hop's order, a position
+    /// `Range`, the selection kept in the step's order, a position
     /// named twice kept once. The items are `Index` and `Range`.
     Positions(Vec<Predicate>),
     /// `[@(2; 4; 5)]`, `[$.pos]`, `[$.n]` — brackets that look at no
@@ -1317,7 +1317,7 @@ pub enum Operand {
     Capture(usize),
     /// `$$__` — the invoking position (spec: The Cursor): the
     /// position at the last query-body invocation, the opener's
-    /// node, held through the body's hops and rebound by a deeper
+    /// node, held through the body's steps and rebound by a deeper
     /// query body; with an optional relative path and projection
     /// (`$$__::prop`, `$$__/child::x`); null at the top level. The
     /// only reach out of a scope: there is no scope stack and no
@@ -1332,12 +1332,12 @@ pub enum Operand {
     /// join condition (a parse-time refusal anywhere else), with an
     /// optional relative path and projection; bare, a reference.
     Driver(Box<Operand>),
-    /// `$-` — the arrived-by edge: the crosslink hop the current
+    /// `$-` — the arrived-by edge: the crosslink step the current
     /// thread most recently walked. Bare, it reads as the edge's
     /// label; projected (`$-::prop`), as the edge's own property
     /// (adapter-provided). Null where no edge has been walked — an
-    /// edge-hop's own predicates and pattern commands after an edge
-    /// hop are the defined scopes.
+    /// edge-step's own predicates and pattern commands after an edge
+    /// step are the defined scopes.
     Edge { projection: Option<Projection> },
     /// `@_` — the context's topics as a list, the plural of `$_`:
     /// every capsa of the command's INPUT (the snapshot rule — a
@@ -1417,11 +1417,11 @@ pub enum Operand {
         right: Box<Operand>,
     },
     /// `@-` — ALL the edges that reached this capsa on the walk's
-    /// final hop, as a list (the sigil law: `$` one, `@` all). Bare,
+    /// final step, as a list (the sigil law: `$` one, `@` all). Bare,
     /// the labels; projected (`@-::prop`), each edge's property.
     /// Aggregated, never forking: a node reached by three crossings
     /// keeps one capsa whose `@-` has three elements. Empty where
-    /// the walk's last element was not a hop.
+    /// the walk's last element was not a step.
     Edges { projection: Option<Projection> },
     /// `"text ${expr} text"` — an interpolated string: text segments
     /// and holes, each hole an expression evaluated in the current
@@ -1622,7 +1622,7 @@ impl TraitClause {
 /// One conjunct of a name algebra — `/(*.rs && !test_*)`,
 /// `->(a && !b)`, spec: Name algebra — its alternatives OR'd, each
 /// a designator (a name, a glob, a regex), negated or not. A step's
-/// clauses are ANDed, as a trait's are. On a crosslink hop the
+/// clauses are ANDed, as a trait's are. On a crosslink step the
 /// selection reads the labels a crosslink carries together:
 /// `(a && b)` is one crosslink labeled both ways. `*` is any
 /// label or name, so `!*` selects nothing.
@@ -1731,7 +1731,7 @@ pub enum Axis {
     /// `::a=>(SCOPE::b)` — the value match: the nodes of SCOPE whose
     /// `b` equals the current node's `a`, plain equality of two named
     /// properties, no resolution function, neither a key. One
-    /// spelling in both directions; a 1-to-many hop.
+    /// spelling in both directions; a 1-to-many step.
     ValueMatch {
         property: String,
         scope: Option<ScopePath>,
@@ -1791,7 +1791,7 @@ pub enum Matcher {
     Regex(Regex),
     /// `*` — any name.
     Any,
-    /// `.` inside a path pattern — matches any hop name (the pattern
+    /// `.` inside a path pattern — matches any step name (the pattern
     /// dot wildcard; unnamed nodes included, like `*`).
     Dot,
 }

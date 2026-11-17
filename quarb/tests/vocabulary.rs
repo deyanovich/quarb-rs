@@ -92,7 +92,7 @@ const CORPUS: &[&str] = &[
     "/a(/.){2;3}?/b[(->ref)+]/{2}",
     // quantified crosslink, open max, distal suffix; tolerated form
     "//user(->manager_id){2;}! || //body/(p|div)",
-    // the arrived-by edge: bare and projected, in edge-hop predicates
+    // the arrived-by edge: bare and projected, in edge-step predicates
     "/a->e[$-::qty > 1][$- = \"e\"]",
     // pattern pushes (breadcrumbs): expression and sub-query bodies,
     // bare and named — reflecting with the pipeline push kinds

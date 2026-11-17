@@ -90,7 +90,7 @@ fn source_metadata_and_introspection_aggregates() {
     assert_eq!(values("^:::query"), vec![Value::Str(QUERY.to_string())]);
     // "how many commands does this query run?"
     assert_eq!(values("/query/pipeline/* @| count"), vec![Value::Int(5)]);
-    // "does it use any descendant hops?" — no
+    // "does it use any descendant steps?" — no
     assert_eq!(
         values("//step[::axis = \"//\"] @| count"),
         vec![Value::Int(0)]

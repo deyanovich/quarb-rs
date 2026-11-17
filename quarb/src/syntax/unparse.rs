@@ -246,8 +246,8 @@ pub(crate) fn group(g: &Group) -> String {
         .collect();
     // A count before a further brace prints as its brace: `{1}`
     // printed as nothing and `{1;}` as `+`, so `(->x){1}{;5_km}`,
-    // one hop within five kilometres, came back as any number of
-    // hops, and `(->x){1;}{;5_km}` as `+{;5_km}`, which the parser
+    // one step within five kilometres, came back as any number of
+    // steps, and `(->x){1;}{;5_km}` as `+{;5_km}`, which the parser
     // refuses ("a brace never follows '+' or '*'").
     let mut quant = if g.more.is_empty() {
         quant_text(&g.quant)
@@ -411,7 +411,7 @@ pub(crate) fn step(s: &Step) -> String {
     // an incoming crosslink, so a digit-leading matcher after `<-`
     // needs a separating space to keep its axis on reparse; the
     // space is meaning-preserving there. A dash-leading name after
-    // the sibling hop `<` cannot take a space (spaced, `<` is the
+    // the sibling step `<` cannot take a space (spaced, `<` is the
     // comparison) and reprints quoted instead: `<"-x"`. A glob led
     // by a dash has no spelling after `<` at all (quoting would make
     // it a literal name); it prints as it is and does not reparse.
@@ -747,7 +747,7 @@ fn pred_term(e: &PredExpr) -> String {
 /// `inner` in parentheses — with a space after the opening one
 /// when the text starts with a lone `:` or `;` (a register field
 /// `:name`, a shell word), since `(:name` is the rounded sibling
-/// hop and `(;…)` the shell literal to the lexer; `(::` lexes as
+/// step and `(;…)` the shell literal to the lexer; `(::` lexes as
 /// itself.
 fn parens(inner: &str) -> String {
     if needs_gap(inner) {
@@ -1874,7 +1874,7 @@ fn fn_call(call: &crate::syntax::ast::FnCall) -> String {
         .into_iter()
         .zip(call.args.iter())
         .partition(|(_, a)| !matches!(a, Arg::Opt { .. }));
-    // A hop as an operand prints as the path group, `f((--author))`
+    // A step as an operand prints as the path group, `f((--author))`
     // — the canonical spelling (draft 164), a dash-led field being
     // the option segment on the reparse; the trailing separator,
     // `f(--author;)`, is an input spelling only.
@@ -1953,7 +1953,7 @@ mod tests {
     fn connective_chains_print_as_written() {
         // Left-associative: no parentheses on a same-connective
         // chain, and none that would open `(:` — the rounded
-        // sibling hop to the lexer.
+        // sibling step to the lexer.
         assert_eq!(
             assert_fixpoint("/a | %(fi = 1) | [:fi || :ss || :pp || :mp]"),
             "/a | %(fi = 1) | [:fi || :ss || :pp || :mp]"
@@ -2218,8 +2218,8 @@ mod tests {
     /// written prints, and prints so that it reads back.
     #[test]
     fn a_count_brace_before_a_further_brace_prints_as_its_brace() {
-        // `{1}` printed as nothing and `{1;}` as `+`: one hop within
-        // five kilometres came back as any number of hops, and the
+        // `{1}` printed as nothing and `{1;}` as `+`: one step within
+        // five kilometres came back as any number of steps, and the
         // other as `+{;5_km}`, which does not parse
         assert_eq!(assert_fixpoint("/a(->x){1}{;5_km}"), "/a(->x){1}{;5_km}");
         assert_eq!(assert_fixpoint("/a(->x){1;}{;5_km}"), "/a(->x){1;}{;5_km}");

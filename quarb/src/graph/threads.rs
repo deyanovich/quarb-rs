@@ -28,18 +28,18 @@ type Link = Option<Arc<Trail>>;
 
 thread_local! {
     /// The order trail nodes were made in, for the drawing's sibling
-    /// order (a hop's landings as the hop made them).
+    /// order (a step's landings as the step made them).
     static SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// One event of a thread's lineage.
 pub(crate) enum TrailEvent {
-    /// A step the thread took — a hop (its landing, one event per
+    /// One move of the thread — a step of a path (its landing, one event per
     /// landing thread) or a pipe command — and its cursor after it.
     Step {
         text: String,
         hop: bool,
-        /// A hop's literal part — its leading elements up to the
+        /// A step's literal part — its leading elements up to the
         /// first wildcard (`/books` of `/books/*`): what `…` stands
         /// for on the landings' lines, with the position above.
         lead: String,
@@ -157,11 +157,11 @@ pub(crate) fn literal_elem(text: &str) -> bool {
         && rest != "."
 }
 
-/// The trail after one more element of a hop within a branch: the
-/// hop the parent's last event stands for, extended to this landing
+/// The trail after one more element of a step within a branch: the
+/// step the parent's last event stands for, extended to this landing
 /// — one level for `/books/*`, not one per element — its merges
 /// carried; `first` marks the run's first element, which starts the
-/// hop instead.
+/// step instead.
 pub(crate) fn hop(parent: &Link, first: bool, text: &str, lead: &str, node: NodeId) -> Link {
     if !recording() {
         return parent.clone();
@@ -189,9 +189,9 @@ pub(crate) fn hop(parent: &Link, first: bool, text: &str, lead: &str, node: Node
     )
 }
 
-/// A thread a hop exhausted (no landing): its trail kept for the
-/// drawing, its last line the step before the hop — the hop's
-/// elements walked so far (`first` false) are not a step of its own.
+/// A thread a step exhausted (no landing): its trail kept for the
+/// drawing, its last line the one before that step — the step's
+/// elements walked so far (`first` false) are no line of their own.
 pub(crate) fn ended(trail: &Link, first: bool) {
     if !recording() {
         return;
@@ -300,7 +300,7 @@ pub(crate) fn record_step(
         }
         return;
     }
-    // a hop records its landings on the walk; every other command
+    // a step records its landings on the walk; every other command
     // records itself on each output
     if !matches!(command, Command::Nav(_)) {
         for t in outputs.iter_mut() {
@@ -390,7 +390,7 @@ struct Trie {
 impl Trie {
     /// The trie of `trails`, each read back to (not including) the
     /// paragraph's first event — an aggregation's answer event
-    /// counts, a hop into it does not.
+    /// counts, a step into it does not.
     fn build(trails: &[Link]) -> Trie {
         let mut nodes = vec![Node {
             trail: None,
@@ -479,7 +479,7 @@ struct Drawer<'a, A: AstAdapter> {
 }
 
 enum Item {
-    /// Landings of one hop under one step line.
+    /// Landings of one step under its line.
     Hop(String, Vec<usize>),
     Node(usize),
 }
@@ -487,11 +487,11 @@ enum Item {
 impl<A: AstAdapter> Drawer<'_, A> {
     /// The cursor after a step, `(position; topic)`: the position
     /// relative to the line above's (ruling 2026-11-04) — `…` when
-    /// unchanged; on a hop's landing `…` is the position above joined
-    /// with the hop's literal part and the line prints what the
+    /// unchanged; on a step's landing `…` is the position above joined
+    /// with the step's literal part and the line prints what the
     /// wildcards matched (`(…/1; ∅)` for `/members/*`, `(…/1/members/1;
     /// ∅)` for `/teams/*/members/*`); the whole name path otherwise (a
-    /// parent or ancestor hop, a mark jump, the first line of a
+    /// parent or ancestor step, a mark jump, the first line of a
     /// paragraph); `∅` for no position.
     fn cursor(
         &self,

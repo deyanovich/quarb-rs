@@ -164,7 +164,7 @@ impl DuckdbAdapter {
         )?;
         let specs = introspect(&conn)?;
         // One row source with an optional WHERE: the whole read and
-        // the keyed read a hop makes (`WHERE key IN (…)`).
+        // the keyed read a step makes (`WHERE key IN (…)`).
         let conn = std::rc::Rc::new(conn);
         let conn2 = conn.clone();
         let conn3 = conn.clone();

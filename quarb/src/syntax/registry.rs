@@ -828,7 +828,7 @@ pub const SPECS: &[FnSpec] = &[
     with_check(
         on_node(context(
             "edges",
-            "the edges among the context's nodes as a table, the induced subgraph: source, target, label, directed and the edge's properties; operand the collecting hop, edges(->road), edges(<-road), edges(--road), edges(~*), bare edges = edges(->*); --weight=UNIT (-w) adds the weight of the unit's dimension",
+            "the edges among the context's nodes as a table, the induced subgraph: source, target, label, directed and the edge's properties; operand the collecting step, edges(->road), edges(<-road), edges(--road), edges(~*), bare edges = edges(->*); --weight=UNIT (-w) adds the weight of the unit's dimension",
         )),
         Check::Command,
     ),

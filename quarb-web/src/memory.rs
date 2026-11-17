@@ -114,7 +114,7 @@ pub(crate) struct Found {
 }
 
 /// The `rel` words that are hints about the link, never its label
-/// (spec: Text Readings, the web reading): they ride as boolean
+/// (spec: Quarb Readings, the web reading): they ride as boolean
 /// edge properties.
 const REL_HINTS: [&str; 6] = [
     "nofollow",
@@ -319,7 +319,7 @@ pub(crate) fn dom_links(html: &str) -> (Option<String>, Vec<Found>) {
     let doc = Html::parse_document(html);
     let base = quarb_text_html::base_href(&doc);
     let mut out = Vec::new();
-    // The head's own links (spec: Text Readings, the web reading):
+    // The head's own links (spec: Quarb Readings, the web reading):
     // every `<link rel>`, labelled by its relation — the alternates
     // by language and by type, the assets under `asset`, the rest
     // by the rel's own name (canonical, prev, next, author,
@@ -867,7 +867,7 @@ impl MemoryStore {
             }
         }
 
-        // 2b. Redirect stubs (spec: Text Readings, the web reading):
+        // 2b. Redirect stubs (spec: Quarb Readings, the web reading):
         // a document whose head carries a meta refresh, or whose
         // script sends the browser on, stands for the page its URL
         // resolves to within the site and is no page itself, as a
@@ -1076,7 +1076,7 @@ impl MemoryStore {
                 // A same-site path no page answers to is a redlink —
                 // unless it names a file by its extension (the
                 // spec's PDF): that is a resource, shipped or not,
-                // as another host's target is (spec: Text Readings,
+                // as another host's target is (spec: Quarb Readings,
                 // the web reading).
                 // A redlink is a content link (`link`, the body) to a
                 // page the site does not have: the chrome's links to
@@ -1230,7 +1230,7 @@ impl MemoryStore {
             rows[(k.0 - 1) as usize].analytics = a;
         }
 
-        // 6. Document order (spec: Text Readings, the web reading):
+        // 6. Document order (spec: Quarb Readings, the web reading):
         // the tree's pre-order with siblings by pagerank descending,
         // ties by name — the most linked pages first at every level,
         // so `//page[..10]` and every search result come most-linked

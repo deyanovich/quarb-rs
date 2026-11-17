@@ -327,7 +327,7 @@ fn the_scope_leaves_crosslinks_and_grafts_alone() {
 fn the_index_backed_store_carries_roles_and_resources() {
     // the memory store's edges by role, its resources and its
     // fragment landings cross into the SQLite store and answer the
-    // same (spec: Text Readings, the web reading)
+    // same (spec: Quarb Readings, the web reading)
     let mut fs = files();
     fs.push(PageFile {
         path: "spec.html".into(),

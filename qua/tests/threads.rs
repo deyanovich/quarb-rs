@@ -2,7 +2,7 @@
 //! the run records when the query asks for it, drawn as text — every
 //! step of the expanded query a level, a thread's line its cursor
 //! after the step (the position relative to the line above: `…`
-//! unchanged, `…` the position above with the hop's literal part and
+//! unchanged, `…` the position above with the step's literal part and
 //! then what the wildcards matched, whole otherwise), the forks
 //! children, each aggregation a paragraph.
 
@@ -58,8 +58,9 @@ root  (/; ∅)
     );
 }
 
-/// A hop inside a branch is a level of its own; a mark on the walk a
-/// step; a thread exhausted at a hop has no line under its last step.
+/// A step inside a branch is a level of its own, and so is a mark on
+/// the walk; a thread exhausted at a step has no line under its last
+/// level.
 #[test]
 fn hops_within_a_branch_and_an_exhausted_thread() {
     assert_eq!(
@@ -102,9 +103,9 @@ root  (/; ∅)
     );
 }
 
-/// Alike threads merging at a hop (the parent of both tags is the
+/// Alike threads merging at a step (the parent of both tags is the
 /// one tags node): the first continues with the count, the others
-/// end with the mark. A branch's elements are one hop level.
+/// end with the mark. A branch's elements are one step level.
 #[test]
 fn alike_threads_merge_at_a_hop() {
     assert_eq!(

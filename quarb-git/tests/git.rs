@@ -221,3 +221,116 @@ fn a_prefix_over_the_history_walks_k_commits() {
     };
     assert_eq!(subjects, all_subjects[..2]);
 }
+
+/// A walk along `parent` reads ahead. Each commit a walk arrived at
+/// was read by its own `git show`: a walk of n commits started n
+/// processes, and a history of 1,568 commits took 5.8 s to walk
+/// where listing it takes 0.08 s. A commit the walk arrives at is
+/// now read with the next of its ancestors, twice as many at each
+/// read, and the values are the listing's own.
+#[test]
+fn a_walk_along_the_history_reads_ahead() {
+    let dir = std::env::temp_dir().join("quarb-git-test-ahead");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    sh(&dir, &["init", "-q", "-b", "master"]);
+    for n in 1..=40 {
+        sh(
+            &dir,
+            &["commit", "-q", "--allow-empty", "-m", &format!("canto {n}")],
+        );
+    }
+    // a commit asked for by name is one commit read
+    let a = GitAdapter::open(&dir).unwrap();
+    assert_eq!(values(&a, "/commits/HEAD | ::subject"), ["canto 40"]);
+    assert_eq!(a.header_reads(), 1);
+    // thirty more along the walk: reads of 2, 4, 8 and 16 commits
+    let walked = values(&a, "/commits/HEAD(->parent){;30} | ::subject");
+    assert_eq!(walked.len(), 31);
+    assert_eq!(walked[0], "canto 40");
+    assert_eq!(walked[30], "canto 10");
+    assert_eq!(a.header_reads(), 5, "one read a commit would be 31");
+    // what the walk read is what the listing reads
+    let b = GitAdapter::open(&dir).unwrap();
+    let listed = values(&b, "/commits/* | %(::subject; ::author; ::date; ::parent)");
+    assert_eq!(b.header_reads(), 1);
+    assert_eq!(
+        values(
+            &a,
+            "/commits/HEAD(->parent){;30} | %(::subject; ::author; ::date; ::parent)"
+        ),
+        listed[..31]
+    );
+    // and nothing more was started for it
+    assert_eq!(a.header_reads(), 5);
+    // a second commit by name, off any walk, is again one commit
+    let c = GitAdapter::open(&dir).unwrap();
+    assert_eq!(values(&c, "/commits/'HEAD~20' | ::subject"), ["canto 20"]);
+    assert_eq!(values(&c, "/commits/'HEAD~3' | ::subject"), ["canto 37"]);
+    assert_eq!(c.header_reads(), 2);
+}
+
+/// A sweep of the refs reads their commits together (the user,
+/// 2026-11-17, on `/tags/* | ::subject`). It started one `git show`
+/// a ref: 448 tags on 167 commits took 0.7 s, where reading those
+/// commits in one process takes 0.03 s. The commit of a listed ref
+/// is now read with the commits of the refs after it in the
+/// listing, twice as many at each read, and the values are the
+/// listing's own.
+#[test]
+fn a_sweep_of_the_refs_reads_their_commits_together() {
+    let dir = std::env::temp_dir().join("quarb-git-test-tips");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    sh(&dir, &["init", "-q", "-b", "master"]);
+    for n in 1..=30 {
+        sh(
+            &dir,
+            &["commit", "-q", "--allow-empty", "-m", &format!("canto {n}")],
+        );
+        sh(&dir, &["tag", &format!("c{n:02}")]);
+    }
+    // thirty tags: reads of 2, 4, 8 and 16 commits
+    let a = GitAdapter::open(&dir).unwrap();
+    let swept = values(&a, "/tags/* | ::subject");
+    assert_eq!(swept.len(), 30);
+    assert_eq!(swept[0], "canto 1");
+    assert_eq!(swept[29], "canto 30");
+    assert_eq!(a.header_reads(), 4, "one read a tag would be 30");
+    // what the sweep read is what the listing reads (the listing
+    // in its own order: every commit here is a ref's, of one date)
+    let b = GitAdapter::open(&dir).unwrap();
+    let mut listed = values(&b, "/commits/* | %(::subject; ::author; ::date; ::parent)");
+    assert_eq!(b.header_reads(), 1);
+    listed.sort();
+    let mut by_tag = values(&a, "/tags/* | %(::subject; ::author; ::date; ::parent)");
+    by_tag.sort();
+    assert_eq!(by_tag, listed);
+    // and nothing more was started for it, nor for a walk from a
+    // tag over commits the sweep holds
+    assert_eq!(values(&a, "/tags/c30(->parent){;5} | ::subject").len(), 6);
+    assert_eq!(a.header_reads(), 4);
+    // a tag asked for by name is one read
+    let c = GitAdapter::open(&dir).unwrap();
+    assert_eq!(values(&c, "/tags/c07 | ::subject"), ["canto 7"]);
+    assert_eq!(c.header_reads(), 1);
+    // an annotated tag is read at its commit, a second tag of a
+    // commit adds no read, and the branches are swept alike
+    sh(
+        &dir,
+        &["tag", "-a", "-m", "the last canto", "z-last", "c30"],
+    );
+    sh(&dir, &["branch", "earlier", "c10"]);
+    sh(&dir, &["branch", "middle", "c20"]);
+    let d = GitAdapter::open(&dir).unwrap();
+    assert_eq!(
+        values(&d, "/branches/* | ::subject"),
+        ["canto 10", "canto 30", "canto 20"]
+    );
+    assert_eq!(d.header_reads(), 2, "two commits, then the third");
+    let swept = values(&d, "/tags/* | ::subject");
+    assert_eq!(swept.len(), 31);
+    assert_eq!(swept[30], "canto 30");
+    // twenty-seven commits are left to read: 2, 4, 8 and 13
+    assert_eq!(d.header_reads(), 6);
+}

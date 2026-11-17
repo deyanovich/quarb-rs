@@ -164,7 +164,7 @@ fn archive_name(name: &str) -> bool {
 
 /// The notations a leaf can be declared to carry (spec: Grafting):
 /// the one vocabulary `?format=NOTATION` on a mount and `<NOTATION>`
-/// on a hop share, the Text Readings' names of the formats. Source
+/// on a step share, the Quarb Readings' names of the formats. Source
 /// languages come besides, by their grammar names.
 pub const NOTATIONS: &[&str] = &[
     "json", "jsonl", "yaml", "toml", "xml", "html", "markdown", "text", "csv", "tsv", "fb2",
@@ -228,7 +228,7 @@ pub fn canonical_notation(name: &str) -> String {
 }
 
 /// The notation a text declares about itself in its first bytes
-/// (the Text Readings' declared identity): an XML declaration or a
+/// (the Quarb Readings' declared identity): an XML declaration or a
 /// DOCTYPE. Nothing else counts; a brace or a bracket is a guess,
 /// not a declaration.
 pub fn self_declared(content: &str) -> Option<&'static str> {
@@ -500,7 +500,7 @@ pub struct ComposeAdapter<A: AstAdapter> {
     string_reader: Option<StringReader>,
     /// Graft on demand only: no leaf is probed for a declared
     /// notation (the layer a host puts over a plain source so that
-    /// `graft(NOTATION)` and a `<NOTATION>` trait at a hop have a
+    /// `graft(NOTATION)` and a `<NOTATION>` trait at a step have a
     /// composing layer to answer from, the leaves otherwise as they
     /// were).
     on_demand_only: bool,
@@ -533,7 +533,7 @@ impl<A: AstAdapter> ComposeAdapter<A> {
     }
 
     /// Graft on demand only (`graft(NOTATION)`, a `<NOTATION>` trait
-    /// at a hop): no leaf is read for a declared notation of its
+    /// at a step): no leaf is read for a declared notation of its
     /// own, so a plain source keeps its leaves as they were.
     pub fn on_demand_only(mut self) -> Self {
         self.on_demand_only = true;
@@ -878,7 +878,7 @@ impl<A: AstAdapter> ComposeAdapter<A> {
     }
 
     /// Read an outer leaf as `notation`, the query's `<NOTATION>` at
-    /// a hop (spec: Grafting): true when the leaf is grafted as that
+    /// a step (spec: Grafting): true when the leaf is grafted as that
     /// notation afterwards, whether by this call or before it.
     pub fn graft_as(&self, node: NodeId, notation: &str) -> bool {
         let want = canonical_notation(notation);
@@ -1240,7 +1240,25 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
                 .inner
                 .adapter()
                 .property_names(inner),
-            None => self.outer.property_names(node),
+            // The graft root IS the outer leaf: the properties the
+            // grafted document's root answers are the leaf's (see
+            // `property`), so they are among its names. (A JSON
+            // column's cell answered `::total` and listed no
+            // property: `:props` was empty at the graft and right
+            // one step in.)
+            None => {
+                let mut names = self.outer.property_names(node);
+                if let Some(g) = self.graft_at(node) {
+                    let grafts = self.grafts.borrow();
+                    let a = grafts[g].inner.adapter();
+                    for name in a.property_names(a.root()) {
+                        if !names.contains(&name) {
+                            names.push(name);
+                        }
+                    }
+                }
+                names
+            }
         }
     }
     /// The outer source, or any document grafted so far.
@@ -1493,7 +1511,7 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
                 .adapter()
                 .has_trait(inner, name),
             None => {
-                // `<json>` on a hop reads the leaf as JSON (spec:
+                // `<json>` on a step reads the leaf as JSON (spec:
                 // Grafting): the trait holds when it grafts as such
                 if is_notation(name) && self.outer.children(node).is_empty() {
                     return self.graft_as(node, name) || self.outer.has_trait(node, name);
@@ -1644,10 +1662,10 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
                 })
             }
             // Outside: the outer adapter's descendants may cross
-            // into grafts, which the walk handles; a child hop is
+            // into grafts, which the walk handles; a child step is
             // this adapter's own `children_named`.
             // A prefix the plan asks for (`@| [..n]` right after the
-            // hop, ruling 2026-11-05) is the outer source's to cut
+            // step, ruling 2026-11-05) is the outer source's to cut
             // where it lists its rows lazily; its nodes are its own.
             None => match plan.axis {
                 quarb::PlanAxis::Child => plan

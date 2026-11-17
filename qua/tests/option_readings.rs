@@ -3,7 +3,7 @@
 //! and the ruling of the same day on a quoted aggregate push).
 //!
 //! - a graph command's long flag written first is the flag the
-//!   inventory declares, not an undirected hop;
+//!   inventory declares, not an undirected step;
 //! - at the top of an option's value a dash pair opens the next
 //!   option, a flag as much as a valued one;
 //! - an argument that names a column stays a name inside a
@@ -67,7 +67,7 @@ fn roads(dir: &Path, query: &str) -> String {
 
 /// A graph command's long flag is the flag its inventory row
 /// declares. A list in the parser named seven words; any other long
-/// flag written first was read as an undirected hop of that name, so
+/// flag written first was read as an undirected step of that name, so
 /// `--harmonic` and `--coefficient` answered zeros.
 #[test]
 fn a_graph_commands_long_flag_is_its_option() {
@@ -87,7 +87,7 @@ fn a_graph_commands_long_flag_is_its_option() {
     // a valued one parses where it was "expected ')'"
     let out = roads(&d, "/stations/* @| graph:communities(--resolution=2)");
     assert!(out.lines().all(|l| l.parse::<i64>().is_ok()), "{out}");
-    // a hop written first is still the hop: `stage` is no option
+    // a step written first is still the step: `stage` is no option
     assert_eq!(
         roads(&d, "/stations/* @| graph:closeness(--stage; --harmonic)"),
         roads(&d, "/stations/* @| graph:closeness(--stage; -H)")
@@ -103,7 +103,7 @@ fn a_graph_commands_long_flag_is_its_option() {
 
 /// At the top of an option's value a dash pair opens the next
 /// option of the segment. A flag after a path-valued option was read
-/// as an undirected hop on the path, and a path from the root, a
+/// as an undirected step on the path, and a path from the root, a
 /// mark or an anchor before an option was refused.
 #[test]
 fn a_dash_pair_ends_the_path_of_an_options_value() {
@@ -124,7 +124,7 @@ fn a_dash_pair_ends_the_path_of_an_options_value() {
         ),
         "0\n1\n2\n2"
     );
-    // inside a group of the value the dash pair is the hop it is
+    // inside a group of the value the dash pair is the step it is
     // anywhere: the stations two stages from Ephesus
     assert_eq!(
         roads(

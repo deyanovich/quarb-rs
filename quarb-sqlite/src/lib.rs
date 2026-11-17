@@ -222,7 +222,7 @@ fn fetch_rows_where(
 
 /// The rows of a table whose column — `col`, or the row key (the
 /// primary key, else `rowid`) — holds one of `values`, in rowid
-/// order: what a hop reads instead of the table. Each value is
+/// order: what a step reads instead of the table. Each value is
 /// bound in its own storage class and, where it reads as a number
 /// or is one, in the other too, so the comparison finds what the
 /// engine's text equality would under any column affinity; the
@@ -404,11 +404,11 @@ impl SqliteAdapter {
                 fetch_rows_where(&whole, spec, None, None).map_err(|e| e.to_string())
             }),
         )
-        // A hop reads the rows it lands on, by key.
+        // A step reads the rows it lands on, by key.
         .with_key_fetcher(Box::new(move |_, spec, col, values| {
             fetch_rows_keyed(&keyed, spec, None, col, values)
         }))
-        // the first k rows by rowid for a hop that keeps a prefix, and
+        // the first k rows by rowid for a step that keeps a prefix, and
         // the exact count of a table not read (the pushdown scanning
         // round, 2026-11-06)
         .with_prefix_fetcher(Box::new(move |_, spec, k| {
@@ -468,7 +468,7 @@ impl SqliteAdapter {
             })
         }));
         // The pushed-down WHERE filters the table's listing only:
-        // hops into it go by key, unfiltered, so they stay exact.
+        // steps into it go by key, unfiltered, so they stay exact.
         if let Some((table, where_sql)) = filter {
             model = model.with_filtered_listing(
                 &table,

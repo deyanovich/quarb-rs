@@ -4,7 +4,7 @@
 //! mount root is the top line always, and a starting point below it
 //! hangs by a dotted stub labelled with the skipped path. A drawn
 //! node's outgoing crosslinks to context nodes are listed under its
-//! line, one hop deep; a node is drawn once, where first met. The
+//! line, one step deep; a node is drawn once, where first met. The
 //! operands pick a depth, the kind, the traits, the property names,
 //! the properties as a record, and column expressions. One text
 //! value.
@@ -466,7 +466,7 @@ impl<A: AstAdapter> Drawer<'_, A> {
         self.links_and_children(node, &child_prefix, remaining);
     }
 
-    /// The crosslink lines of a drawn node (hop one: the target in
+    /// The crosslink lines of a drawn node (step one: the target in
     /// the context, drawn under the line when not drawn yet), then
     /// its children not drawn yet, in document order.
     fn links_and_children(&mut self, node: NodeId, prefix: &str, remaining: Option<usize>) {
@@ -480,7 +480,7 @@ impl<A: AstAdapter> Drawer<'_, A> {
             }
             self.out.push(format!("{prefix}{text}"));
             self.drawn.insert(target);
-            // hop two: the target's own crosslinks by path only, and
+            // step two: the target's own crosslinks by path only, and
             // its children
             let deeper = format!("{prefix}    ");
             for (l2, t2) in self.listed_links(target) {

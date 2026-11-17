@@ -1,5 +1,5 @@
 //! The pushdown scanning round (2026-11-06): a prefix after a plain
-//! hop over a relational mount reads k rows, directly and through a
+//! step over a relational mount reads k rows, directly and through a
 //! model's `mount`; the diagnostics print what they printed.
 
 use std::path::{Path, PathBuf};

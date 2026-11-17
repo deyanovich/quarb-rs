@@ -2,7 +2,7 @@
 //! the outside review's first concern, a misspelled edge label or
 //! property that was silent): where a source declares every property
 //! its members have and every label that leaves or reaches them (a
-//! table's columns and keys, a CSV's header), a hop, a predicate or
+//! table's columns and keys, a CSV's header), a step, a predicate or
 //! a projection that names what the surface lacks raises a warning
 //! naming what is there. A source that declares nothing stays
 //! quiet, and no answer changes.
@@ -57,12 +57,12 @@ const NO_PROPERTY: &str = "warning UNKNOWN_PROPERTY (/employees): no property 'n
 #[test]
 fn a_table_warns_of_a_label_and_a_property_it_lacks() {
     let d = fixture("table");
-    // the hop: the label is `manager`, the column's name without its
+    // the step: the label is `manager`, the column's name without its
     // suffix; the answer is as empty as it was, and the exit is 0
     let (out, warned) = run(&d, &["/employees/*[2](->manager_id)+ | ::name", "org.db"]);
     assert_eq!(out, "");
     assert_eq!(warned, [NO_LABEL]);
-    // the label is asked in every direction a hop walks
+    // the label is asked in every direction a step walks
     for hop in ["<-manager_id", "--manager_id", "(->manager_id){1;3}"] {
         let q = format!("/employees/*[2]{hop} | ::name");
         let (out, warned) = run(&d, &[&q, "org.db"]);
@@ -342,7 +342,7 @@ fn a_test_of_presence_is_told_of_only_when_nothing_has_the_name() {
     let (out, warned) = run(&d, &["/rooms/*[::floor && !::name] | ::id", "two.db"]);
     assert_eq!(out, "10");
     assert_eq!(warned, [ROOMS_NO_NAME]);
-    // where a path leads to the tested property, the hops before it
+    // where a path leads to the tested property, the steps before it
     // ask as ever and the last name is the test
     let (out, warned) = run(
         &d,

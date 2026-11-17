@@ -460,7 +460,7 @@ fn attach_predicate(name: &str, pred: Predicate, steps: &mut [PathElem]) -> Resu
         Some(
             PathElem::Mark(_) | PathElem::Push { .. } | PathElem::Hole(_) | PathElem::Param(_),
         ) => Err(QuarbError::parse(format!(
-            "the predicate '&{name}' answered refines a hop or a \
+            "the predicate '&{name}' answered refines a step or a \
                  group; a mark or a push takes no predicates"
         ))),
         None => Err(QuarbError::parse(format!(
@@ -1260,8 +1260,8 @@ fn walks_reverse_resolve(elems: &[PathElem]) -> bool {
 
 /// The static execution mode between pipeline commands (spec:
 /// Execution Modes). Navigation mode: the thread is a node with no
-/// live topic — hops may fan out. Value mode: a projection or
-/// command has produced a live topic — a hop would drop it, so
+/// live topic — steps may fan out. Value mode: a projection or
+/// command has produced a live topic — a step would drop it, so
 /// path-shaped commands refuse until a push (`| .`) files the topic
 /// and returns the thread to navigation mode.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1322,8 +1322,8 @@ pub(crate) fn command_mode_out(command: &Command, cur: PipeMode) -> PipeMode {
         // does (spec: Grafting)
         Command::Func(call) if call.name == "graft" => PipeMode::Nav,
         // `@| collapse` gathers node threads into node threads: the
-        // context stays node-typed, and a hop may follow (spec:
-        // Attached Regulae, "a hop after collapse reads it")
+        // context stays node-typed, and a step may follow (spec:
+        // Attached Regulae, "a step after collapse reads it")
         Command::Agg(call) if call.name == "collapse" => cur,
         Command::Nav(b) => {
             if b.projection.is_some() {
@@ -2003,7 +2003,7 @@ impl Parser<'_> {
 
     /// Whether the tokens after a head-position invocation refine or
     /// continue it — a quantifier, predicates, a projection, another
-    /// hop or invocation — which routes the splice through the
+    /// step or invocation — which routes the splice through the
     /// branch machinery instead of the historical whole splice.
     fn splice_refinement_ahead(&self) -> bool {
         match self.peek() {
@@ -2164,12 +2164,12 @@ impl Parser<'_> {
                         pipeline.push(Command::Param { name, agg: true });
                         continue;
                     }
-                    // Hops are per-thread; `@|` aggregates the
+                    // Steps are per-thread; `@|` aggregates the
                     // whole context.
                     if self.nav_command_ahead() {
                         return Err(QuarbError::parse(
                             "navigation is per-thread; write '| /path' \
-                             ('@|' aggregates the whole context — hops don't take it)",
+                             ('@|' aggregates the whole context — steps don't take it)",
                         ));
                     }
                     // `@| [n]` / `@| [a..b]` — positional selection
@@ -2431,7 +2431,7 @@ impl Parser<'_> {
 
     fn pipe_item(&mut self, mode: PipeMode) -> Result<Command> {
         // A command that opens with a reference arrow — `::p-->`,
-        // `::p=>(…)`, the bare `-->`, `<--(…)` — is a hop like
+        // `::p=>(…)`, the bare `-->`, `<--(…)` — is a step like
         // `->x`: the command ends on the reached nodes (or on the
         // projection written after them). Only a trailing operator
         // makes it the structural-test expression instead.
@@ -2521,12 +2521,12 @@ impl Parser<'_> {
                 PipeMode::Value => {
                     // A parenthesized start keeps its expression
                     // reading (the documented escape); a bare axis
-                    // start is a hop, and a hop would drop the
+                    // start is a step, and a step would drop the
                     // live topic.
                     if !matches!(self.peek(), Some(Token::LParen)) {
                         return Err(QuarbError::parse(
                             "cannot navigate in value mode — the topic is live \
-                             and a hop would drop it; push it first with '| .' \
+                             and a step would drop it; push it first with '| .' \
                              (or '| .name') and navigation resumes. \
                              (Parenthesize the path for a value expression.)",
                         ));
@@ -2549,7 +2549,7 @@ impl Parser<'_> {
                         // A dangling expression operator after the
                         // branch (`| /price:: * 2`) means the command
                         // was arithmetic all along — keep the
-                        // operand reading. A bare path is a hop.
+                        // operand reading. A bare path is a step.
                         let save = self.pos;
                         let b = self.branch()?;
                         if !self.expr_continues() {
@@ -3108,7 +3108,7 @@ impl Parser<'_> {
                 true
             }
             // `(::p-->)+`, `(-->)+`: a quantified group opening with a
-            // reference hop is navigation as `(->e)+` is
+            // reference step is navigation as `(->e)+` is
             Some(Token::LParen) => {
                 self.toks.get(self.pos + 1).is_some_and(axis) || self.resolution_at(self.pos + 1)
             }
@@ -3116,7 +3116,7 @@ impl Parser<'_> {
         }
     }
 
-    /// Whether a resolution hop opens at `pos`: `::property-->`,
+    /// Whether a resolution step opens at `pos`: `::property-->`,
     /// `::property=>(…)`, or the bare `-->` / `<--(…)`.
     fn resolution_at(&self, pos: usize) -> bool {
         matches!(
@@ -3885,7 +3885,7 @@ impl Parser<'_> {
                         _ => {
                             return Err(QuarbError::expansion(format!(
                                 "macro '&{name}' answered a union after a pipe \
-                                 ('{texts}'); a hop walks one path per thread"
+                                 ('{texts}'); a step walks one path per thread"
                             )));
                         }
                     }
@@ -3898,7 +3898,7 @@ impl Parser<'_> {
                     anchor: Anchor::Current,
                     fields: Vec::new(),
                 })),
-                // a relative path after a pipe is the hop it is written as
+                // a relative path after a pipe is the step it is written as
                 Form::Operand(Operand::Rel {
                     steps,
                     projection,
@@ -4478,7 +4478,7 @@ impl Parser<'_> {
                 continue;
             }
             // The union word (`.or.` and the family's spellings)
-            // ends the branch as `||` does — a hop named so is
+            // ends the branch as `||` does — a step named so is
             // written with its axis or quoted.
             if self.peek_word(OR_WORDS) {
                 break;
@@ -4853,7 +4853,7 @@ impl Parser<'_> {
             Some(
                 PathElem::Mark(_) | PathElem::Push { .. } | PathElem::Hole(_) | PathElem::Param(_),
             ) => Err(QuarbError::parse(format!(
-                "the predicate fragment '&{name}' refines a hop or a \
+                "the predicate fragment '&{name}' refines a step or a \
                      group; a mark or a push takes no predicates"
             ))),
             None => Err(QuarbError::parse(format!(
@@ -5072,10 +5072,10 @@ impl Parser<'_> {
             }
             // A constructor takes no option yet (spec: Literals and
             // constructors): a dash-led last field is refused by
-            // name; a hop as an item is `@((--x))` or `@(--x;)`.
+            // name; a step as an item is `@((--x))` or `@(--x;)`.
             if let Some(opt) = self.option_item() {
                 return Err(QuarbError::parse(format!(
-                    "'@(…)' takes no option ('{opt}' given); its items are values — a hop as \
+                    "'@(…)' takes no option ('{opt}' given); its items are values — a step as \
                      an item is written '@((--x))' or '@(--x;)'"
                 )));
             }
@@ -5500,7 +5500,7 @@ impl Parser<'_> {
     /// dash-led field opens the option segment, in `@(…)` / `%(…)` /
     /// `#(…)` as in a command's parenthesis, unless the trailing
     /// separator keeps its operand reading (`@(--author;)`, the
-    /// hop's targets; `@((--author))` likewise, a group being no
+    /// step's targets; `@((--author))` likewise, a group being no
     /// dash-led field). The spelling, for the refusal.
     /// Whether the parenthesis ahead opens SEVERAL option values —
     /// `(a; b)`, a `;` or `,` at its own depth before its close —
@@ -5802,7 +5802,7 @@ impl Parser<'_> {
                 "--autoindex" | "-a" => {
                     if value.is_some() {
                         return Err(QuarbError::parse(
-                            "'#(-a)' takes no value: it prepends the positions as the index; a start or a step is the command's, '| autoindex(--start=0)'",
+                            "'#(-a)' takes no value: it prepends the positions as the index; --start or --step is the command's, '| autoindex(--start=0)'",
                         ));
                     }
                     autoindex = true;
@@ -6617,7 +6617,7 @@ impl Parser<'_> {
                     self.pos += if opt.starts_with("--") { 2 } else { 1 };
                     if matches!(self.peek(), Some(Token::OptEq)) {
                         return Err(QuarbError::parse(
-                            "'-a' takes no value: it prepends the positions as the index; a start or a step is the command's, '| autoindex(--start=0)'",
+                            "'-a' takes no value: it prepends the positions as the index; --start or --step is the command's, '| autoindex(--start=0)'",
                         ));
                     }
                     autoindex = true;
@@ -7014,7 +7014,7 @@ impl Parser<'_> {
                     // separator closes the operands with an empty
                     // field instead, and a dash-led operand keeps its
                     // reading: `f(--author;)` (draft 164).
-                    // `edges(--road; --weight=km)`: the undirected hop
+                    // `edges(--road; --weight=km)`: the undirected step
                     // is the collecting operand (spec: The graph as a
                     // table), read before the option segment; `--weight`
                     // alone is an option of `edges`.
@@ -7033,7 +7033,7 @@ impl Parser<'_> {
                                 glued: true,
                                 // an option the command's row declares
                                 // is the option (`--harmonic`, `--edges`,
-                                // `--coefficient` were read as hops: a
+                                // `--coefficient` were read as steps: a
                                 // list written here had drifted from the
                                 // inventory)
                             }) if !crate::syntax::man::declares_long(
@@ -7047,7 +7047,7 @@ impl Parser<'_> {
                         }
                     {
                         self.pos += 2;
-                        // the hop takes a walk's traits and predicates
+                        // the step takes a walk's traits and predicates
                         // (spec: The graph library, draft.191)
                         let traits = self.group_traits()?;
                         let predicates = self.group_predicates()?;
@@ -7669,7 +7669,7 @@ impl Parser<'_> {
                 return Ok(());
             }
             return Err(QuarbError::parse(format!(
-                "'%(…)' takes no option ('{opt}' given); its items are fields — a hop as a \
+                "'%(…)' takes no option ('{opt}' given); its items are fields — a step as a \
                  field's value is written '%(k = (--x))'"
             )));
         }
@@ -7967,7 +7967,7 @@ impl Parser<'_> {
     /// group (`(...)` in strict form), or a plain step. A nav-op
     /// directly before `(` is the tolerated group form (the op
     /// left-distributes over name-only alternatives); a nav-op or a
-    /// named hop directly before a brace quantifier is sugar for a
+    /// named step directly before a brace quantifier is sugar for a
     /// one-element group (`/{2}` ≡ `(/.){2}`, `/div{2}` ≡
     /// `(/div){2}`).
     fn path_elem(&mut self) -> Result<PathElem> {
@@ -8082,7 +8082,7 @@ impl Parser<'_> {
             return Ok(PathElem::Group(self.group(Some(axis))?));
         }
         if matches!(self.peek(), Some(Token::Quant { .. })) {
-            // Bare-operator sugar: only a single-hop operator
+            // Bare-operator sugar: only a single-step operator
             // quantifies on its own (`//{2}` already means "any
             // depth" and refuses).
             if !matches!(
@@ -8096,7 +8096,7 @@ impl Parser<'_> {
                     | Axis::Any
             ) {
                 return Err(QuarbError::parse(
-                    "a quantifier attaches to a single-hop operator or a \
+                    "a quantifier attaches to a single-step operator or a \
                      parenthesized group",
                 ));
             }
@@ -8129,7 +8129,7 @@ impl Parser<'_> {
         }
         let matcher = self.matcher_after(&axis)?;
         let step = self.finish_step(axis, matcher)?;
-        // A brace quantifier after a named hop wraps it
+        // A brace quantifier after a named step wraps it
         // (`/div{2}` ≡ `(/div){2}`); `+`/`*` are name characters, so
         // those two spellings need the parentheses.
         if matches!(self.peek(), Some(Token::Quant { .. })) {
@@ -8285,7 +8285,7 @@ impl Parser<'_> {
                 _ => elems.push(self.path_elem()?),
             }
         }
-        // (an expansion counts: it fills with hops, or with the
+        // (an expansion counts: it fills with steps, or with the
         // alternatives themselves)
         if !elems.iter().any(|e| {
             matches!(
@@ -8294,7 +8294,7 @@ impl Parser<'_> {
             )
         }) {
             return Err(QuarbError::parse(
-                "a path-pattern alternative needs at least one hop",
+                "a path-pattern alternative needs at least one step",
             ));
         }
         Ok(elems)
@@ -8376,9 +8376,9 @@ impl Parser<'_> {
                 let (min, max) = (*min, *max);
                 if let Some(r) = rule {
                     return Err(QuarbError::parse(format!(
-                        "'{r}:' is a cost function, and this brace counts hops: a cost function \
+                        "'{r}:' is a cost function, and this brace counts steps: a cost function \
                          folds a weight's legs, so it takes a budget's bounds ('{{{r}:;12_m}}') \
-                         or the star unit ('{{{r}:*_m}}'); a count of hops is '{{m;n}}'"
+                         or the star unit ('{{{r}:*_m}}'); a count of steps is '{{m;n}}'"
                     )));
                 }
                 if max.is_some_and(|n| n < min) {
@@ -8475,7 +8475,7 @@ impl Parser<'_> {
             let brace = self.group_quant()?.expect("peeked a brace");
             let dim = |q: &Quant| -> String {
                 match &q.budget {
-                    None => "the hop count".to_string(),
+                    None => "the step count".to_string(),
                     Some(b) => {
                         let text = match (&b.unit, b.ceiling.as_deref().or(b.floor.as_deref())) {
                             (Some(u), _) => format!("1 {u}"),
@@ -9272,11 +9272,11 @@ impl Parser<'_> {
                 '<'
             };
             return Err(QuarbError::parse(format!(
-                "'{c}' glued to what follows is the sibling hop; the comparison \
+                "'{c}' glued to what follows is the sibling step; the comparison \
                  is spaced: '::x {c} 3'"
             )));
         }
-        // `::x> 3` — spaced on one side only: neither the hop nor
+        // `::x> 3` — spaced on one side only: neither the step nor
         // the comparison (spec: Lexical Disambiguation).
         if !opens
             && let Some(t @ (Token::Gt { before: false, .. } | Token::Lt { before: false, .. })) =
@@ -9289,7 +9289,7 @@ impl Parser<'_> {
             };
             return Err(QuarbError::parse(format!(
                 "'{c}' is an operator and takes a space on both sides: write ' {c} ' \
-                 (the sibling hop is glued to its name: '{c}name')"
+                 (the sibling step is glued to its name: '{c}name')"
             )));
         }
         if let Some(op) = self.cmp_op() {
@@ -10559,7 +10559,7 @@ impl Parser<'_> {
         let step = bounds.next().map(Box::new);
         if bounds.next().is_some() {
             return Err(QuarbError::parse(
-                "a range has at most three parts: start..end..step",
+                "a range has at most three parts: start..end..stride",
             ));
         }
         Ok(Operand::Range {
@@ -10583,7 +10583,7 @@ impl Parser<'_> {
         // The static mode along the tail (spec: Execution Modes): an
         // inline pipe starts on the scalar plane, and a command that
         // leaves the thread on a node — `graft(NOTATION)`, standing
-        // on the parsed document's root — opens the way for a hop in
+        // on the parsed document's root — opens the way for a step in
         // the next stage, as it does at the top level.
         let mut mode = PipeMode::Value;
         loop {
@@ -10837,7 +10837,7 @@ impl Parser<'_> {
     /// One `| ...` command of an inline pipe in the static mode the
     /// tail stands in: the scalar plane, where a path-shaped command
     /// errors in pipe_item before it can become navigation, or the
-    /// node a graft left the thread on, where a hop is the next
+    /// node a graft left the thread on, where a step is the next
     /// stage.
     fn inline_command_in(&mut self, mode: PipeMode) -> Result<Command> {
         let command = self.pipe_item(mode)?;
@@ -10862,7 +10862,7 @@ impl Parser<'_> {
     /// any per-value command transforms them. Pushes and subcontexts
     /// refuse, as in inline pipes.
     fn map_command(&mut self) -> Result<Command> {
-        // Hops are per-thread; `$|` transforms elements of a list
+        // Steps are per-thread; `$|` transforms elements of a list
         // topic in place.
         if self.nav_command_ahead() {
             return Err(QuarbError::parse(
@@ -11261,7 +11261,7 @@ impl Parser<'_> {
     }
 
     /// A relative path operand that opens with a step (`/`, `//`,
-    /// `\\`, a sibling hop, an arrow): steps as long as they come,
+    /// `\\`, a sibling step, an arrow): steps as long as they come,
     /// then the projection.
     fn rel_operand_from_step(&mut self) -> Result<Operand> {
         self.rel_operand_continue(Vec::new())
@@ -11275,10 +11275,10 @@ impl Parser<'_> {
     /// knew an option segment. At the top of an option's value a
     /// dash pair ends the path: it opens the next option of the
     /// segment, a flag as much as a valued one (`count(--of=/tag
-    /// --values)` read `--values` as an undirected hop, and
+    /// --values)` read `--values` as an undirected step, and
     /// `--from=^/a --weight=km` was refused). Inside a group, a
     /// predicate or a parenthesis of that value the dash pair is the
-    /// hop it is anywhere, so an undirected hop in an option's value
+    /// step it is anywhere, so an undirected step in an option's value
     /// is written in a group: `--of=(/a--road)`.
     fn path_continues(&self, reverse: bool) -> bool {
         match self.peek() {
@@ -11328,7 +11328,7 @@ impl Parser<'_> {
             }
             // `--from=/a --weight=km`: a dash pair followed by a
             // glued word and `=` is the next option of the segment,
-            // never an undirected hop (`--weight=` is no step)
+            // never an undirected step (`--weight=` is none)
             if matches!(self.peek(), Some(Token::DashDash))
                 && matches!(
                     self.toks.get(self.pos + 1),
@@ -11440,7 +11440,7 @@ impl Parser<'_> {
             // `<-`, `--`), so a structural predicate can ask "has any
             // outgoing link?" with `[->*]` and a record can carry the
             // parent's name with `rec(dir, \*:name)`. The bare
-            // `>` / `<` glued to a name are the sibling hops here as
+            // `>` / `<` glued to a name are the sibling steps here as
             // anywhere: spacing decides (a spaced `>` is the
             // comparison, and cannot open an operand).
             Some(Token::Gt { spaced: false, .. } | Token::Lt { spaced: false, .. }) => {
@@ -12221,7 +12221,7 @@ impl Parser<'_> {
                             // The edge's core fields ride the glued colon
                             // (spec: Edge facts): its ends `$-:source`,
                             // `$-:target` (node references), the walk's
-                            // `$-:round`, `$-:hops`, `$-:total`.
+                            // `$-:round`, `$-:steps`, `$-:total`.
                             // The ends are node operands (`Anchor::EdgeEnd`):
                             // a path, a projection or a node read may follow.
                             if let Some(Projection::CoreMeta(k)) = &projection
@@ -12251,16 +12251,23 @@ impl Parser<'_> {
                                 Some(Projection::CoreMeta(k))
                                     if matches!(
                                         k.as_str(),
-                                        "round" | "hops" | "total" | "costs" | "label" | "weights"
+                                        "round" | "steps" | "total" | "costs" | "label" | "weights"
                                     ) => {}
+                                // the fact's name until 0.67 (the term
+                                // was renamed, ruling 2026-11-17)
+                                Some(Projection::CoreMeta(k)) if k == "hops" => {
+                                    return Err(QuarbError::parse(
+                                        "'$-:hops' is retired: the steps a walk took are '$-:steps'",
+                                    ));
+                                }
                                 Some(Projection::CoreMeta(k)) => {
                                     return Err(QuarbError::parse(format!(
-                                        "an edge carries plain properties ($-::{k}), its ends ':source' and ':target', and the facts ':round', ':hops', ':total', ':costs', its label ':label' and its weights ':weights'; ':{k}' is none of them"
+                                        "an edge carries plain properties ($-::{k}), its ends ':source' and ':target', and the facts ':round', ':steps', ':total', ':costs', its label ':label' and its weights ':weights'; ':{k}' is none of them"
                                     )));
                                 }
                                 Some(Projection::AdapterMeta(_)) => {
                                     return Err(QuarbError::parse(
-                                        "an edge carries plain properties ($-::prop), its ends ':source', ':target', and the facts ':round', ':hops', ':total', ':costs', its label ':label', its weights ':weights'",
+                                        "an edge carries plain properties ($-::prop), its ends ':source', ':target', and the facts ':round', ':steps', ':total', ':costs', its label ':label', its weights ':weights'",
                                     ));
                                 }
                                 _ => {}
@@ -12899,7 +12906,7 @@ impl Parser<'_> {
     /// literals carry a leading `!`; `!*` = traitless). Returns
     /// `None` (without consuming) if what follows is not a
     /// well-formed trait\,---\,e.g. a bare `<name` that is really a
-    /// previous-sibling hop.
+    /// previous-sibling step.
     fn try_trait(&mut self) -> Result<Option<Vec<TraitClause>>> {
         if !matches!(self.peek(), Some(Token::Lt { spaced: false, .. })) {
             return Ok(None);
@@ -13030,7 +13037,7 @@ impl Parser<'_> {
                     '<'
                 };
                 return Err(QuarbError::parse(format!(
-                    "'{c}' followed by a space is the comparison; the sibling hop \
+                    "'{c}' followed by a space is the comparison; the sibling step \
                      is glued to its name: '{c}name' ('{c}*' for any)"
                 )));
             }
@@ -13096,7 +13103,7 @@ impl Parser<'_> {
     /// The matcher after an axis. The parent and ancestor axes take
     /// no name: the parent is one node and the ancestors are all of
     /// them, so a bare `\` / `\\` (or `\\?` / `\\!`) implies the
-    /// wildcard — the one exception to "a hop names or patterns".
+    /// wildcard — the one exception to "a step names or patterns".
     /// A name after them is still the check it always was (`\x`).
     fn matcher_after(&mut self, axis: &Axis) -> Result<Matcher> {
         if matches!(axis, Axis::Parent | Axis::Ancestor(_))
@@ -13121,7 +13128,7 @@ impl Parser<'_> {
         match self.bump() {
             Some(Token::Name { text, quoted, .. }) => {
                 // Inside a path pattern, a bare `.` is the dot
-                // wildcard (any hop name); quote it for the literal.
+                // wildcard (any step name); quote it for the literal.
                 if !*quoted && text == "." && in_pattern {
                     return Ok(Matcher::Dot);
                 }
@@ -13139,7 +13146,7 @@ impl Parser<'_> {
                 matcher_for(text, *quoted)
             }
             // `/${…}` — a name expansion: the value spelled as the
-            // hop's name (design paper: the quasiquote)
+            // step's name (design paper: the quasiquote)
             Some(Token::Expansion(text)) => {
                 let text = text.clone();
                 Ok(Matcher::Name(self.name_hole(&text)?))
@@ -14676,7 +14683,7 @@ fn subst_quarq(q: &crate::value::Quarq, map: &Subst<'_>) -> Value {
 fn subst_commands(commands: &mut Vec<Command>, map: &Subst<'_>) {
     let mut out: Vec<Command> = Vec::with_capacity(commands.len());
     for mut command in std::mem::take(commands) {
-        // a quarq ending a hop's branch: the hop, then its commands
+        // a quarq ending a step's branch: the step, then its commands
         if let Command::Nav(b) = &mut command
             && let Some(cmds) = subst_branch(b, map)
         {
@@ -14819,7 +14826,7 @@ fn subst_command(command: &mut Command, map: &Subst<'_>) {
                 subst_operand(op, map);
             }
             // (a quarq argument here is answered by subst_commands,
-            // which sees the hop in its sequence)
+            // which sees the step in its sequence)
             subst_branch(b, map);
         }
         Command::Subcontext { body, .. } => subst_query(body, map),
@@ -16560,7 +16567,7 @@ mod tests {
 
     #[test]
     fn an_arrow_opens_a_navigation_command() {
-        // A command ending on a reference arrow is a hop — the reached
+        // A command ending on a reference arrow is a step — the reached
         // nodes are the capsae, as after `| ->x` — with or without a
         // projection after it; a trailing operator makes it the
         // structural-test expression, as parentheses always do.
@@ -16585,7 +16592,7 @@ mod tests {
 
     #[test]
     fn a_bare_sibling_hop_leads_an_operand() {
-        // At the start of an operand `>name` / `<name` is the hop
+        // At the start of an operand `>name` / `<name` is the step
         // (no comparison can stand there); the rounded spellings
         // parse to the same tree.
         let tree = |q: &str| format!("{:?}", parse(&lexer::lex(q).unwrap()).unwrap());
@@ -16599,7 +16606,7 @@ mod tests {
         );
         assert_eq!(tree("//p[>p::n = 3]"), tree("//p[;-p::n = 3]"));
         // Spaced, `>` is the comparison; glued after an operand it is
-        // refused with the pointer, as is a spaced hop.
+        // refused with the pointer, as is a spaced step.
         assert!(parse(&lexer::lex("//p[::n > 3]").unwrap()).is_ok());
         assert!(parse(&lexer::lex("//p[substr(::; 1..3) > 3]").unwrap()).is_ok());
         assert!(parse(&lexer::lex("//p[::n > 3 && ::m < 2]").unwrap()).is_ok());

@@ -339,7 +339,7 @@ struct Cli {
     /// children play the role 'ip', 'ref /path/*::f --> C;' a scoped
     /// reference, 'rel A -> B[cond];' a relation no value carries,
     /// 'edge /path/*: ::a -- ::b;' pair edges, 'mount NAME: t;' a
-    /// source the model opens itself. Every hop is named for the role
+    /// source the model opens itself. Every step is named for the role
     /// it lands on. The graph the data only implies, made navigable —
     /// over any adapter.
     #[arg(long, value_name = "FILE")]
@@ -1420,8 +1420,44 @@ fn resident_socket(cli: &Cli, oc: &OutputCtx) -> anyhow::Result<PathBuf> {
     )
         .hash(&mut h);
     std::env::current_dir().ok().hash(&mut h);
+    // The engine that answers. A session is a process of one build,
+    // and its key named the inputs and the options only: a client of
+    // another build over the same inputs connected to it and was
+    // answered by that engine. After an upgrade a standing session
+    // went on answering with the old engine for as long as it was
+    // used, and a timing of a new build measured the old one.
+    engine_build().hash(&mut h);
     let dir = resident_dir()?;
     Ok(dir.join(format!("quarb-{:016x}.sock", h.finish())))
+}
+
+/// The build of the engine this process is, as a session's key and
+/// its note carry it: the version, and eight hex digits of the
+/// binary's own identity (its path, its size and when it was
+/// written), which tell two builds of one version apart.
+#[cfg(unix)]
+#[cfg(feature = "adapters")]
+fn engine_build() -> String {
+    engine_build_of(
+        env!("CARGO_PKG_VERSION"),
+        std::env::current_exe().ok().as_deref(),
+    )
+}
+
+#[cfg(unix)]
+#[cfg(feature = "adapters")]
+fn engine_build_of(version: &str, exe: Option<&std::path::Path>) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    version.hash(&mut h);
+    if let Some(exe) = exe {
+        exe.hash(&mut h);
+        if let Ok(m) = std::fs::metadata(exe) {
+            m.len().hash(&mut h);
+            m.modified().ok().hash(&mut h);
+        }
+    }
+    format!("{version} {:08x}", h.finish() as u32)
 }
 
 /// The directory holding session sockets. $XDG_RUNTIME_DIR is
@@ -1478,7 +1514,8 @@ fn resident_inputs_key(cli: &Cli) -> u64 {
 
 /// What a session says of itself beside its socket (the file
 /// `quarb-KEY.session`): the key of its inputs, its process, the
-/// directory it was started in and its arguments without the query.
+/// directory it was started in, its arguments without the query and
+/// the build of the engine it is.
 /// A client about to start another session over the same inputs
 /// reads it ([`warn_of_standing_sessions`]).
 #[cfg(unix)]
@@ -1510,13 +1547,14 @@ fn resident_note(cli: &Cli) -> String {
         .map(|a| quoted(&a))
         .collect();
     format!(
-        "inputs {:016x}\npid {}\ncwd {}\nargs {}\n",
+        "inputs {:016x}\npid {}\ncwd {}\nargs {}\nengine {}\n",
         resident_inputs_key(cli),
         std::process::id(),
         std::env::current_dir()
             .map(|d| d.display().to_string())
             .unwrap_or_default(),
-        args.join(" ")
+        args.join(" "),
+        engine_build()
     )
 }
 
@@ -1575,11 +1613,27 @@ fn warn_of_standing_sessions(cli: &Cli, sock: &std::path::Path) {
         if field("inputs") != ours {
             continue;
         }
+        // A session of another build is never this client's: say
+        // so, the reason it stands beside the new one (a session of
+        // an engine before 0.67 wrote no build into its note).
+        let ours_build = engine_build();
+        let why = match field("engine") {
+            theirs if theirs == ours_build => {
+                "a session is reused under the same options and from the same directory".to_string()
+            }
+            "" => format!(
+                "that session is an earlier build of the engine (this client is \
+                 {ours_build}), and a session answers the clients of its own build"
+            ),
+            theirs => format!(
+                "that session is another build of the engine ({theirs}; this client is \
+                 {ours_build}), and a session answers the clients of its own build"
+            ),
+        };
         eprintln!(
             "resident session: another one already stands over the same inputs (pid {pid}, \
              started in {} as: qua {}). This run starts a second, which reads the inputs \
-             again; a session is reused under the same options and from the same directory. \
-             To end the first: kill {pid}",
+             again; {why}. To end the first: kill {pid}",
             field("cwd"),
             field("args")
         );
@@ -1682,6 +1736,10 @@ fn spawn_resident(sock: &std::path::Path) -> anyhow::Result<std::os::unix::net::
     );
     let started = std::time::Instant::now();
     let mut last_note = 0u64;
+    // The socket is looked for at short intervals first, doubling up
+    // to 200 ms: a session over a small input stands within
+    // milliseconds, and a flat 200 ms was most of its first answer.
+    let mut nap = std::time::Duration::from_millis(2);
     loop {
         if let Ok(s) = std::os::unix::net::UnixStream::connect(sock) {
             return Ok(s);
@@ -1704,6 +1762,34 @@ fn spawn_resident(sock: &std::path::Path) -> anyhow::Result<std::os::unix::net::
             eprintln!("  … materializing ({elapsed}s)");
             last_note = elapsed;
         }
+        std::thread::sleep(nap);
+        nap = (nap * 2).min(std::time::Duration::from_millis(200));
+    }
+}
+
+/// Wait until a client knocks at the session's socket, or until
+/// `at_most` has passed (a second at the longest, so the idle time
+/// is looked at again). The wait is the kernel's: a client is
+/// accepted the moment it connects. (The loop napped 200 ms between
+/// two looks at the socket, so a query that followed another waited
+/// out the nap: every answer of a session took 0.2 s, whatever the
+/// question, and a small input answered slower than with no session
+/// at all.)
+#[cfg(unix)]
+#[cfg(feature = "adapters")]
+fn wait_for_client(listener: &std::os::unix::net::UnixListener, at_most: std::time::Duration) {
+    use std::os::fd::AsRawFd as _;
+    let mut fd = libc::pollfd {
+        fd: listener.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ms = at_most.as_millis().clamp(1, 1000) as libc::c_int;
+    // A signal that interrupts the wait, or an error, is the caller's
+    // next look at the socket; an error that persists must not spin.
+    if unsafe { libc::poll(&mut fd, 1, ms) } < 0
+        && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+    {
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
 }
@@ -1864,7 +1950,8 @@ fn resident_serve_loop<A: AstAdapter>(
                 if idle.elapsed().as_secs() >= ttl {
                     break;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(200));
+                let left = std::time::Duration::from_secs(ttl).saturating_sub(idle.elapsed());
+                wait_for_client(&listener, left);
             }
             Err(e) => {
                 eprintln!("resident session accept error: {e}");
@@ -3164,7 +3251,7 @@ fn column_types_hold(
     unmet.is_empty()
 }
 
-/// [`partial_plan`]; `keyed_hops` for an adapter that reads hops by
+/// [`partial_plan`]; `keyed_hops` for an adapter that reads steps by
 /// key, where crosslinks and resolutions keep the prefilter.
 #[cfg(feature = "adapters")]
 fn partial_plan_with(
@@ -4865,5 +4952,33 @@ mod tests {
         }];
         let out = super::emit_kaiv(&rows, "t", |n| format!("/r/{}", n.0), same, 8).unwrap();
         assert!(out.contains("!int?src1#row-x\nvalue=1\n"), "{out}");
+    }
+
+    /// A session is keyed on the build of the engine: the version,
+    /// and the binary itself, so that a client is never answered by
+    /// a session of another build (after an upgrade a standing
+    /// session went on answering with the old engine).
+    #[cfg(unix)]
+    #[cfg(feature = "adapters")]
+    #[test]
+    fn a_session_is_of_one_build() {
+        use super::engine_build_of;
+        let dir = std::env::temp_dir().join(format!("qua-build-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        std::fs::write(&a, b"one build").unwrap();
+        std::fs::write(&b, b"one build").unwrap();
+        // the same binary, twice: one build
+        let first = engine_build_of("0.67.0", Some(&a));
+        assert_eq!(first, engine_build_of("0.67.0", Some(&a)));
+        assert!(first.starts_with("0.67.0 "), "{first}");
+        // another version of it, another binary, the binary rewritten
+        assert_ne!(first, engine_build_of("0.67.1", Some(&a)));
+        assert_ne!(first, engine_build_of("0.67.0", Some(&b)));
+        std::fs::write(&a, b"another build of it").unwrap();
+        assert_ne!(first, engine_build_of("0.67.0", Some(&a)));
+        // this process has one
+        assert_eq!(super::engine_build(), super::engine_build());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

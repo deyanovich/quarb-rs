@@ -24,7 +24,7 @@ fn sugar_reprints_as_dot_group() {
     assert_eq!(canon("/{2}"), "(/.){2}");
     assert_eq!(canon("/div{2}"), "(/div){2}");
     assert_eq!(canon("(/.){2}"), "(/.){2}");
-    // single-hop crosslink sugar
+    // single-step crosslink sugar
     assert_eq!(canon("/a->{2}"), "/a(->.){2}");
 }
 
@@ -82,13 +82,13 @@ fn groups_in_operand_position() {
 #[test]
 fn pattern_errors() {
     assert!(refuse("(/a){3;2}").contains("max below min"));
-    assert!(refuse("(|/a)").contains("at least one hop"));
+    assert!(refuse("(|/a)").contains("at least one step"));
     // a push alone does not walk
-    assert!(refuse("(.(::q))+").contains("at least one hop"));
+    assert!(refuse("(.(::q))+").contains("at least one step"));
     assert!(refuse("/(p|/div)").contains("strict form"));
-    assert!(refuse("//{2}").contains("single-hop"));
+    assert!(refuse("//{2}").contains("single-step"));
     // `+` and `*` are name characters: quantifying an unquoted named
-    // hop with them is not expressible — the name absorbs the mark.
+    // step with them is not expressible — the name absorbs the mark.
     assert_eq!(canon("/a/g++"), "/a/g++");
 }
 
@@ -132,7 +132,7 @@ fn pattern_pushes_round_trip() {
         canon("/a(->e .($-::qty))+ | @. | product"),
         "/a(->e .($-::qty))+ | @. | prod"
     );
-    // a glued named push after a named hop stays part of the name
+    // a glued named push after a named step stays part of the name
     // (the /x.rs(...) rule): "e.q" becomes the matcher and the
     // parenthesized rest cannot parse as a group — the spaced form
     // is the push
@@ -247,7 +247,7 @@ fn defs_substitute_into_groups() {
 fn headless_arrow_round_trips() {
     // `--` — the either-direction crosslink — parses in path,
     // group, and predicate-operand position, and reprints as
-    // itself. Glued after a row name it is still the hop, like
+    // itself. Glued after a row name it is still the step, like
     // `->` (the name lexer breaks on the dash run).
     assert_eq!(canon("/posts/5--ip"), "/posts/5--ip");
     assert_eq!(
@@ -279,7 +279,7 @@ fn resolution_respell_canonicalizes() {
     assert_eq!(canon("/page<--(/a/*::id)"), "/page<--(/a/*::id)");
     assert_eq!(canon("/n::a=>(/s/*::b)"), "/n::a=>(/s/*::b)");
     // spacing decides: `< -3` is the comparison and stays so; `<-3`
-    // glues the hop to a name and is refused in a comparison seat
+    // glues the step to a name and is refused in a comparison seat
     assert_eq!(canon("/x[::a < -3]"), "/x[::a < -3]");
     assert!(quarb::expand("/x[::a <-3]", &quarb::Defs::default()).is_err());
 }
@@ -325,15 +325,15 @@ fn rounded_family_canonicalizes() {
     assert_eq!(canon("/a(-:b)+::name"), canon("/a(<-b)+::name"));
     // the edge accessors are untouched, in either spelling
     assert_eq!(canon("/a:-b(?$-::w > 1)"), canon("/a->b[$-::w > 1]"));
-    // sibling hops and reaches
+    // sibling steps and reaches
     assert_eq!(canon("/a;-b"), canon("/a>b"));
     assert_eq!(canon("/a-;b"), canon("/a<b"));
     assert_eq!(canon("/a;;-?b"), canon("/a>>?b"));
     assert_eq!(canon("/a-;;!b"), canon("/a<<!b"));
-    // the sibling alias names the hop only — never the comparison
+    // the sibling alias names the step only — never the comparison
     assert!(!refuse("/x[::a ;- 3]").is_empty());
     // ascent
-    // the rounded ascent is a hop in name position: the parent, the
+    // the rounded ascent is a step in name position: the parent, the
     // ancestors, then whatever follows as its own element
     assert_eq!(canon("/a/b/../c"), canon("/a/b\\/c"));
     assert_eq!(canon("/a/b/.../c"), canon("/a/b\\\\/c"));
@@ -553,7 +553,7 @@ fn regex_literal_canonicalizes() {
         canon("/c/* | (::kind ?= \"a\" ? 1 : (/^b/) ? 2 : 0)"),
         "/c/* | (::kind ?= \"a\" ? 1 : (/^b/) ? 2 : 0)"
     );
-    // a group ending in a hop named x is still a group
+    // a group ending in a step named x is still a group
     assert_eq!(canon("/a(/src/x)+"), "/a(/src/x)+");
 }
 
@@ -774,7 +774,7 @@ fn decimal_comma_and_group_underscores_canonicalize() {
         "/a | $$__::x | $$__/kid::y"
     );
     // the parent and the ancestors take no name: bare is canonical,
-    // the star accepted; the rounded ascent is a hop in name position
+    // the star accepted; the rounded ascent is a step in name position
     assert_eq!(canon("/a/b\\*/d::"), "/a/b\\/d::");
     assert_eq!(canon("/a/b\\::e"), "/a/b\\::e");
     assert_eq!(canon("/a/b\\\\*/x"), "/a/b\\\\/x");

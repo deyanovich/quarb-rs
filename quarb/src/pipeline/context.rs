@@ -571,7 +571,7 @@ pub(crate) fn graph_library_command<H: Host>(
         _ => Vec::new(),
     };
     // a declared graph (spec: Graph Declarations): the source answers
-    // when the hop, the options and the context are the declared ones
+    // when the step, the options and the context are the declared ones
     let declared = declared_measure(
         host, name, &what, &keys, &starts, &caps, trace, outer, peers,
     );
@@ -797,7 +797,7 @@ fn declared_measure<H: Host>(
                 }
                 Ok(t) if t.fingerprint() != fingerprint => {
                     reason = Some(format!(
-                        "the hop or the options differ from the declared {shown} on {}",
+                        "the step or the options differ from the declared {shown} on {}",
                         d.scope
                     ));
                     continue;

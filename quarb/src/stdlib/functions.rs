@@ -5724,7 +5724,7 @@ fn autoindex(call: &FnCall, t: &crate::Table, scale: Scale) -> Result<Value, Str
         (Value::Instant { .. }, Some(d)) if d.is_duration() => d,
         (s @ (Value::Quantity { .. } | Value::Instant { .. }), None) => {
             return Err(format!(
-                "the start {} takes a step of its own kind: --step={}",
+                "the start {} takes a stride of its own kind: --step={}",
                 s.to_quarb(),
                 if s.is_duration() || matches!(s, Value::Instant { .. }) {
                     "1_d"
@@ -5737,8 +5737,8 @@ fn autoindex(call: &FnCall, t: &crate::Table, scale: Scale) -> Result<Value, Str
             if numeric(s) || matches!(s, Value::Quantity { .. } | Value::Instant { .. }) =>
         {
             return Err(format!(
-                "the step {} is of another kind than the start {}: a number steps by a \
-                 number, a quantity by a quantity of its dimension, an instant by a duration",
+                "the stride --step={} is of another kind than the start {}: a number moves by \
+                 a number, a quantity by a quantity of its dimension, an instant by a duration",
                 d.to_quarb(),
                 s.to_quarb()
             ));
@@ -7205,8 +7205,18 @@ pub(crate) fn concat(mode: ConcatMode, left: Value, right: Value) -> Result<Valu
             "'++!' on a table takes a table, its columns under the left side's names; {} takes '++'",
             kind_of(&right)
         )),
-        (ConcatMode::Overwrite, other) => Err(format!(
+        // a node's properties are named in a row (`concat_row`)
+        (ConcatMode::Overwrite, Value::Quarq(_)) => Err(
+            "'++!' overwrites a node's properties, named in a row (%(name = value)); the right side here is no row"
+                .to_string(),
+        ),
+        // only what `++` takes is sent to it
+        (ConcatMode::Overwrite, other @ (Value::List(_) | Value::Str(_))) => Err(format!(
             "'++!' overwrites a record's fields; {} takes '++'",
+            kind_of(&other)
+        )),
+        (ConcatMode::Overwrite, other) => Err(format!(
+            "'++!' overwrites a record's fields; {} takes no concatenation",
             kind_of(&other)
         )),
         (ConcatMode::Merge, Value::List(l)) => {
@@ -7222,6 +7232,10 @@ pub(crate) fn concat(mode: ConcatMode, left: Value, right: Value) -> Result<Valu
         (ConcatMode::Merge, Value::Str(s)) => {
             Ok(Value::Str(format!("{s}{}", right.display_form())))
         }
+        (ConcatMode::Merge, Value::Quarq(_)) => Err(
+            "'++' adds a property to a node, named in a row (%(name = value)); the right side here is no row, and quarqs do not concatenate"
+                .to_string(),
+        ),
         (ConcatMode::Merge, other) => Err(format!(
             "{} takes no concatenation: the left side of '++' is a list, a record, a table or a text, which gives the shape",
             kind_of(&other)
@@ -7879,8 +7893,12 @@ pub(crate) fn concat_row(
         Value::Null => Ok(Value::Null),
         // a quarq standing for a node: the node copied with the
         // named properties replaced (`++!`) or added (`++`), its
-        // children kept (design paper: the node overwrite)
-        Value::Quarq(q) if q.form.is_some() => {
+        // children kept (design paper: the node overwrite). A
+        // written quarq is its pipeline node, as `syntax:node`
+        // reads it: a pipeline has no property to name, and the
+        // refusal says so (it fell to the values' concatenation,
+        // whose refusal sent a quarq to `++`, which takes none).
+        Value::Quarq(q) => {
             let form = q.into_form().rewrite(mode, &row)?;
             Ok(Value::quarq_form(form))
         }

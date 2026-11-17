@@ -2,7 +2,7 @@
 //! threads; the machine has three moves, fork (one thread to m),
 //! terminate (to zero), and the whole-list map, and every forking
 //! and joining construct of the language is one of them, from the
-//! hops of the graph to the spread and the iteration pipe of the
+//! steps of the graph to the spread and the iteration pipe of the
 //! values. Both layers above reach the machine directly for forking.
 //!
 //! A thread carries a topic (the value it works on) and a register
@@ -33,7 +33,7 @@ pub struct Position(pub u64);
 /// the attachment itself does not say (the graph: whether the scope
 /// belongs to a thread standing on its node), and its crossing is
 /// the move being evaluated before it is the thread's state (the
-/// graph: the edge a hop is crossing, for `$-`), as is the witness a
+/// graph: the edge a step is crossing, for `$-`), as is the witness a
 /// correlation search tries. Its key is what a context is indexed by
 /// (the graph's node).
 pub(crate) trait Attachment: Clone {
@@ -44,7 +44,7 @@ pub(crate) trait Attachment: Clone {
     type Witness: ?Sized;
     type Key: std::hash::Hash + Eq + Clone + 'static;
     /// What a walk knows of the edge it crossed (the graph: the
-    /// round, the hops, the budget's total — spec: Edge facts).
+    /// round, the steps, the budget's total — spec: Edge facts).
     type Walk;
     fn view(&self) -> Self::View;
     fn key(&self) -> Self::Key;
@@ -57,8 +57,8 @@ pub(crate) trait Attachment: Clone {
     /// A command has run: the walk's facts leave the scope.
     fn end_walk(&mut self) {}
     /// The edge the thread most recently walked, where no walk's
-    /// exit stands in scope (the graph: a plain hop's arrived-by
-    /// edge, read by `$-` in the command after the hop).
+    /// exit stands in scope (the graph: a plain step's arrived-by
+    /// edge, read by `$-` in the command after the step).
     fn crossing(&self) -> Option<&Self::Crossing> {
         None
     }

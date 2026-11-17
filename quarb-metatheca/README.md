@@ -23,7 +23,7 @@ qua 'mt:/path/to/vault' '/paths/docs/a.md/*[::kind = "core/path"] | ::path'
 
 - `/states/<name>` accepts any metatheca stateref without
   enumerating: a full hash, a `>=8`-hex prefix, an ISO-8601
-  instant, `~N`, `current`. Quote hop names the lexer can't take
+  instant, `~N`, `current`. Quote step names the lexer can't take
   bare (`/states/'~2'`, instants with `:`); hex prefixes and
   date-only instants work unquoted.
 - An entry's children are its fact events (trait `<fact>`),
