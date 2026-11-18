@@ -1087,14 +1087,22 @@ fn a_plan_records_the_column_types_it_assumes() {
     assert_eq!(plan.tables, ["books"]);
     let catalog = |pages: bool, genre: bool| {
         vec![
-            ("title".to_string(), false, false),
-            ("Pages".to_string(), pages, false),
-            ("genre".to_string(), genre, false),
+            ("title".to_string(), false, false, true),
+            ("Pages".to_string(), pages, false, true),
+            ("genre".to_string(), genre, false, true),
         ]
     };
     assert!(plan.column_types.unmet(&catalog(true, false)).is_empty());
     assert_eq!(plan.column_types.unmet(&catalog(false, false)), ["pages"]);
     assert_eq!(plan.column_types.unmet(&catalog(true, true)), ["genre"]);
+    // a text column the database does not compare exactly (a
+    // `char(n)`, a column under a collation) is no text column to
+    // compare with
+    let inexact = vec![
+        ("pages".to_string(), true, false, true),
+        ("genre".to_string(), false, false, false),
+    ];
+    assert_eq!(plan.column_types.unmet(&inexact), ["genre"]);
     // a column the catalog does not list is unmet
     assert_eq!(plan.column_types.unmet(&[]), ["pages", "genre"]);
     // the literal on the left, and the prefilter, record the same
@@ -1147,9 +1155,12 @@ fn a_plan_records_the_column_types_it_assumes() {
         )
         .is_none()
     );
-    // a column against a column assumes nothing
+    // a column against a column assumes both numeric: the engine
+    // compares two values by what they read as, SQL two text
+    // columns as texts (it assumed nothing, and was pushed so)
     let plan = quarb_sql::pushdown("/books/*[::pages = ::leaves] | ::title", None).unwrap();
-    assert!(plan.column_types.is_empty());
+    assert_eq!(plan.column_types.numeric, ["pages", "leaves"]);
+    assert!(plan.column_types.columns_compared);
 }
 
 /// A joined expression's mark (ruling 2026-11-14) and the driver's
@@ -1273,4 +1284,225 @@ fn the_whole_row_record_is_the_select_star_plan() {
     ] {
         assert!(pushdown(q).is_none(), "{q}");
     }
+}
+
+/// Two values of a row compared with each other, and a column
+/// computed with: the engine goes by what each value reads as, SQL
+/// by the column's type, so the plan assumes numeric columns and
+/// says that it compares two of them (ruling of the contract: a
+/// whole plan answers as the scan does; the 0.70.0 planner pushed
+/// these unchecked).
+#[test]
+fn compared_and_computed_columns_are_assumed_numeric() {
+    let plan = |q: &str| quarb_sql::pushdown(q, Some(quarb_sql::Dialect::Sqlite)).expect(q);
+    let p = plan("/t/*[::a = ::b]::id");
+    assert_eq!(p.column_types.numeric, ["a", "b"]);
+    assert!(p.column_types.columns_compared);
+    let p = plan("/t/*[::a < ::b && ::c = 'x']::id");
+    assert_eq!(p.column_types.numeric, ["a", "b"]);
+    assert_eq!(p.column_types.text, ["c"]);
+    // a join's key equality is such a comparison
+    let p = plan("/t/* <=>* /u/*[::t_id = $$0::id] | %(a = ::id; b = $$1::id)");
+    assert_eq!(p.column_types.numeric, ["t_id", "id"]);
+    assert!(p.column_types.columns_compared);
+    // a column against a literal is not: a typed engine holds it
+    let p = plan("/t/*[::a > 3]::id");
+    assert_eq!(p.column_types.numeric, ["a"]);
+    assert!(!p.column_types.columns_compared);
+    // arithmetic: in a condition and in what is read
+    let p = plan("/t/*[::a + 1 > 5]::id");
+    assert_eq!(p.sql, "SELECT id FROM t WHERE (a + 1) > 5");
+    assert_eq!(p.column_types.numeric, ["a"]);
+    assert!(!p.column_types.columns_compared);
+    let p = plan("/t/* | ::a * ::b");
+    assert_eq!(p.column_types.numeric, ["a", "b"]);
+    let p = plan("/t/*[::a + 1 > ::b]::id");
+    assert_eq!(p.column_types.numeric, ["b", "a"]);
+    assert!(p.column_types.columns_compared);
+}
+
+/// `div` is the true division and answers inf or nan for a zero
+/// divisor; `mod` keeps a fraction. SQL's `/` divides integers as
+/// integers on most engines, and both answer no value or an error
+/// for a zero divisor.
+#[test]
+fn division_is_real_and_by_a_number_that_is_not_zero() {
+    use quarb_sql::Dialect::*;
+    let sql = |q: &str, d: Option<quarb_sql::Dialect>| quarb_sql::pushdown(q, d).map(|p| p.sql);
+    let q = "/t/* | ::n div 4";
+    assert_eq!(
+        sql(q, Some(Sqlite)).unwrap(),
+        "SELECT (CAST(n AS REAL) / 4) FROM t"
+    );
+    assert_eq!(
+        sql(q, Some(Postgres)).unwrap(),
+        "SELECT (CAST(n AS DOUBLE PRECISION) / 4) FROM t"
+    );
+    assert_eq!(
+        sql(q, Some(MySql)).unwrap(),
+        "SELECT (CAST(n AS DOUBLE) / 4) FROM t"
+    );
+    assert_eq!(
+        sql(q, Some(Mssql)).unwrap(),
+        "SELECT (CAST(n AS FLOAT) / 4) FROM t"
+    );
+    assert_eq!(
+        sql(q, None).unwrap(),
+        "SELECT (CAST(n AS DOUBLE) / 4) FROM t"
+    );
+    assert_eq!(
+        sql("/t/*[::n div 2.5 > 1]::id", Some(Sqlite)).unwrap(),
+        "SELECT id FROM t WHERE (CAST(n AS REAL) / 2.5) > 1"
+    );
+    for q in [
+        "/t/* | ::n div ::m",
+        "/t/* | ::n div 0",
+        "/t/* | ::n div 0.0",
+        "/t/*[::n div ::m > 1]::id",
+        "/t/* | ::n mod 3",
+        "/t/*[::n mod 2 = 0]::id",
+        // a text literal is not computed with, nor compared with what
+        // is computed
+        "/t/* | ::n + '1'",
+        "/t/*[::n + 1 = 'x']::id",
+    ] {
+        assert!(sql(q, Some(Sqlite)).is_none(), "{q}");
+    }
+    let Err(refused) = quarb_sql::pushdown_explained("/t/* | ::n mod 3", Some(Sqlite)) else {
+        panic!("mod was planned");
+    };
+    assert_eq!(
+        refused.not_pushed().unwrap().0.code(),
+        Some(quarb::diagnostic::OPERATOR_NOT_PUSHED)
+    );
+}
+
+/// A text column against a text literal: the engine compares the
+/// characters, a database compares under its collation. Each dialect
+/// gets the form that is the engine's comparison there.
+#[test]
+fn a_text_comparison_is_written_for_the_dialects_collation() {
+    use quarb_sql::Dialect::*;
+    let sql = |q: &str, d: quarb_sql::Dialect| quarb_sql::pushdown(q, Some(d)).map(|p| p.sql);
+    // SQLite compares bytes (a column under a collation is the
+    // catalog's to report)
+    assert_eq!(
+        sql("/t/*[::name = 'holst']::id", Sqlite).unwrap(),
+        "SELECT id FROM t WHERE name = 'holst'"
+    );
+    // MySQL: over the UTF-8 bytes of both sides; the collation's own
+    // equality stays beside an `=`, for the index
+    assert_eq!(
+        sql("/t/*[::name = 'holst']::id", MySql).unwrap(),
+        "SELECT id FROM t WHERE (name = 'holst' AND BINARY CONVERT(name USING utf8mb4) = \
+         BINARY CONVERT('holst' USING utf8mb4))"
+    );
+    assert_eq!(
+        sql("/t/*[::name != 'holst']::id", MySql).unwrap(),
+        "SELECT id FROM t WHERE (BINARY CONVERT(name USING utf8mb4) <> BINARY \
+         CONVERT('holst' USING utf8mb4) OR name IS NULL)"
+    );
+    assert_eq!(
+        sql("/t/*['M' > ::name]::id", MySql).unwrap(),
+        "SELECT id FROM t WHERE BINARY CONVERT('M' USING utf8mb4) > BINARY CONVERT(name \
+         USING utf8mb4)"
+    );
+    // a number is compared as before
+    assert_eq!(
+        sql("/t/*[::n = 5]::id", MySql).unwrap(),
+        "SELECT id FROM t WHERE n = 5"
+    );
+    // PostgreSQL: `=` is exact, an order is the collation's unless
+    // it is written under "C"
+    assert_eq!(
+        sql("/t/*[::name = 'holst']::id", Postgres).unwrap(),
+        "SELECT id FROM t WHERE name = 'holst'"
+    );
+    assert_eq!(
+        sql("/t/*[::name < 'M']::id", Postgres).unwrap(),
+        "SELECT id FROM t WHERE name < 'M' COLLATE \"C\""
+    );
+    assert_eq!(
+        sql("/t/*[::n < 5]::id", Postgres).unwrap(),
+        "SELECT id FROM t WHERE n < 5"
+    );
+    // SQL Server: the comparison stays with the engine, and an `=`
+    // still narrows the fetch (what the collation calls equal holds
+    // every row the engine does)
+    assert!(sql("/t/*[::name = 'holst']::id", Mssql).is_none());
+    assert!(sql("/t/*[::name < 'M']::id", Mssql).is_none());
+    let partial = |q: &str| quarb_sql::partial_pushdown(q, Some(Mssql)).map(|p| p.where_sql);
+    assert_eq!(
+        partial("/t/*[::name = 'holst']::id").as_deref(),
+        Some("name = 'holst'")
+    );
+    assert_eq!(
+        partial("/t/*[::n > 2 && ::name = 'holst']::id").as_deref(),
+        Some("(n > 2 AND name = 'holst')")
+    );
+    // an order, an inequality and a literal that reads as a number
+    // narrow nothing there
+    for q in [
+        "/t/*[::name < 'M']::id",
+        "/t/*[::name != 'holst']::id",
+        "/t/*[::name = '10']::id",
+    ] {
+        assert_eq!(partial(q), None, "{q}");
+    }
+}
+
+/// A table joined to itself is aliased on the joined side, and the
+/// plan says under which name the driver writes that side's key.
+#[test]
+fn a_self_join_names_its_joined_side() {
+    let plan = |q: &str| quarb_sql::pushdown(q, Some(quarb_sql::Dialect::Sqlite)).expect(q);
+    let p = plan(
+        "/employees/* <=>* /employees/*[::manager_id = $$0::id && ::salary > 100] \
+         | %(boss = ::name; report = $$1::name)",
+    );
+    assert_eq!(
+        p.sql,
+        "SELECT employees.name AS boss, employees_2.name AS report FROM employees JOIN \
+         employees employees_2 ON employees_2.manager_id = employees.id WHERE \
+         employees_2.salary > 100"
+    );
+    assert_eq!(p.order_table.as_deref(), Some("employees"));
+    assert_eq!(p.order_then.as_deref(), Some("employees"));
+    assert_eq!(p.order_then_as.as_deref(), Some("employees_2"));
+    assert_eq!(p.tables, ["employees", "employees"]);
+    // two tables: no alias, as before
+    let p = plan("/albums/* <=>* /tracks/*[::album_id = $$0::id] | %(a = ::title; t = $$1::title)");
+    assert!(
+        p.sql
+            .contains(" FROM albums JOIN tracks ON tracks.album_id = albums.id")
+    );
+    assert_eq!(p.order_then.as_deref(), Some("tracks"));
+    assert_eq!(p.order_then_as, None);
+}
+
+/// A plan names the sums and means it writes over a column
+/// (`FloatSum`, 0.71): a source that adds floats in its own order
+/// rewrites them in its ordered form. A plan that joins names none,
+/// and a count is no sum.
+#[test]
+fn a_plan_names_its_sums_over_a_column() {
+    let sums = |q: &str| -> Vec<(String, bool, String, String)> {
+        quarb_sql::pushdown(q, Some(quarb_sql::Dialect::Postgres))
+            .unwrap_or_else(|| panic!("expected pushdown for {q}"))
+            .sums
+            .into_iter()
+            .map(|s| (s.text, s.mean, s.table, s.column))
+            .collect()
+    };
+    let one = |text: &str, mean, column: &str| {
+        vec![(text.to_string(), mean, "t".to_string(), column.to_string())]
+    };
+    assert_eq!(sums("/t/*::x @| sum"), one("SUM(x)", false, "x"));
+    assert_eq!(sums("/t/*[::g = 3]::x @| mean"), one("AVG(x)", true, "x"));
+    assert_eq!(sums("/t/*::x @| count"), vec![]);
+    assert_eq!(sums("/t/*::x @| max"), vec![]);
+    assert_eq!(sums("/t/* @| count"), vec![]);
+    // the text stands in the statement, to be rewritten there
+    let plan = quarb_sql::pushdown("/t/*::x @| sum", Some(quarb_sql::Dialect::Postgres)).unwrap();
+    assert!(plan.sql.contains(&plan.sums[0].text), "{}", plan.sql);
 }

@@ -12,6 +12,7 @@ fn order_of(plan: &quarb_sql::Pushdown) -> quarb_relational::PlanOrder<'_> {
     quarb_relational::PlanOrder {
         table: plan.order_table.as_deref(),
         then: plan.order_then.as_deref(),
+        then_as: plan.order_then_as.as_deref(),
         first: plan.order_first.as_deref(),
         desc: plan.order_desc,
         groups: plan.order_groups,
@@ -855,4 +856,164 @@ fn a_plans_own_order_is_the_scans() {
         assert_eq!(pushed, scanned, "{q}");
     }
     let _ = std::fs::remove_file(path);
+}
+
+/// A table joined to itself (0.71): the joined side stands in the
+/// statement under an alias, and the driver writes the second key of
+/// the order under it. The plan named the table twice, which SQLite
+/// rejects as ambiguous, so such a query always fell back to the
+/// scan. The plan's rows are the scan's, in its order.
+#[test]
+fn a_table_joined_to_itself_is_aliased() {
+    let path = std::env::temp_dir().join(format!("quarb-sqlite-self-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE employees (id INTEGER PRIMARY KEY, name TEXT,
+          manager_id INTEGER REFERENCES employees(id), salary INTEGER);
+        INSERT INTO employees VALUES
+          (6, 'Faust', NULL, 280), (1, 'Ada', NULL, 300), (3, 'Cleo', 1, 220),
+          (2, 'Byron', 1, 200), (5, 'Eve', 2, 160), (4, 'Dante', 2, 150), (7, 'Gauss', 6, 90);
+        "#,
+    )
+    .unwrap();
+    drop(conn);
+    let on = "/employees/*[::manager_id = $$0::id";
+    let cases = [
+        format!("/employees/* <=>* {on}] | %(boss = ::name; report = $$1::name)"),
+        format!("/employees/* <=>*? {on}] | %(boss = ::name; report = $$1::name)"),
+        format!("/employees/* <=>* {on} && ::salary > 155] | %(boss = ::name; report = $$1::name)"),
+        format!("/employees/*[::salary > 250] <=>* {on}] | %(b = ::name; pay = $$1::salary)"),
+        format!("/employees/* <=>* {on} && ::salary < $$0::salary] | %(b = ::id; r = $$1::id)"),
+        format!("/employees/* <=>* {on} && $$0::manager_id != null] | %(b = ::id; r = $$1::id)"),
+        format!("/employees/* .B <=>* {on}] .R | %(boss = $$.B::name; report = $$.R::name)"),
+        format!("/employees/* <=>* {on}] @| count"),
+        format!("/employees/* <=>* {on}] | $$1::salary @| sum"),
+        // the first witness: the joined side bound by its key
+        "/employees/* <=> /employees/*[::id = $$0::manager_id] | %(w = ::name; b = $$1::name)"
+            .to_string(),
+    ];
+    for q in &cases {
+        let plan = quarb_sql::pushdown(q, Some(quarb_sql::Dialect::Sqlite))
+            .unwrap_or_else(|| panic!("expected pushdown for {q}"));
+        assert!(
+            plan.sql.contains(" JOIN employees employees_2 ON "),
+            "{q}: {}",
+            plan.sql
+        );
+        let (_, rows) = quarb_sqlite::raw_query(
+            &path,
+            &plan.sql,
+            &order_of(&plan),
+            plan.join_left
+                .as_ref()
+                .map(|(t, c)| (t.as_str(), c.as_slice())),
+        )
+        .unwrap_or_else(|e| panic!("{q}: {e}: {}", plan.sql));
+        let pushed: Vec<String> = rows
+            .iter()
+            .map(|r| {
+                r.iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join("|")
+            })
+            .collect();
+        let adapter = SqliteAdapter::open(&path).unwrap();
+        let scanned: Vec<String> = match quarb::run(q, &adapter).unwrap() {
+            quarb::QueryResult::Values(vs) => vs
+                .iter()
+                .map(|v| match v {
+                    quarb::Value::Record(fields) => fields
+                        .iter()
+                        .map(|(_, v)| v.to_string())
+                        .collect::<Vec<_>>()
+                        .join("|"),
+                    other => other.to_string(),
+                })
+                .collect(),
+            quarb::QueryResult::Nodes(_) => panic!("expected values for {q}"),
+        };
+        assert!(!pushed.is_empty(), "{q}");
+        assert_eq!(pushed, scanned, "{q}: {}", plan.sql);
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A negation inside a join's condition (0.71). The engine reads a
+/// key comparison there as unknown for a null on either side and
+/// every other test as true or false; unknown passes through `!`.
+/// SQL's NOT, AND and OR keep the same table, so a negation over a
+/// key comparison is SQL's own, with every other test beneath it
+/// made two-valued. Held against the scan over null keys on both
+/// sides, for the every-witness join and its outer form.
+#[test]
+fn a_negation_inside_a_join_condition_is_the_scans() {
+    let path = std::env::temp_dir().join(format!("quarb-sqlite-neg-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER, m INTEGER, tag TEXT);
+        INSERT INTO t VALUES (1,1,1,'a'), (2,10,9,'b'), (3,3,NULL,'c'), (4,NULL,4,NULL),
+          (5,7,8,'a'), (6,NULL,NULL,'b');
+        CREATE TABLE u (id INTEGER PRIMARY KEY, t_n INTEGER, v INTEGER, code TEXT);
+        INSERT INTO u VALUES (1,1,1,'abc'), (2,10,NULL,'x'), (3,3,4,NULL), (4,NULL,9,'abc'),
+          (5,7,8,'q'), (6,7,NULL,NULL), (7,1,2,'abc');
+        "#,
+    )
+    .unwrap();
+    drop(conn);
+    let conditions = [
+        "!(::v > $$0::m)",
+        "!(::v = $$0::m)",
+        "!(::v != $$0::m)",
+        "!(::v = $$0::m || ::v > 5)",
+        "!(::v = $$0::m && ::code = \"abc\")",
+        "!(!(::v = $$0::m))",
+        "!(::v = $$0::m || ::code = null)",
+        "!($$0::m = null || ::v > $$0::m)",
+        "(!(::v = $$0::m) || ::v > 7)",
+        // no key comparison beneath: true or false, like any other
+        "!(::v > 5)",
+        "!(::code = \"abc\")",
+    ];
+    for cond in conditions {
+        for join in ["<=>*", "<=>*?"] {
+            let q =
+                format!("/t/* {join} /u/*[::t_n = $$0::n && {cond}] | %(t = ::id; u = $$1::id)");
+            let plan = quarb_sql::pushdown(&q, Some(quarb_sql::Dialect::Sqlite))
+                .unwrap_or_else(|| panic!("expected pushdown for {q}"));
+            let (_, rows) = quarb_sqlite::raw_query(&path, &plan.sql, &order_of(&plan), None)
+                .unwrap_or_else(|e| panic!("{q}: {e}: {}", plan.sql));
+            let pushed: Vec<String> = rows
+                .iter()
+                .map(|r| {
+                    r.iter()
+                        .map(|v| v.to_string())
+                        .collect::<Vec<_>>()
+                        .join("|")
+                })
+                .collect();
+            let adapter = SqliteAdapter::open(&path).unwrap();
+            let scanned: Vec<String> = match quarb::run(&q, &adapter).unwrap() {
+                quarb::QueryResult::Values(vs) => vs
+                    .iter()
+                    .map(|v| match v {
+                        quarb::Value::Record(fields) => fields
+                            .iter()
+                            .map(|(_, v)| v.to_string())
+                            .collect::<Vec<_>>()
+                            .join("|"),
+                        other => other.to_string(),
+                    })
+                    .collect(),
+                quarb::QueryResult::Nodes(_) => panic!("expected values for {q}"),
+            };
+            assert!(!pushed.is_empty(), "{q}");
+            assert_eq!(pushed, scanned, "{q}: {}", plan.sql);
+        }
+    }
+    let _ = std::fs::remove_file(&path);
 }

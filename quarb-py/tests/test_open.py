@@ -60,6 +60,43 @@ def test_translate():
     assert quarb.translate("//book/title", "xpath")
 
 
+def test_translate_lenient():
+    """`lenient=True` is the command line's --lenient: the nearest
+    Quarb construct, each divergence a warning; without it the
+    refusal is the one coded line, naming the flag where it helps."""
+    import pytest
+
+    with pytest.raises(ValueError) as refused:
+        quarb.translate(".events | sort_by(.ms) | .[0].id", "jq")
+    line = str(refused.value)
+    assert line.startswith("error SORT_NOT_TRANSLATED (jq): "), line
+    assert line.endswith("Or pass --lenient: man SORT_NOT_TRANSLATED"), line
+    with pytest.warns(UserWarning, match=r"LENIENT_TRANSLATION \(jq\): sort_by: a null key"):
+        q = quarb.translate(".events | sort_by(.ms) | .[0].id", "jq", lenient=True)
+    assert q == "/events/* @| sort_by(/ms::) @| [1] | (/id::)"
+    # XPath: a relative path read from the root
+    with pytest.raises(ValueError, match=r"^error PATH_NOT_TRANSLATED \(xpath\)"):
+        quarb.translate("book/title", "xpath")
+    with pytest.warns(UserWarning, match=r"LENIENT_TRANSLATION \(xpath\)"):
+        assert quarb.translate("book/title", "xpath", lenient=True)
+    # a filter that needs no leniency translates the same, in silence
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert quarb.translate(".users[].name", "jq", lenient=True) == quarb.translate(
+            ".users[].name", "jq"
+        )
+        # SQL takes the flag and has no lenient form
+        sql = "SELECT name FROM t WHERE age > 30"
+        assert quarb.translate(sql, "sql", lenient=True) == quarb.translate(sql, "sql")
+    # under the flag a construct the lenient translator refuses too
+    # is told without the pointer to the flag
+    with pytest.raises(ValueError) as refused:
+        quarb.translate(".a | group_by(.k)", "jq", lenient=True)
+    assert "Or pass --lenient" not in str(refused.value), str(refused.value)
+
+
 def test_mount_cross_source_join(tmp_path):
     import sqlite3
     import quarb

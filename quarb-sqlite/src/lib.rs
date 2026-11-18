@@ -639,10 +639,25 @@ fn unique_key(conn: &Connection, table: &str, cols: &[String]) -> Result<bool, S
 pub fn column_catalog(
     path: &std::path::Path,
     tables: &[&str],
-) -> Result<Vec<(String, bool, bool)>, SqliteError> {
+) -> Result<Vec<(String, bool, bool, bool)>, SqliteError> {
     let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let mut catalog = Vec::new();
     for table in tables {
+        // SQLite compares text by its bytes unless a column is
+        // declared under a collation (NOCASE, RTRIM, one an
+        // application registered). The catalog's pragmas do not say
+        // which column is, the table's own statement does: where it
+        // names a collation at all, no text of the table is taken
+        // to compare exactly.
+        let collated = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten()
+            .is_none_or(|sql| sql.to_ascii_lowercase().contains("collate"));
         let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", quote_ident(table)))?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
         for row in rows {
@@ -654,7 +669,7 @@ pub fn column_catalog(
                 declared.trim().to_ascii_lowercase().as_str(),
                 "json" | "jsonb"
             );
-            catalog.push((name, numeric_affinity(&declared), json));
+            catalog.push((name, numeric_affinity(&declared), json, !collated));
         }
     }
     Ok(catalog)

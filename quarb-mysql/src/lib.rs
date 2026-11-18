@@ -374,7 +374,7 @@ async fn fetch_rows(
 pub fn column_catalog(
     config: &str,
     tables: &[&str],
-) -> Result<Vec<(String, bool, bool)>, MysqlError> {
+) -> Result<Vec<(String, bool, bool, bool)>, MysqlError> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -406,7 +406,10 @@ pub fn column_catalog(
                         | "decimal"
                 );
                 let json = data_type.eq_ignore_ascii_case("json");
-                catalog.push((name, numeric, json));
+                // text compares exactly: the plan writes a text
+                // comparison over the bytes of both sides itself,
+                // whatever the column's collation
+                catalog.push((name, numeric, json, true));
             }
         }
         Ok(catalog)

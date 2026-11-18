@@ -219,21 +219,33 @@ type Ran = (
     Option<&'static str>,
 );
 
+/// The page of the codes. A one-shot host has no session to take
+/// `man CODE`, so a line's tail leads here: each code has its place
+/// on the page under `#code-CODE`.
+pub const DIAGNOSTICS_PAGE: &str = "https://quarb.org/diagnostics.html";
+
 /// The JSON of a run: `{"ok": true, "lines", "html", "diagnostics"}`,
 /// or `{"ok": false, "error", "diagnostics"}` with the error as the
-/// array's one item, code and site beside the message; `tail` is
-/// the door to the code's remedy (`Narrow first: man
-/// SORT_NOT_PUSHED`), null for a code that has none.
+/// array's one item, code and site beside the message. A code that
+/// has a remedy carries the way to it three times over: `lead` (the
+/// words: `Narrow first`), `door` (the code's place on the page of
+/// the codes) and `tail`, the two as one text (`Narrow first:
+/// https://quarb.org/diagnostics.html#code-SORT_NOT_PUSHED`); the
+/// three are null for a code that has none. (Through 0.70 the tail
+/// read `Narrow first: man SORT_NOT_PUSHED`, a line of a session
+/// this build does not have.)
 fn outcome_json(outcome: Result<Ran, quarb::Diagnostic>) -> String {
-    // the manual is a line of the session here
-    quarb::diagnostic::set_manual_door("man");
     let diag = |d: &quarb::Diagnostic| {
+        let lead = d.lead();
+        let door = lead.map(|_| format!("{DIAGNOSTICS_PAGE}#code-{}", d.code));
         serde_json::json!({
             "severity": d.severity.word(),
             "code": d.code,
             "site": d.site,
             "message": d.message,
-            "tail": d.tail(),
+            "lead": lead,
+            "tail": lead.zip(door.as_ref()).map(|(lead, door)| format!("{lead}: {door}")),
+            "door": door,
         })
     };
     match outcome {
@@ -397,5 +409,49 @@ impl Site {
         }
         out.sort();
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A one-shot host has no session: the tail of a code that has
+    /// a remedy leads to the code's place on the page of the codes.
+    #[test]
+    fn a_tail_leads_to_the_page_of_the_codes() {
+        let run = |d: quarb::Diagnostic| -> serde_json::Value {
+            serde_json::from_str(&outcome_json(Ok((vec![], None, vec![d], None)))).unwrap()
+        };
+        let v = run(quarb::Diagnostic::info(
+            quarb::diagnostic::SORT_NOT_PUSHED,
+            "query",
+            "ORDER BY collations differ per engine; scanning",
+        ));
+        let d = &v["diagnostics"][0];
+        assert_eq!(d["lead"], "Narrow first");
+        assert_eq!(
+            d["door"],
+            "https://quarb.org/diagnostics.html#code-SORT_NOT_PUSHED"
+        );
+        assert_eq!(
+            d["tail"],
+            "Narrow first: https://quarb.org/diagnostics.html#code-SORT_NOT_PUSHED"
+        );
+        // a code with no remedy has none of the three
+        let v = run(quarb::Diagnostic::info(
+            quarb::diagnostic::LOCALE,
+            "run",
+            "C",
+        ));
+        let d = &v["diagnostics"][0];
+        assert!(d["lead"].is_null() && d["door"].is_null() && d["tail"].is_null());
+        // an error is the array's one item, with its door
+        let v: serde_json::Value = serde_json::from_str(&outcome_json(Err(
+            quarb::Diagnostic::error(quarb::diagnostic::ERROR, "mount", "no such file"),
+        )))
+        .unwrap();
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["diagnostics"][0]["code"], "ERROR");
     }
 }

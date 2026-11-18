@@ -1715,6 +1715,20 @@ fn eval_operand_in<H: Host>(
                         )),
                     }
                 }
+                // A positional item beside a node (0.71): the node
+                // brings named cells, and a positional one would be
+                // laid from the header's first column over whatever
+                // the node put there (`t ++ %($$.T; "x")` wrote "x"
+                // over the node's first cell). The items beside a
+                // node take names.
+                if node_items && row.iter().any(|(name, _)| name.is_none()) {
+                    return Err(
+                        "a positional item beside a node in the row: the node brings its \
+                         properties as named cells, so an item beside it takes a name too, \
+                         %(node; name = value)"
+                            .to_string(),
+                    );
+                }
                 // the node's names are known only here: one met twice
                 // in the row is refused, as in a record constructor
                 if node_items {

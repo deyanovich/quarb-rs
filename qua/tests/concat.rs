@@ -425,4 +425,20 @@ fn a_node_in_the_row_after_a_concatenation_is_its_record() {
         one("= %(a = 1) ++ %(b = ^/names/*[1])"),
         "%(a = 1; b = true)"
     );
+    // a positional item beside a node is refused (0.71): it was laid
+    // from the header's first column, over the node's own cell
+    for q in [
+        r#"= #(@(first; n); %("x"; 1)) ++ %(^/names/*[1]; "y")"#,
+        r#"= #(@(first; n); %("x"; 1)) ++ %("y"; ^/names/*[1])"#,
+    ] {
+        assert!(
+            refuse(q).contains("a positional item beside a node in the row"),
+            "{q}"
+        );
+    }
+    // a named item beside it is what it was
+    assert_eq!(
+        one(r#"= #(@(first; n); %("x"; 1)) ++ %(^/names/*[1]; n = 2) | @"#),
+        r#"@%(@(first; n; last); %("x"; 1; null); %("Jane"; 2; "Austen"))"#
+    );
 }

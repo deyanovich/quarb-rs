@@ -156,8 +156,17 @@ impl Diagnostic {
     /// SORT_NOT_PUSHED`; ruling 2026-11-17). `None` for a code whose
     /// row has no lead, and for one the inventory does not hold.
     pub fn tail(&self) -> Option<String> {
+        self.lead()
+            .map(|lead| format!("{lead}: {} {}", manual_door(), self.code))
+    }
+
+    /// The words a tail opens with (`Narrow first`), for a host
+    /// that writes the door its own way: where no session is there
+    /// to take `man CODE`, the door is the code's place on the page
+    /// of the codes. `None` as [`tail`](Self::tail) is.
+    pub fn lead(&self) -> Option<&'static str> {
         let row = row_of(&self.code, self.severity)?;
-        (!row.lead.is_empty()).then(|| format!("{}: {} {}", row.lead, manual_door(), self.code))
+        (!row.lead.is_empty()).then_some(row.lead)
     }
 }
 
@@ -416,8 +425,6 @@ codes! {
     UNIQUE_NOT_PUSHED,
     /// A selection by position.
     TAKE_NOT_PUSHED,
-    /// A negation: SQL drops the rows whose column is empty.
-    NEGATION_NOT_PUSHED,
     /// A regular expression or a substring test.
     PATTERN_NOT_PUSHED,
     /// A condition that follows a reference or navigates.
@@ -543,6 +550,12 @@ mod tests {
             "info SORT_NOT_PUSHED (query): ORDER BY collations differ per engine; scanning. \
              Narrow first: qua man SORT_NOT_PUSHED"
         );
+        // the lead alone, for a host that writes the door its own way
+        assert_eq!(
+            Diagnostic::info(SORT_NOT_PUSHED, "query", "x").lead(),
+            Some("Narrow first")
+        );
+        assert_eq!(Diagnostic::info(LOCALE, "run", "C").lead(), None);
         // a row with no lead has no tail, and a code with no row none
         assert_eq!(Diagnostic::info(LOCALE, "run", "C").tail(), None);
         assert_eq!(Diagnostic::info("NO_SUCH_CODE", "run", "x").tail(), None);

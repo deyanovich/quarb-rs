@@ -165,6 +165,33 @@ impl DuckdbAdapter {
     /// Open a `.duckdb` file read-only; the catalog now, each
     /// table's rows on first touch.
     pub fn open(path: &std::path::Path) -> Result<Self, DuckdbError> {
+        Self::open_impl(path, None)
+    }
+
+    /// [`open`], with one table's listing filtered by a WHERE clause
+    /// (partial pushdown; the engine re-applies the predicates, and
+    /// steps into the table go by key, unfiltered).
+    ///
+    /// [`open`]: Self::open
+    pub fn open_filtered(
+        path: &std::path::Path,
+        table: &str,
+        where_sql: &str,
+    ) -> Result<Self, DuckdbError> {
+        Self::open_impl(path, Some((table.to_string(), where_sql.to_string())))
+    }
+
+    /// Surface a filtered fetch's error now (see
+    /// `RelationalModel::prefetch`): the partial-pushdown caller
+    /// falls back to the scan instead of answering empty.
+    pub fn prefetch(&self, table: &str) -> Result<(), String> {
+        self.model.prefetch(table)
+    }
+
+    fn open_impl(
+        path: &std::path::Path,
+        filter: Option<(String, String)>,
+    ) -> Result<Self, DuckdbError> {
         let conn = Connection::open_with_flags(
             path,
             duckdb::Config::default().access_mode(duckdb::AccessMode::ReadOnly)?,
@@ -182,7 +209,7 @@ impl DuckdbAdapter {
                     fetch_rows(&conn, spec, w, k).map_err(|e| e.to_string())
                 },
             ),
-            None,
+            filter,
             quarb_relational::quote_double,
         )
         // the exact count of a table not read (the pushdown scanning
@@ -372,7 +399,7 @@ fn fetch_rows(
 pub fn column_catalog(
     path: &std::path::Path,
     tables: &[&str],
-) -> Result<Vec<(String, bool, bool)>, DuckdbError> {
+) -> Result<Vec<(String, bool, bool, bool)>, DuckdbError> {
     let conn = Connection::open_with_flags(
         path,
         duckdb::Config::default().access_mode(duckdb::AccessMode::ReadOnly)?,
@@ -408,10 +435,67 @@ pub fn column_catalog(
                     | "DOUBLE"
                     | "DECIMAL"
             );
-            catalog.push((name, numeric, d == "JSON"));
+            // text compares by bytes (a column declared under a
+            // collation is not looked for)
+            catalog.push((name, numeric, d == "JSON", true));
         }
     }
     Ok(catalog)
+}
+
+/// A plan's float sums in the form that adds in key order (0.71).
+/// DuckDB adds a float column plainly and across its threads: the
+/// last digits of a sum move from run to run. `fsum(x ORDER BY key)`
+/// is its compensated sum in the order the scan reads the rows: the
+/// same number every run, and on ordinary columns the engine's
+/// careful sum to the last digit (the two methods part on a column
+/// of huge cancelling terms). A four-byte column is widened first.
+/// `None` for a column that is no float, where SUM is exact; a table
+/// with no single-column key keeps the plain sum.
+pub fn float_sum_forms(
+    path: &std::path::Path,
+    sums: &[quarb_relational::FloatSum<'_>],
+) -> Result<Vec<Option<String>>, DuckdbError> {
+    let conn = Connection::open_with_flags(
+        path,
+        duckdb::Config::default().access_mode(duckdb::AccessMode::ReadOnly)?,
+    )?;
+    let specs = introspect(&conn)?;
+    let mut forms = Vec::new();
+    for s in sums {
+        let data_type: Option<String> = conn
+            .query_row(
+                "SELECT data_type FROM information_schema.columns \
+                 WHERE table_name = ? AND column_name = ?",
+                [s.table, s.column],
+                |r| r.get(0),
+            )
+            .ok();
+        let value = match data_type.as_deref() {
+            Some("DOUBLE") => s.column_sql.to_string(),
+            Some("FLOAT" | "REAL") => format!("({})::DOUBLE", s.column_sql),
+            _ => {
+                forms.push(None);
+                continue;
+            }
+        };
+        let key = specs
+            .iter()
+            .find(|t| t.name == s.table)
+            .and_then(|t| t.pk.map(|i| t.columns[i].clone()));
+        forms.push(match key {
+            Some(k) => Some(format!(
+                "{}({value} ORDER BY \"{}\".\"{k}\")",
+                if s.mean { "favg" } else { "fsum" },
+                s.table
+            )),
+            None if value != s.column_sql => {
+                Some(format!("{}({value})", if s.mean { "avg" } else { "sum" }))
+            }
+            None => None,
+        });
+    }
+    Ok(forms)
 }
 
 pub fn raw_query(

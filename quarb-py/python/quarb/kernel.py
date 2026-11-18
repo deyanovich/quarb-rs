@@ -118,8 +118,14 @@ def _make_kernel_class():
                 pool = sorted([*self.qsession.docs, *self.qsession.resident])
                 return ", ".join(pool) or "(nothing mounted)"
             if word == "translate":
+                # `%translate jq [--lenient] FILTER`: the flag as
+                # the command line takes it
                 lang, _, src = rest.partition(" ")
-                return translate(src.strip(), lang)
+                src = src.strip()
+                lenient = src == "--lenient" or src.startswith("--lenient ")
+                if lenient:
+                    src = src[len("--lenient"):].strip()
+                return translate(src, lang, lenient=lenient)
             raise ValueError(
                 f"unknown directive %{word} "
                 "(python, mount, connect, use, docs, translate)"

@@ -68,11 +68,11 @@ fn a_comparison_the_types_would_change_scans() {
     let (out, err) = qua(&dir, "/authors/*[::code = 150]::name");
     assert_eq!(out, "Homer\nAusten\nTwain");
     assert!(
-        err.contains("info TYPE_NOT_PUSHED (query): the comparison or reducer on code would"),
+        err.contains("info TYPE_NOT_PUSHED (query): the comparison on code would"),
         "{err}"
     );
     assert!(
-        err.contains("info TYPE_NOT_PUSHED (prefilter): the comparison or reducer on code"),
+        err.contains("info TYPE_NOT_PUSHED (prefilter): the comparison on code"),
         "{err}"
     );
     // an untyped column holding 300, '300' and 300.0
@@ -92,20 +92,14 @@ fn a_comparison_the_types_would_change_scans() {
     // text against a numeric column; the unmet column alone is named
     let (out, err) = qua(&dir, "/authors/*[::born > 1700 && ::code = 150]::name");
     assert_eq!(out, "Austen\nTwain");
-    assert!(
-        err.contains("the comparison or reducer on code would"),
-        "{err}"
-    );
+    assert!(err.contains("the comparison on code would"), "{err}");
     let (out, err) = qua(&dir, "/authors/*[::born = 'abc'] @| count");
     assert_eq!(out, "0");
     assert!(err.contains("info TYPE_NOT_PUSHED (query): "), "{err}");
     // a numeric reducer over a text column: SQL would sum the
     // leading digits and order by collation; the scan reads values
     let (_, err) = qua(&dir, "/authors/* | ::name @| max");
-    assert!(
-        err.contains("the comparison or reducer on name would"),
-        "{err}"
-    );
+    assert!(err.contains("the reducer on name would"), "{err}");
     let (out, err) = qua(&dir, "/authors/* | ::born @| sum");
     assert!(err.contains("pushdown: SELECT SUM(born)"), "{err}");
     assert!(!out.is_empty());

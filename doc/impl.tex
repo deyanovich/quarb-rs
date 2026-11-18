@@ -1164,7 +1164,22 @@ hold this), so the rungs trade only latency and transfer:
     SQLite, DuckDB, PostgreSQL and MySQL drivers append both keys
     and decline where a table has no primary key (SQLite orders by
     \texttt{rowid} there); the other drivers do not keep it, and
-    \texttt{qua} scans (\texttt{JOIN\_NOT\_PUSHED}). The same
+    \texttt{qua} scans (\texttt{JOIN\_NOT\_PUSHED}). A table
+    joined to itself stands in the statement twice: the joined
+    side is aliased (\texttt{JOIN employees employees\_2}, no
+    \texttt{AS}, which Oracle does not take there), its columns
+    and the ON are written under the alias, and
+    \texttt{Pushdown::order\_then\_as} hands the alias to the
+    driver for the second key (\texttt{PlanOrder::then\_as}). A
+    negation inside a join's condition is written in the logic
+    the engine keeps there, where a key comparison (one that
+    reads the other side) is unknown for a null and every other
+    test is true or false: with no key comparison beneath it the
+    negation is the \texttt{CASE} form it has outside a join;
+    over one it is SQL's own \texttt{NOT}, the key comparisons
+    as they stand and every other test beneath it made two-valued
+    (\texttt{Exporter::join\_cond3}). The
+    same
     four compose every other order a plan owes, through
     \texttt{quarb\_relational::order\_clause}: the plan's own
     sort (\texttt{order\_first}: \texttt{(n IS NULL), n} for
@@ -1198,23 +1213,75 @@ hold this), so the rungs trade only latency and transfer:
     that is the \texttt{SELECT *} plan, last in a pipeline over
     the rows of one table. \texttt{Pushdown::record} tells the
     printer that a one-column row is a record of one field. Column
-    types
-    are part of it too: Quarb compares
-    by value (numeric-looking text meets a number as a number, a
-    number and other text never meet), SQL by the column's type,
-    and SQLite and MySQL coerce a mixed comparison by rules of
-    their own. A numeric-looking \emph{text} literal therefore
-    never pushes; for the rest the plan records what it assumes
-    (\texttt{ColumnTypes}: the columns it compares with a number,
-    those it compares with text), and \texttt{qua} asks the
-    driver's catalog (\texttt{column\_catalog}: SQLite's
-    affinity, MySQL's \texttt{data\_type}) before using a plan,
-    full or partial; an unmet assumption scans, and
-    \texttt{--diagnostics=info} names the column. The strictly typed
-    engines reject the mismatch themselves, which falls back the
-    same way. What remains outside: a SQLite cell that violates
-    its column's declared type. Measured: COUNT over 500k
-    PostgreSQL rows, 2.57\,s scanned vs.\ 0.018\,s pushed.
+    types are part of it too: Quarb compares and computes by
+    value (numeric-looking text meets a number as a number, two
+    texts that read as numbers compare as numbers, a number and
+    other text never meet, a text that reads as no number computes
+    to null), SQL by the column's type, and every engine coerces a
+    mixed comparison by rules of its own. A numeric-looking
+    \emph{text} literal therefore never pushes; for the rest the
+    plan records what it assumes (\texttt{ColumnTypes}): the columns
+    it compares with a number, compares with each other or computes
+    with are numeric (\texttt{[::a = ::b]}, a join's key equality
+    and \texttt{::a + 1} all assume it, and
+    \texttt{columns\_compared} says that two columns meet); the
+    columns it compares with text are text the database compares
+    exactly. \texttt{qua} asks the driver's catalog
+    (\texttt{column\_catalog}: a \texttt{ColumnFact} per column,
+    its name, whether it is numeric, whether it is declared json,
+    whether its text compares exactly) before using a plan, full or
+    partial, on SQLite, MySQL, PostgreSQL and DuckDB; an unmet
+    assumption scans, and \texttt{--diagnostics=info} names the
+    column. A door with no catalog relies on the typed engine to
+    reject a mixed comparison, and does not take a plan that
+    compares two columns, which no engine rejects.
+    Text against a text literal is the engine's comparison of
+    characters (case, accents and trailing spaces tell; an order is
+    the order of UTF-8 bytes), written per dialect: as it stands on
+    SQLite, DuckDB and for PostgreSQL's \texttt{=}; under
+    \texttt{COLLATE "C"} for an order on PostgreSQL; over
+    \texttt{BINARY CONVERT(x USING utf8mb4)} of both sides on
+    MySQL, whose default collations fold case and accents and pad
+    with spaces, the collation's own \texttt{=} kept beside an
+    equality for its index; not at all on SQL Server, where an
+    equality still narrows the fetch through the prefilter (what a
+    collation calls equal holds every row the engine does). The
+    catalog says where a column does not compare exactly: a
+    \texttt{char(n)} or \texttt{citext} of PostgreSQL, a table of
+    SQLite whose statement names a collation.
+    Arithmetic: \texttt{+}, \texttt{-}, \texttt{*} as written;
+    \texttt{div} is the true division, pushed as
+    \texttt{CAST(l AS REAL) / r} (the dialect's float) and only by
+    a number written in the query that is not zero, since the
+    engine answers inf or nan for a zero divisor and SQL null or an
+    error; \texttt{mod} stays with the engine.
+    A sum of floats: the engine's \texttt{sum} and \texttt{mean}
+    add by the compensated sum of Kahan, Babuska and Neumaier
+    (\texttt{stdlib::CarefulSum}; ruling 2026-11-18), which is
+    SQLite's \texttt{SUM} and \texttt{AVG} step for step (whole
+    numbers exact while nothing else was added, then a float total
+    started from the exact part), so a float sum pushed to SQLite
+    is the scan's to the last digit, through an index too. The
+    other databases add plainly, PostgreSQL and DuckDB across
+    workers in no fixed order, where a plain float sum moves in
+    its last digits from one run to the next (measured on a
+    million rows, 2026-11-18). So a plan names its sums and means
+    over a column (\texttt{Pushdown::sums}), and the two doors
+    rewrite a float column's in the ordered form their driver
+    gives from its catalog (\texttt{float\_sum\_forms}):
+    \texttt{sum(x ORDER BY key)} on PostgreSQL, the same number
+    every run, and \texttt{fsum(x ORDER BY key)} on DuckDB, its
+    compensated sum, which on ordinary columns is the engine's to
+    the last digit; a four-byte column is widened first. What may
+    still differ from the engine in the last digits: PostgreSQL's
+    plain tail, MySQL's sum, and any float sum over a table with
+    no single-column key.
+    What remains outside: a SQLite cell that violates its column's
+    declared type; a column of DuckDB declared under a collation;
+    a \texttt{CHAR} of Oracle, compared without its padding; a
+    PostgreSQL column under a nondeterministic collation.
+    Measured: COUNT over 500k PostgreSQL rows, 2.57\,s scanned
+    vs.\ 0.018\,s pushed.
   \item \textbf{Partial pushdown}
     (\texttt{quarb\_sql::partial\_pushdown}): the leading run of
     strictly-translatable row predicates becomes the table's fetch
@@ -1245,8 +1312,12 @@ hold this), so the rungs trade only latency and transfer:
     repetition that runs at least once; nothing from an
     alternation, a class, an optional part or a letter under
     \texttt{(?i)}) become substring tests on a text column,
-    \texttt{instr} on SQLite and \texttt{LIKE} on PostgreSQL,
-    and the engine runs the regex over what is fetched. In the
+    \texttt{instr} on SQLite and MySQL (whose collation makes it
+    keep more, never less), \texttt{LIKE} on PostgreSQL and
+    \texttt{strpos} under no dialect (DuckDB's, BigQuery's and
+    Athena's doors), and the engine runs the regex over what is
+    fetched. DuckDB's door takes a partial plan like the others
+    (\texttt{DuckdbAdapter::open\_filtered}). In the
     ladder a conjunction keeps whichever side narrows, a
     disjunction is narrowed only when both sides are, a negation
     never. Full JSON string-equality

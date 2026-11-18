@@ -460,6 +460,17 @@ pub fn quote_backtick(name: &str) -> String {
 /// rows is part of it, and the keys that decide the order are a
 /// catalog's to name: the driver looks them up and appends the
 /// clause ([`order_clause`]).
+/// A plan's sum or mean over a column, as a driver is asked for
+/// its ordered form (`quarb_sql::FloatSum`, borrowed): the table,
+/// the column's name, and the column as the statement writes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FloatSum<'a> {
+    pub mean: bool,
+    pub table: &'a str,
+    pub column: &'a str,
+    pub column_sql: &'a str,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PlanOrder<'a> {
     /// The table whose key orders the rows: the FROM table. `None`
@@ -468,6 +479,10 @@ pub struct PlanOrder<'a> {
     /// An every-witness join's second table: the rows of one driver
     /// stand in this table's order.
     pub then: Option<&'a str>,
+    /// The name the plan's statement gives that second table, where
+    /// it is not the table's own: a table joined to itself stands
+    /// there under an alias, and its key is written under it.
+    pub then_as: Option<&'a str>,
     /// The plan's own sort, in SQL, before the keys: `(n IS NULL),
     /// n` for `sort_by(::n)`. The keys after it keep the ties in the
     /// tables' order, as the engine's stable sort does.
@@ -532,7 +547,10 @@ pub fn order_clause(
     }
     if let Some(then) = order.then {
         match key_of(then) {
-            Some(k) => terms.push(format!("{}{dir}", column(then, &k))),
+            Some(k) => terms.push(format!(
+                "{}{dir}",
+                column(order.then_as.unwrap_or(then), &k)
+            )),
             None => return Err(no_key(then)),
         }
     }
@@ -2185,6 +2203,17 @@ mod tests {
         assert_eq!(
             clause(PlanOrder { groups: true, ..t }).unwrap(),
             " ORDER BY MIN(\"t\".\"id\")"
+        );
+        // a table joined to itself: the second key is the table's,
+        // written under the alias the statement gives the joined side
+        assert_eq!(
+            clause(PlanOrder {
+                then: Some("t"),
+                then_as: Some("t_2"),
+                ..t
+            })
+            .unwrap(),
+            " ORDER BY \"t\".\"id\", \"t_2\".\"id\""
         );
         // a table with no key: a plain plan runs unordered as before,
         // any other is declined

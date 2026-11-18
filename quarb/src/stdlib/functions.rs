@@ -4374,6 +4374,111 @@ fn quantital_result(value: f64, base: String, unit: Option<(f64, String)>) -> Va
     }
 }
 
+/// The careful sum (ruling 2026-11-18): floating-point numbers are
+/// added by the compensated sum of Kahan, Babuska and Neumaier, the
+/// method SQLite's `SUM` and `AVG` use (3.43 on), step for step, so
+/// a float sum the engine adds and one SQLite adds for it are the
+/// same number. Beside the running total it keeps what each
+/// addition rounded away and gives it back at the end: ten cells of
+/// 0.1 sum to 1.0 where the plain total says 0.9999999999999999,
+/// and `1e100, 1, -1e100` to 1.0 where it says 0.0.
+///
+/// Whole numbers are added exactly for as long as nothing else has
+/// been added and the total fits (`exact`); from the first float,
+/// or an overflow, the total is a float started from the exact
+/// part. A whole number too large for a float's 53 bits goes in as
+/// two parts, each of which a float holds exactly.
+#[derive(Default)]
+pub(crate) struct CarefulSum {
+    whole: i64,
+    floating: bool,
+    sum: f64,
+    err: f64,
+}
+
+/// 2^52: from here a whole number may not be one float exactly.
+const CAREFUL_WHOLE: i64 = 4_503_599_627_370_496;
+
+impl CarefulSum {
+    pub(crate) fn of(values: impl IntoIterator<Item = f64>) -> f64 {
+        let mut acc = CarefulSum::default();
+        for v in values {
+            acc.add(v);
+        }
+        acc.total()
+    }
+
+    pub(crate) fn add(&mut self, r: f64) {
+        if !self.floating {
+            self.float();
+        }
+        self.step(r);
+    }
+
+    pub(crate) fn add_whole(&mut self, n: i64) {
+        if !self.floating {
+            match self.whole.checked_add(n) {
+                Some(s) => {
+                    self.whole = s;
+                    return;
+                }
+                None => self.float(),
+            }
+        }
+        if n <= -CAREFUL_WHOLE || n >= CAREFUL_WHOLE {
+            let small = n % 16384;
+            self.step((n - small) as f64);
+            self.step(small as f64);
+        } else {
+            self.step(n as f64);
+        }
+    }
+
+    /// The whole numbers added so far become the float total's start.
+    fn float(&mut self) {
+        self.floating = true;
+        let n = self.whole;
+        if n <= -CAREFUL_WHOLE || n >= CAREFUL_WHOLE {
+            let small = n % 16384;
+            self.sum = (n - small) as f64;
+            self.err = small as f64;
+        } else {
+            self.sum = n as f64;
+            self.err = 0.0;
+        }
+    }
+
+    #[inline]
+    fn step(&mut self, r: f64) {
+        let s = self.sum;
+        let t = s + r;
+        if s.abs() > r.abs() {
+            self.err += (s - t) + r;
+        } else {
+            self.err += (r - t) + s;
+        }
+        self.sum = t;
+    }
+
+    /// The total while it is a whole number: nothing but whole
+    /// numbers added, and no overflow.
+    pub(crate) fn exact(&self) -> Option<i64> {
+        (!self.floating).then_some(self.whole)
+    }
+
+    /// The total as a float. An infinite or undefined total has no
+    /// correction to take.
+    pub(crate) fn total(&self) -> f64 {
+        if !self.floating {
+            self.whole as f64
+        } else if self.err.is_finite() {
+            self.sum + self.err
+        } else {
+            self.sum
+        }
+    }
+}
+
 fn sum(input: &[Value], scale: Scale) -> Value {
     // Quantities total to a typed quantity in the base unit —
     // mixed units of one dimension welcome (kW + W + BTU/h), unit
@@ -4381,7 +4486,7 @@ fn sum(input: &[Value], scale: Scale) -> Value {
     match quantital_fold(input, scale) {
         QuantFold::Unsound(clash) => return unsound_fold(&clash),
         QuantFold::Same { base, unit, mags } => {
-            let value = mags.iter().sum();
+            let value = CarefulSum::of(mags.iter().copied());
             return quantital_result(value, base, unit);
         }
         QuantFold::Absent => {}
@@ -4415,25 +4520,24 @@ fn sum(input: &[Value], scale: Scale) -> Value {
     if readings.is_empty() {
         return Value::Null;
     }
-    if readings.iter().all(|v| matches!(v, Value::Int(_))) {
-        let mut acc: i64 = 0;
-        let mut overflowed = false;
-        for v in &readings {
-            if let Value::Int(n) = v {
-                match acc.checked_add(*n) {
-                    Some(s) => acc = s,
-                    None => {
-                        overflowed = true;
-                        break;
-                    }
+    // whole numbers sum to a whole number, exactly, unless the total
+    // overflows; with a float among them, or past the overflow, the
+    // careful sum
+    let mut acc = CarefulSum::default();
+    for v in &readings {
+        match v {
+            Value::Int(n) => acc.add_whole(*n),
+            other => {
+                if let Some(x) = other.numeric() {
+                    acc.add(x);
                 }
             }
         }
-        if !overflowed {
-            return Value::Int(acc);
-        }
     }
-    Value::Float(readings.iter().filter_map(Value::numeric).sum())
+    match acc.exact() {
+        Some(n) => Value::Int(n),
+        None => Value::Float(acc.total()),
+    }
 }
 
 /// The product of the numeric readings (`prod`, alias `product`):
@@ -5818,7 +5922,7 @@ fn mean(input: &[Value], scale: Scale) -> Value {
     match quantital_fold(input, scale) {
         QuantFold::Unsound(clash) => return unsound_fold(&clash),
         QuantFold::Same { base, unit, mags } => {
-            let value = mags.iter().sum::<f64>() / mags.len() as f64;
+            let value = CarefulSum::of(mags.iter().copied()) / mags.len() as f64;
             return quantital_result(value, base, unit);
         }
         QuantFold::Absent => {}
@@ -5840,11 +5944,22 @@ fn mean(input: &[Value], scale: Scale) -> Value {
             avg.rem_euclid(1_000_000_000) as u32,
         );
     }
-    let nums: Vec<f64> = input.iter().filter_map(Value::numeric).collect();
-    if nums.is_empty() {
+    // the careful sum over the count, as SQLite's AVG divides its own
+    let (mut acc, mut count) = (CarefulSum::default(), 0usize);
+    for v in input {
+        match v {
+            Value::Int(n) => acc.add_whole(*n),
+            other => match other.numeric() {
+                Some(x) => acc.add(x),
+                None => continue,
+            },
+        }
+        count += 1;
+    }
+    if count == 0 {
         Value::Null
     } else {
-        Value::Float(nums.iter().sum::<f64>() / nums.len() as f64)
+        Value::Float(acc.total() / count as f64)
     }
 }
 
@@ -12232,4 +12347,97 @@ pub(crate) fn flat_cell(v: &Value) -> bool {
         v,
         Value::List(_) | Value::Record(_) | Value::Table(_) | Value::Foreign(_)
     )
+}
+
+#[cfg(test)]
+mod careful_sum_tests {
+    use super::*;
+
+    fn floats(xs: &[f64]) -> Vec<Value> {
+        xs.iter().map(|x| Value::Float(*x)).collect()
+    }
+
+    /// The cases the ruling was made on (2026-11-18): the answers are
+    /// SQLite's own (3.54), which adds by the same steps.
+    #[test]
+    fn floats_are_added_with_what_each_addition_rounded_away() {
+        let s: Scale = &|_| None;
+        // ten cells of 0.1: the plain total is 0.9999999999999999
+        assert_eq!(sum(&floats(&[0.1; 10]), s), Value::Float(1.0));
+        assert_eq!([0.1f64; 10].iter().sum::<f64>(), 0.9999999999999999);
+        // a large number and its opposite around a small one
+        assert_eq!(sum(&floats(&[1e100, 1.0, -1e100]), s), Value::Float(1.0));
+        assert_eq!(
+            sum(&floats(&[1.0, 1e100, 1.0, -1e100]), s),
+            Value::Float(2.0)
+        );
+        // the total a reader expects of three tenths
+        assert_eq!(sum(&floats(&[0.1, 0.2, 0.3]), s), Value::Float(0.6));
+        assert_eq!([0.1f64, 0.2, 0.3].iter().sum::<f64>(), 0.6000000000000001);
+        // the mean is the careful sum over the count
+        assert_eq!(mean(&floats(&[0.1; 10]), s), Value::Float(0.1));
+        assert_eq!(
+            mean(&floats(&[1e100, 1.0, -1e100]), s),
+            Value::Float(1.0 / 3.0)
+        );
+    }
+
+    #[test]
+    fn whole_numbers_stay_exact_and_join_a_float_total_from_their_exact_sum() {
+        let s: Scale = &|_| None;
+        let ints = |xs: &[i64]| -> Vec<Value> { xs.iter().map(|x| Value::Int(*x)).collect() };
+        assert_eq!(sum(&ints(&[1, 2, 3]), s), Value::Int(6));
+        // past 2^53 a float cannot count by ones; the whole sum can
+        assert_eq!(
+            sum(&ints(&[9_007_199_254_740_992, 1, 1]), s),
+            Value::Int(9_007_199_254_740_994)
+        );
+        // an overflow goes on as a float, from the exact part
+        assert_eq!(
+            sum(&ints(&[i64::MAX, 1]), s),
+            Value::Float(9.223372036854775807e18)
+        );
+        // a float among whole numbers: the whole numbers before it
+        // were added exactly
+        assert_eq!(
+            sum(
+                &[
+                    Value::Int(9_007_199_254_740_992),
+                    Value::Int(1),
+                    Value::Int(1),
+                    Value::Float(0.0)
+                ],
+                s
+            ),
+            Value::Float(9_007_199_254_740_994.0)
+        );
+        assert_eq!(
+            sum(&[Value::Int(1), Value::Float(2.5), Value::Int(3)], s),
+            Value::Float(6.5)
+        );
+        assert_eq!(
+            mean(&[Value::Int(1), Value::Int(2), Value::Int(4)], s),
+            Value::Float(7.0 / 3.0)
+        );
+    }
+
+    #[test]
+    fn an_infinite_or_undefined_total_takes_no_correction() {
+        let s: Scale = &|_| None;
+        assert_eq!(
+            sum(&floats(&[1.0, f64::INFINITY, 2.0]), s),
+            Value::Float(f64::INFINITY)
+        );
+        assert_eq!(
+            sum(&floats(&[f64::MAX, f64::MAX]), s),
+            Value::Float(f64::INFINITY)
+        );
+        let Value::Float(x) = sum(&floats(&[f64::INFINITY, f64::NEG_INFINITY]), s) else {
+            panic!("a float")
+        };
+        assert!(x.is_nan());
+        // nothing to add is null, as before
+        assert_eq!(sum(&[], s), Value::Null);
+        assert_eq!(mean(&[Value::Str("a".into())], s), Value::Null);
+    }
 }

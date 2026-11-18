@@ -77,7 +77,9 @@ fn a_refusal_is_told_under_its_word_with_the_door_to_its_remedy() {
         ]
     );
     // a negation is pushed in the form that keeps the rows SQL's NOT
-    // would drop; inside a join's bracket it stays with the engine
+    // would drop; over a key comparison of a join it is SQL's own
+    // NOT, whose unknown is the engine's there (0.71: it stayed with
+    // the engine)
     assert_eq!(
         told(&dir, "/books/*[!(::pages > 245)] @| count"),
         [
@@ -88,12 +90,22 @@ fn a_refusal_is_told_under_its_word_with_the_door_to_its_remedy() {
     assert_eq!(
         told(
             &dir,
+            "/books/* <=>* /authors/*[::id = $$0::author_id && !(::born > $$0::pages)] @| count"
+        ),
+        [
+            "info PUSHED (query): pushdown: SELECT COUNT(*) FROM books JOIN authors ON \
+             authors.id = books.author_id WHERE NOT ((authors.born > books.pages))"
+        ]
+    );
+    // a negated key comparison alone is no JOIN condition
+    assert_eq!(
+        told(
+            &dir,
             "/books/* <=>* /authors/*[!(::id = $$0::author_id)] @| count"
         ),
         [
-            "info NEGATION_NOT_PUSHED (query): a negation inside a join condition (the engine \
-             leaves a key comparison with a null unknown there, and reads the rest as true \
-             or false); scanning. A choice to make: qua man NEGATION_NOT_PUSHED"
+            "info JOIN_NOT_PUSHED (query): a correlation without a '$$' equality (no JOIN \
+             condition); scanning. Spell it another way: qua man JOIN_NOT_PUSHED"
         ]
     );
 }
@@ -695,5 +707,115 @@ fn the_whole_row_as_a_record_is_pushed_and_leaves_null_cells_out() {
         let plan = run(&dir, &[q, "lib.db"]);
         let scan = run(&dir, &["--no-pushdown", q, "lib.db"]);
         assert_eq!(plan.1, scan.1, "{q}");
+    }
+}
+
+/// A mount's `crosslinks=` names references by their labels, and a
+/// label no reference carries is refused. A query pushed whole opens
+/// no adapter, so the label was not looked at there and a misspelled
+/// one passed in silence; it is held against the catalog before the
+/// plan answers, and refused as where the scan answers (0.71).
+#[test]
+fn a_crosslinks_label_is_checked_where_the_plan_is_pushed_whole() {
+    let dir = fixture("crosslabel");
+    let (ok, out, err) = run(
+        &dir,
+        &[
+            "--diagnostics=info",
+            "/books/* @| count",
+            "lib.db?crosslinks=author",
+        ],
+    );
+    assert!(ok, "{err}");
+    assert_eq!(out, "4");
+    assert_eq!(
+        err,
+        "info PUSHED (query): pushdown: SELECT COUNT(*) FROM books"
+    );
+    let (ok, out, err) = run(&dir, &["/books/* @| count", "lib.db?crosslinks=writer"]);
+    assert!(!ok);
+    assert_eq!(out, "");
+    assert!(
+        err.contains(
+            "crosslinks=\"writer\": no reference of this database is labelled \"writer\" (its \
+             labels: author)"
+        ),
+        "{err}"
+    );
+    // the scan's own refusal, word for word
+    let (ok, _, scanned) = run(
+        &dir,
+        &["/books/1->author::name", "lib.db?crosslinks=writer"],
+    );
+    assert!(!ok);
+    assert_eq!(err, scanned);
+}
+
+/// DuckDB's door sends the leading conditions ahead of the scan, as
+/// the other doors do (0.71: it opened the file whole), and a regex
+/// narrows the fetch by its literals there (`strpos`). Each answer
+/// is the scan's.
+#[test]
+fn the_duckdb_door_sends_leading_conditions_ahead() {
+    let dir = std::env::temp_dir().join(format!("quarb-codes-{}-duckpart", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    {
+        let db = duckdb::Connection::open(dir.join("lib.duckdb")).unwrap();
+        db.execute_batch(
+            "CREATE TABLE books (id INTEGER PRIMARY KEY, title VARCHAR, pages INTEGER);
+             INSERT INTO books VALUES
+               (1, 'Iliad', 300), (2, 'Emma', 320), (3, 'Tom Sawyer', 240),
+               (4, 'Persuasion', 250), (5, 'Odyssey', NULL), (6, NULL, 700),
+               (7, 'tom thumb', 90), (8, 'Tom Jones', 900);",
+        )
+        .unwrap();
+    }
+    let lines = |q: &str| -> Vec<String> {
+        let (ok, plan, err) = run(&dir, &["--diagnostics=info", q, "lib.duckdb"]);
+        assert!(ok, "{q}: {err}");
+        let (ok, scan, _) = run(&dir, &["--no-pushdown", q, "lib.duckdb"]);
+        assert!(ok, "{q}");
+        assert_eq!(plan, scan, "{q}");
+        assert!(!plan.is_empty(), "{q}");
+        err.lines().map(str::to_string).collect()
+    };
+    let sent = |q: &str, filter: &str| {
+        let lines = lines(q);
+        assert!(
+            lines.iter().any(|l| l
+                == &format!(
+                    "info PUSHED (prefilter): partial pushdown: WHERE {filter} on books; the \
+                     rest scans the filtered set"
+                )),
+            "{q}: {lines:?}"
+        );
+    };
+    // a plain condition before a selection the plan cannot take
+    sent("/books/*[::pages > 245] @| [2] | ::title", "pages > 245");
+    sent(
+        "/books/*[::pages != 300 && ::pages < 800] @| [3] | ::id",
+        "((pages <> 300 OR pages IS NULL) AND pages < 800)",
+    );
+    // a regex: the literals it cannot match without
+    sent(
+        "/books/*[::title == (/^Tom .*s$/)]::id",
+        "strpos(title, 'Tom ') > 0 AND strpos(title, 's') > 0",
+    );
+    sent(
+        "/books/*[::pages > 100 && ::title == (/on/)]::title",
+        "(pages > 100 AND strpos(title, 'on') > 0)",
+    );
+    // not narrowed: no literal, and a number column (the database
+    // would search its own rendering of the number)
+    for q in [
+        "/books/*[::title == (/(?i)^tom/)]::id",
+        "/books/*[::pages == (/^3/)]::id",
+    ] {
+        let lines = lines(q);
+        assert!(
+            !lines.iter().any(|l| l.contains("partial pushdown")),
+            "{q}: {lines:?}"
+        );
     }
 }

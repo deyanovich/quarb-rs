@@ -56,8 +56,8 @@
 
 mod export;
 pub use export::{
-    ColumnTypes, Dialect, Partial, Pushdown, export, partial_pushdown, partial_pushdown_explained,
-    partial_pushdown_keyed, pushdown, pushdown_explained,
+    ColumnFact, ColumnTypes, Dialect, FloatSum, Partial, Pushdown, export, partial_pushdown,
+    partial_pushdown_explained, partial_pushdown_keyed, pushdown, pushdown_explained,
 };
 
 use quarb::diagnostic as d;
@@ -139,8 +139,6 @@ pub enum Refusal {
     Unique,
     /// A selection by position.
     Take,
-    /// A negation: SQL drops the rows whose column is empty.
-    Negation,
     /// A regular expression, a substring test, a LIKE.
     Pattern,
     /// A condition that follows a reference or navigates.
@@ -188,7 +186,6 @@ impl Refusal {
             Refusal::Fold => d::FOLD_NOT_PUSHED,
             Refusal::Unique => d::UNIQUE_NOT_PUSHED,
             Refusal::Take => d::TAKE_NOT_PUSHED,
-            Refusal::Negation => d::NEGATION_NOT_PUSHED,
             Refusal::Pattern => d::PATTERN_NOT_PUSHED,
             Refusal::Resolution => d::RESOLUTION_NOT_PUSHED,
             Refusal::Walk => d::WALK_NOT_PUSHED,

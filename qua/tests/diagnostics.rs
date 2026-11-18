@@ -68,8 +68,8 @@ fn the_planner_reports_as_infos() {
     );
     assert!(
         err.contains(
-            "info TYPE_NOT_PUSHED (query): the comparison or reducer on title would follow \
-             the column's type where the scan follows the value; scanning"
+            "info TYPE_NOT_PUSHED (query): the reducer on title would follow the column's \
+             type where the scan follows the value; scanning"
         ),
         "{err}"
     );

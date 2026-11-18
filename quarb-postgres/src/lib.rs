@@ -396,7 +396,7 @@ impl PostgresAdapter {
 pub fn column_catalog(
     config: &str,
     tables: &[&str],
-) -> Result<Vec<(String, bool, bool)>, PostgresError> {
+) -> Result<Vec<(String, bool, bool, bool)>, PostgresError> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -407,7 +407,7 @@ pub fn column_catalog(
         for table in tables {
             let cols = client
                 .query(
-                    "SELECT column_name, data_type FROM information_schema.columns \
+                    "SELECT column_name, data_type, udt_name FROM information_schema.columns \
                      WHERE table_schema = 'public' AND table_name = $1 \
                      ORDER BY ordinal_position",
                     &[table],
@@ -421,10 +421,70 @@ pub fn column_catalog(
                     "smallint" | "integer" | "bigint" | "numeric" | "real" | "double precision"
                 );
                 let json = matches!(data_type.as_str(), "json" | "jsonb");
-                catalog.push((name, numeric, json));
+                // A `char(n)` answers its padding and compares
+                // without it ('Mars    ' = 'Mars'); a `citext`
+                // compares without its case. Neither compares as the
+                // engine reads it.
+                let udt: String = r.get(2);
+                let exact = data_type != "character" && udt != "citext";
+                catalog.push((name, numeric, json, exact));
             }
         }
         Ok(catalog)
+    })
+}
+
+/// A plan's float sums in the form that adds in key order (0.71).
+/// PostgreSQL adds a float column plainly, and under a parallel plan
+/// in whatever order its workers return: the last digits of a sum
+/// move from run to run. `sum(x ORDER BY key)` adds in the order the
+/// scan reads the rows, the same number every run (the engine's own
+/// is the careful sum, which may still differ from it in the last
+/// digits). A four-byte column is widened first: PostgreSQL would
+/// add it in four bytes, the engine reads each cell as a double.
+/// `None` for a column that is no float, where SUM is exact; a table
+/// with no single-column key keeps the plain sum.
+pub fn float_sum_forms(
+    config: &str,
+    sums: &[quarb_relational::FloatSum<'_>],
+) -> Result<Vec<Option<String>>, PostgresError> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async {
+        let (client, connection) = tokio_postgres::connect(config, NoTls).await?;
+        tokio::spawn(connection);
+        let (specs, _) = PostgresAdapter::introspect(&client).await?;
+        let mut forms = Vec::new();
+        for s in sums {
+            let row = client
+                .query_opt(
+                    "SELECT data_type FROM information_schema.columns \
+                     WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2",
+                    &[&s.table, &s.column],
+                )
+                .await?;
+            let data_type: Option<String> = row.map(|r| r.get(0));
+            let value = match data_type.as_deref() {
+                Some("double precision") => s.column_sql.to_string(),
+                Some("real") => format!("({})::float8", s.column_sql),
+                _ => {
+                    forms.push(None);
+                    continue;
+                }
+            };
+            let key = specs
+                .iter()
+                .find(|t| t.name == s.table)
+                .and_then(|t| t.pk.map(|i| t.columns[i].clone()));
+            let f = if s.mean { "avg" } else { "sum" };
+            forms.push(match key {
+                Some(k) => Some(format!("{f}({value} ORDER BY \"{}\".\"{k}\")", s.table)),
+                None if value != s.column_sql => Some(format!("{f}({value})")),
+                None => None,
+            });
+        }
+        Ok(forms)
     })
 }
 

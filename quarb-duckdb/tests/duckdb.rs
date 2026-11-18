@@ -7,6 +7,7 @@ fn order_of(plan: &quarb_sql::Pushdown) -> quarb_relational::PlanOrder<'_> {
     quarb_relational::PlanOrder {
         table: plan.order_table.as_deref(),
         then: plan.order_then.as_deref(),
+        then_as: plan.order_then_as.as_deref(),
         first: plan.order_first.as_deref(),
         desc: plan.order_desc,
         groups: plan.order_groups,
@@ -268,8 +269,8 @@ fn a_plans_own_order_is_the_scans() {
     let catalog = quarb_duckdb::column_catalog(&path, &["books"]).unwrap();
     let numeric: Vec<&str> = catalog
         .iter()
-        .filter(|(_, numeric, _)| *numeric)
-        .map(|(name, _, _)| name.as_str())
+        .filter(|(_, numeric, ..)| *numeric)
+        .map(|(name, ..)| name.as_str())
         .collect();
     assert_eq!(numeric, ["id", "pages", "price", "year"]);
     for q in [
@@ -316,4 +317,109 @@ fn a_plans_own_order_is_the_scans() {
         assert!(!scanned.is_empty(), "{q}");
         assert_eq!(pushed, scanned, "{q}");
     }
+}
+
+/// A plan's float sums in the ordered form (0.71): DuckDB adds a
+/// float column across its threads, in no fixed order; `fsum(x
+/// ORDER BY key)` adds in the order the scan reads the rows, the
+/// same number every run. The driver says the form from its
+/// catalog: a double as it is, a four-byte float widened, nothing
+/// for a whole-number column (its sum is exact), and without a key
+/// the plain sum.
+#[test]
+fn a_float_sum_is_asked_in_key_order() {
+    let dir = std::env::temp_dir().join(format!("quarb-duckdb-sums-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("t.duckdb");
+    let _ = std::fs::remove_file(&path);
+    {
+        let conn = duckdb::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE prices (id INTEGER PRIMARY KEY, g INTEGER, x DOUBLE, f FLOAT, n INTEGER);
+             INSERT INTO prices
+               SELECT i, i % 5, ((i * 7919) % 39801 + 200) / 100.0,
+                      ((i * 104729) % 1000) / 8.0, i % 97
+               FROM range(1, 20001) t(i);
+             CREATE TABLE loose (x DOUBLE, f FLOAT);
+             INSERT INTO loose VALUES (0.1, 0.5), (0.2, 0.25);",
+        )
+        .unwrap();
+    }
+    let ask = |mean, table, column| quarb_relational::FloatSum {
+        mean,
+        table,
+        column,
+        column_sql: column,
+    };
+    assert_eq!(
+        quarb_duckdb::float_sum_forms(
+            &path,
+            &[
+                ask(false, "prices", "x"),
+                ask(true, "prices", "x"),
+                ask(false, "prices", "f"),
+                ask(false, "prices", "n"),
+                ask(false, "loose", "x"),
+                ask(true, "loose", "f"),
+            ]
+        )
+        .unwrap(),
+        [
+            Some(r#"fsum(x ORDER BY "prices"."id")"#.to_string()),
+            Some(r#"favg(x ORDER BY "prices"."id")"#.to_string()),
+            Some(r#"fsum((f)::DOUBLE ORDER BY "prices"."id")"#.to_string()),
+            None,
+            None,
+            Some("avg((f)::DOUBLE)".to_string()),
+        ]
+    );
+    // the plan names its sums; a plan that joins names none
+    let plan = quarb_sql::pushdown("/prices/*[::g = 3]::x @| sum", None).unwrap();
+    assert_eq!(plan.sums.len(), 1);
+    assert_eq!(
+        (
+            plan.sums[0].text.as_str(),
+            plan.sums[0].table.as_str(),
+            plan.sums[0].column.as_str()
+        ),
+        ("SUM(x)", "prices", "x")
+    );
+    // the ordered form is the scan's sum, the careful one, on these
+    // columns, and the same on every run
+    let adapter = DuckdbAdapter::open(&path).unwrap();
+    for (q, column) in [
+        ("/prices/*::x @| sum", "x"),
+        ("/prices/*[::g = 3]::x @| sum", "x"),
+        ("/prices/*::x @| mean", "x"),
+        ("/prices/*::f @| sum", "f"),
+    ] {
+        let plan = quarb_sql::pushdown(q, None).unwrap();
+        let asked: Vec<_> = plan
+            .sums
+            .iter()
+            .map(|s| quarb_relational::FloatSum {
+                mean: s.mean,
+                table: &s.table,
+                column: &s.column,
+                column_sql: &s.column_sql,
+            })
+            .collect();
+        let forms = quarb_duckdb::float_sum_forms(&path, &asked).unwrap();
+        let mut sql = plan.sql.clone();
+        for (s, form) in plan.sums.iter().zip(forms) {
+            sql = sql.replace(
+                &s.text,
+                &form.unwrap_or_else(|| panic!("a form for {column}")),
+            );
+        }
+        let scanned = match quarb::run(q, &adapter).unwrap() {
+            quarb::QueryResult::Values(vs) => vs[0].to_string(),
+            quarb::QueryResult::Nodes(_) => panic!("a value"),
+        };
+        for _ in 0..3 {
+            let (_, rows) = quarb_duckdb::raw_query(&path, &sql, &order_of(&plan), None).unwrap();
+            assert_eq!(rows[0][0].to_string(), scanned, "{q}: {sql}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

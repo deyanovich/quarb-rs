@@ -819,23 +819,61 @@ fn highlight(query: &str) -> String {
 /// Translate a jq filter, an XPath 1.0 expression, or a SQL SELECT
 /// into Quarb query text (`lang` = "jq" | "xpath" | "sql") — the
 /// same bridges as the CLI's --jq/--xpath/--sql.
+///
+/// `lenient=True` is the CLI's `--lenient` (0.71): a construct with
+/// no exact Quarb counterpart is translated to the nearest one, and
+/// each place the answer can differ is told as a Python warning
+/// (`LENIENT_TRANSLATION (jq): sort_by: a null key sorts last, where
+/// jq sorts it first`). Without it such a construct is refused, in
+/// the one line the command line prints for it, with the code word
+/// that `quarb.man` explains. SQL has no lenient form: the flag is
+/// taken and changes nothing there.
 #[pyfunction]
-fn translate(source: &str, lang: &str) -> PyResult<String> {
-    let q = match lang {
-        "jq" => quarb_jq::translate(source)
-            .map(|t| t.query)
-            .map_err(|e| e.to_string()),
-        "xpath" => quarb_xpath::translate(source)
-            .map(|t| t.query)
-            .map_err(|e| e.to_string()),
+#[pyo3(signature = (source, lang, lenient=false))]
+fn translate(py: Python<'_>, source: &str, lang: &str, lenient: bool) -> PyResult<String> {
+    // a worded refusal as its one line, any other error as it reads
+    fn refusal<E: std::fmt::Display>(
+        bridge: &str,
+        worded: Option<(&'static str, &str, bool)>,
+        lenient: bool,
+        e: &E,
+    ) -> String {
+        match worded {
+            Some((code, reason, takes)) => {
+                quarb::diagnostic::translator_refusal(bridge, code, reason, takes, lenient)
+            }
+            None => e.to_string(),
+        }
+    }
+    let (q, warnings) = match lang {
+        "jq" => if lenient {
+            quarb_jq::translate_lenient(source)
+        } else {
+            quarb_jq::translate(source)
+        }
+        .map(|t| (t.query, t.warnings))
+        .map_err(|e| refusal("jq", e.not_translated(), lenient, &e)),
+        "xpath" => if lenient {
+            quarb_xpath::translate_lenient(source)
+        } else {
+            quarb_xpath::translate(source)
+        }
+        .map(|t| (t.query, t.warnings))
+        .map_err(|e| refusal("xpath", e.not_translated(), lenient, &e)),
         "sql" => quarb_sql::translate(source)
-            .map(|t| t.query)
-            .map_err(|e| e.to_string()),
+            .map(|t| (t.query, Vec::new()))
+            .map_err(|e| refusal("sql", e.not_translated(), lenient, &e)),
         other => Err(format!(
             "unknown source language: {other} (jq | xpath | sql)"
         )),
     }
     .map_err(PyValueError::new_err)?;
+    if !warnings.is_empty() {
+        let warn = py.import("warnings")?;
+        for w in warnings {
+            warn.call_method1("warn", (format!("LENIENT_TRANSLATION ({lang}): {w}"),))?;
+        }
+    }
     Ok(q)
 }
 

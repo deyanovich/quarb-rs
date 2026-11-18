@@ -3745,3 +3745,309 @@ def (=lvl)(_l): /teams/*/members/*[::level = _l]; (=lvl)("junior")::name
 /airports/LJU(->*){1_km;1_h} @| count
 /teams/*
 /tracks/1->*::title
+^::title
+::head:"dc:title"
+::head:"meta:initial-creator"
+::head:title
+//section[::lemma = "Литература"]//ordered-item | :: | bibref(gost) | [:url] | %(:url; :urldate; :medium)
+//cit[::target = "herodotus"] | %(key = ::target; ::locator; author = (->*::author))
+/crew/1 | %(prop = ::name; core = :name)
+/crew/1 | json
+/events/* | .p(::payload | decode(json)) | %(id = ::id; who = $.p:usr:name)
+= %(a = 1) ++? %(a = 2; b = 3)
+= 7 | factorial
+= @(5..7) | prod
+= 7 | choose(3)
+= (@(5..7) | prod) idiv (3 | factorial)
+= 0..5 | .n | @(0..($.n)) | join(" "; --of=choose($.n; $_))
+= 20 | factorial
+= 21 | factorial
+= 52 | choose(5)
+= 66 | choose(33)
+= 67 | choose(33)
+= @(1..25) | prod
+= @(1..3) | .d | ... | .a | $.d | ... | [$_ >= $.a] | @($.a; $_)
+= @(1..6) | .d | ... | .a | $.d | ... | [$_ >= $.a] @| count
+= @(1..6) | .d | ... | .a | $.d | ... | .b | $.d | ... @| count
+= 1..10 @| window(..0) | prod @| join(" ")
+= 1..10 @| window(..0) | sum @| join(" ")
+= "ROMA" | chars
+= "ROMA" | chars | permutations | count
+= @("Clio"; "Thalia"; "Erato") | permutations(2) | ... | join(" then ")
+= "CICERO" | chars | permutations | count
+= "CICERO" | chars | ... @| frequencies
+= @(1..10) | permutations | count
+= @(1..10) | count | factorial
+= @(1..10) | permutations(3) | count
+= @("Aglaea"; "Euphrosyne"; "Thalia") | combinations(2)
+= 2 | pow(3)
+= @(1..25) | combinations(12) | count
+= 25 | choose(12)
+= 1..4 | .k | @(1; 2; 4; 8) | combinations($.k) | ... | [sum = 11]
+= (#(@(no; title); %(1; "Hamlet"); %(2; "Emma")) | #(-i=:no)) ++ (#(@(no; year); %("1"; 1603); %("2a"; 1815)) | #(-i=:no))
+= (#(@(no; title); %(1; "Hamlet"); %(2; "Emma")) | #(-i=:no<float>)) ++ (#(@(no; year); %(1; 1603); %(2; 1815)) | #(-i=:no))
+= (#(@(no; title); %(1; "Hamlet"); %(2; "Emma")) | #(-i=:no<int>)) ++ (#(@(no; year); %("1"; 1603); %("2a"; 1815)) | #(-i=:no))
+/w/* <=> /n/*[::author = $$0::name] | ::name
+/w/* <=>?* /n/*[::author = $$0::name] | ::name
+/row[..3] | %(::PassengerId; ::Name; ::Age)
+42
+/row::Age @| mean | round(1)
+1
+2
+3
+//table[2] | # | :Factor
+//table[2] | #(--sci) | clean | :Factor
+//table[2] | # | clean | :Factor
+= "300 K" | %(plain = clean; sci = clean(--sci))
+^ | %(::title; ::author)
+^::head
+^::head:languages
+/loans/* @| top(3; ::out) | %(::out; ::book_id)
+man
+/loans/*[::out >= "2025-12-01"] @| top(3; ::out) | %(::out; ::book_id)
+/loans/*[::out >= "2025-12-01"] @| count
+/loans/*[::out >= "2025-12-01" && ::back == (/-28$/)] @| count
+/books/*[::title == (/^The /)] @| count
+/books/*[::title >= "The " && ::title < "The!"] @| count
+/loans/*[::book_id-->::author = "Jane Austen"] @| count
+/loans/* <=> /books/*[::id = $$0::book_id][::author = "Jane Austen"] @| count
+/loans/*::book_id-->::title @| unique @| count
+/loans/*::book_id @| unique @| count
+/vydachi/* @| top(3; ::vydana) | %(::vydana; ::kniga_id)
+/vydachi/*[::vydana >= "2025-12-01"] @| top(3; ::vydana) | %(::vydana; ::kniga_id)
+/vydachi/*[::vydana >= "2025-12-01"] @| count
+/vydachi/*[::vydana >= "2025-12-01" && ::vozvrashchena == (/-28$/)] @| count
+/knigi/*[::nazvanie == (/^Записки /)] @| count
+/knigi/*[::nazvanie >= "Записки " && ::nazvanie < "Записки!"] @| count
+/vydachi/*[::kniga_id-->::avtor = "Л. Н. Толстой"] @| count
+/vydachi/* <=> /knigi/*[::id = $$0::kniga_id][::avtor = "Л. Н. Толстой"] @| count
+/vydachi/*::kniga_id-->::nazvanie @| unique @| count
+/vydachi/*::kniga_id @| unique @| count
+/cart/loads/1::haul | convert(yard)
+/cart/loads/1 | ::weight + 1stone | round(2)
+/cart/loads/1 | ::weight + 1stone | convert(cwt)
+/cart/loads/1 | %(::weight; bushels = (::weight | convert(bushel)))
+/обоз/грузы/1::путь | convert(сажень)
+/обоз/грузы/1 | ::вес + 1пуд | round(2)
+/обоз/грузы/1 | ::вес + 1пуд | convert(пуд)
+/обоз/грузы/1 | %(::вес; золотники = (::вес | convert(золотник)))
+/row @| # | pretty
+/row | %(::place; at = (::local | datetime | offset(::tz)))
+/row[..4] | .at(::local | datetime | offset(::tz)) | %(::place; hour = ($.at | hour); day = ($.at | date); london = ($.at | offset(Z)))
+/row | .at(::local | datetime | offset(::tz)) | [($.at | offset(Z) | hour) < 6] | %(::place; local = ($.at | hour); london = ($.at | offset(Z) | hour))
+/row | %(::place; at = (::local | datetime | offset(::tz))) @| # | map(<Z>; --to=:at) | [3..5]
+/row | %(::place; at = (::local | datetime | offset(::tz))) @| # | map(<Z>; --to=:at) | :::header
+= #(@(place; at<+05:30>); %("Bombay"; 1872-10-20T16:30))
+/row | .at(::local | datetime | offset(::tz)) | $.at @| %(left = min; back = max)
+= 1872-12-21T20:45:00Z - 1872-10-02T20:45:00Z | convert(d)
+/row[7] | .at(::local | datetime | offset(::tz)) | %(::place; there = $.at; yokohama = ($.at | offset(+9)); day = ($.at | offset(+9) | date))
+/row[3] | ::local | datetime | offset(::tz) | offset
+= 0 | datetime
+= 1872-10-20T16:30 | offset(+19)
+/huts/*[::name = "Valley Inn"](--trail .(::name)){*_h}?{fall:*_m}[::name = "Far Valley"]? | %(route = (@. | join(" > ")); costs = $-:costs)
+/huts/*[::name = "Valley Inn"](--trail .(::name)){1;}?{*_h}?{fall:*_m}[::name = "Far Valley"]? | %(route = (@. | join(" > ")); costs = $-:costs)
+/huts/*[::name = "Valley Inn"](--trail .(::name)){*_h}!{fall:*_m}[::name = "Far Valley"]? | %(route = (@. | join(" > ")); costs = $-:costs)
+/huts/*[::name = "Valley Inn"](--trail .(::name)){1;}!{*_h}?{fall:*_m}[::name = "Far Valley"]? | %(route = (@. | join(" > ")); costs = $-:costs)
+/huts/*[::name = "Valley Inn"](--trail .(::name)){;8_h}{fall:*_m}[::name = "Far Valley"]? | %(route = (@. | join(" > ")); costs = $-:costs)
+/huts/*[::name = "Valley Inn"](--trail .(::name)){;7_h}{fall:*_m}[::name = "Far Valley"]? | %(route = (@. | join(" > ")); costs = $-:costs)
+/huts/*[::name = "Valley Inn"](--trail){*_h}?{fall:*_m}[::name = "Far Valley"] | ::name
+/huts/*[::name = "Valley Inn"](--trail){*_h}?{fall:*_m}?[::name = "Far Valley"] | ::name
+/airports/*[::region = "Europe"] | .a(::code) | (->*){*_min}[::code = "SIN"]? | %(from = $.a; t = $-:total) @| unique
+/airports/* | .a(::code) | (->*){*_min}[::code = "SIN"]? | %(from = $.a; t = $-:total) @| count
+/airports/* | .a(::code) | (->*){*_min}[::code = "SIN"]? | %(from = $.a; t = $-:total) @| unique @| count
+/airports/LJU(->* .(::code)){;1000_EUR}?{;15_h}[::code = "SIN"]? | %(route = (@. | join(" > ")); total = $-:total; costs = $-:costs)
+//*[::doc == (/deprecated/i)] | %(:name; ::start-line)
+/airports/LJU(->* .(::code)){;3}{;16_h}{*_EUR}[::code = "SIN"] | %(route = (@. | join(" > ")); costs = $-:costs)
+/airports/LJU(->* .(::code)){;3}{;16_h}{*_EUR}[::code = "SIN"]? | %(route = (@. | join(" > ")); costs = $-:costs)
+/airports/LJU(->* .(::code)){;3}{*_h}{*_EUR}[::code = "SIN"]? | %(route = (@. | join(" > ")); costs = $-:costs)
+/airports/LJU(->* .(::code)){;2}{;16_h}{*_EUR}[::code = "SIN"]? | %(route = (@. | join(" > ")); costs = $-:costs)
+/airports/LJU(->* .(::code)){;3}{*_EUR}{;16_h}[::code = "SIN"]? | %(route = (@. | join(" > ")); costs = $-:costs)
+/orders/17/payload/customer/geo::city
+/orders/17/payload//* @| count
+/orders/*/payload | :props | ... @| unique
+/orders/*[/payload/customer/geo::city = 'Lyon'] @| count
+/orders/*[/payload::city = 'Lyon'] @| count
+/orders/*[/payload::total > 150] @| count
+/orders/*[/payload/line_items/*::sku = 'SKU-101'] @| count
+/orders/* | .city(/payload/customer/geo::city) @|{.city} sum(--of=/payload::total) | round(2) | %($.city; revenue = $_)
+/orders/* | .city(((/payload/customer/geo::city) | default((/payload::city)))) @|{.city} sum(--of=/payload::total) | round(2) | %($.city; revenue = $_)
+/db/orders/*[/payload/coupon::code = 'LAUNCH25'][/payload::total > 150] <=> /c/*[::code = \$\$0/payload/coupon::code] | %(::id; total = /payload::total; campaign = \$\$1::campaign) @| count
+/db/orders/17/payload/customer/geo::city
+/db/orders/*[/payload/coupon::code] | .code(/payload/coupon::code) | (/payload::total) @|{.code} sum | round(2) | .revenue | %.
+//div[:::classes = "card"] @| count
+//div[:::classes = "mw-heading2"]
+//token[:::entity]:::entity @| unique @| count
+//token["e44" <<= :::entity][::deprel = "dobj"]->head<-head[::deprel = "nsubj"][:::entity]:::entity | .e @|{.e} count | %($.e; n = $_) @| top(6; :n)
+/cast/*[::name != "Mary"] | .m(::mention) | .e((^/book//token[$.m <<= ::mention][:::entity]:::entity | ... @| first)) | [$.e] | %(::name; ::gender; ::age; agent = (^/book//token[$.e <<= :::entity][::deprel = "nsubj"] @| count); patient = (^/book//token[$.e <<= :::entity][::deprel <<= @("dobj"; "nsubjpass")] @| count)) | ++ %(total = :agent + :patient) | %(:name; :gender; :age; :agent; :patient; share = round(100 * :patient div :total)) @| top(16; :agent)
+/cast/*[::name != "Mary"] | .m(::mention) | .e((^/book//token[$.m <<= ::mention][:::entity]:::entity | ... @| first)) | [$.e] | %(::gender; ::age; agent = (^/book//token[$.e <<= :::entity][::deprel = "nsubj"] @| count); patient = (^/book//token[$.e <<= :::entity][::deprel <<= @("dobj"; "nsubjpass")] @| count)) | .gender(::gender) @|{.gender} %($.gender; agent = sum(:agent); patient = sum(:patient)) | ++ %(total = :agent + :patient) | %(:gender; :agent; :patient; share = round(100 * :patient div :total; 1))
+/cast/*[::name != "Mary"] | .m(::mention) | .e((^/book//token[$.m <<= ::mention][:::entity]:::entity | ... @| first)) | [$.e] | %(::gender; ::age; agent = (^/book//token[$.e <<= :::entity][::deprel = "nsubj"] @| count); patient = (^/book//token[$.e <<= :::entity][::deprel <<= @("dobj"; "nsubjpass")] @| count)) | .age(::age) @|{.age} %($.age; agent = sum(:agent); patient = sum(:patient)) | ++ %(total = :agent + :patient) | %(:age; :agent; :patient; share = round(100 * :patient div :total; 1))
+/cast/*[::name != "Mary"][::name != "Tom Sawyer"] | .m(::mention) | .e((^/book//token[$.m <<= ::mention][:::entity]:::entity | ... @| first)) | [$.e] | %(::gender; agent = (^/book//token[$.e <<= :::entity][::deprel = "nsubj"] @| count); patient = (^/book//token[$.e <<= :::entity][::deprel <<= @("dobj"; "nsubjpass")] @| count)) | .gender(::gender) @|{.gender} %($.gender; agent = sum(:agent); patient = sum(:patient)) | ++ %(total = :agent + :patient) | %(:gender; :agent; :patient; share = round(100 * :patient div :total; 1))
+//step | $_
+//step | %(was = ::axis; now = $_ ++! %(axis = "//"))
+/characters/* @| graph:communities(--tie) | .:l | %(c = :.l; d = (--tie @| collapse @| count); in = (--tie @| collapse | [:.l = $$__:.l] @| count)) | .c($_:c) @|{.c} %(ip = sum(:in); d = sum(:d)) | (:ip div 370 - (:d div 370) * (:d div 370)) @| sum | round(3)
+/characters/* @| graph:communities(--tie) | .:l | [:.l = 3] | ::name @| join(", ")
+//paragraph:: | words @| %(total = count; unique = unique @| count)
+//paragraph:: | lower | words @| frequencies(5)
+//paragraph:: | lower | words @| u:sort @| u:uniq(-c) @| u:sort(-rn) @| [1..5] | trim
+//paragraph:: | lower | words | .total@(count) @| u:sort @| u:uniq(-c) @| u:sort(-rn) @| [1..3] | %(line = ($_ | trim); total = $.total)
+//paragraph:: | lower | words @| my:longest
+//paragraph:: | words @| u:sort(-u) @| count
+//paragraph:: | words @| unique @| count
+//paragraph[1..3]:: | u:false | default("failed")
+//paragraph[1..3]:: @| u:false
+//paragraph:: @| u:sort @| [1]
+//paragraph:: @| [1] | sh:wc(-w)
+//paragraph:: | u:wc(-w) | number @| sum
+//paragraph:: @| u:wc(-w) | trim
+//section[::lemma = "References"]//ordered-item:: | bibref(cmos) | %(:author; :title; :year)
+//section[::lemma = "References"]//ordered-item[1]:: | bibref(cmos)
+//section(/ul/li)+[:::texts *= "oracle"]?:::texts | ...
+//section(/ul/li)+[:::texts *= "oracle"]!:::texts | ...
+//section(/ul/li[:::texts *= "oracle"])+!:::texts | ...
+//section(/ul/li[:::texts *= "Nile"])+!:::texts | ...
+//section | .book(/h2::) | //li[:is-leaf][$.book *= "VII"]::
+//section | .n(//li @| count) | //li[:is-leaf][$.n < 5]::
+//li[:is-leaf][\\section/h2:: *= "VII"]::
+//h2:: | s/book ([ivx]+)/chapter $1/i
+//<page>::redlinks @| sum
+/tags/graphs<-page->tag:name @| frequencies @| top(6; :n)
+/mark | .s(//token<word>[::cite = "mrk.1.4"]::lower @| join(" ") | ngrams(3)) | ^/matthew//token<word> | .v(::cite) @|{.v; .s} %(cite = $.v; t = (@@_::lower @| join(" ")); s = $.s) | .r | :t | ngrams(3) | [$_ <<= $.r:s] | .c($.r:cite) | .t($.r:t) @|{.c; .t} count | %($.c; shared = $_; text = $.t) @| top(2; :shared)
+/mark | .s(//token<word>[::cite = "mrk.2.17"]::lower @| join(" ") | ngrams(3)) | ^/luke//token<word> | .v(::cite) @|{.v; .s} %(cite = $.v; t = (@@_::lower @| join(" ")); s = $.s) | .r | :t | ngrams(3) | [$_ <<= $.r:s] | .c($.r:cite) | .t($.r:t) @|{.c; .t} count | %($.c; shared = $_; text = $.t) @| top(2; :shared)
+/section[7]/paragraph[:: *= "Left London"]:: | timex(en)
+/section[7]/paragraph[:: *= "Quitté Londres"]:: | timex(fr)
+//paragraph:: | timex(en) | .kind($_:kind) @|{.kind} count | .n | %.
+//paragraph:: | timex(fr) | .kind($_:kind) @|{.kind} count | .n | %.
+/section[37]/paragraph[:: *= "error of a day"]::
+/measures/*::mean @| sp:describe(--digits=3)
+/measures/*::mean @| sp:shapiro(--digits=3)
+/measures/*::mean | sp:describe
+//paragraph:: | lower | words @| unique @| count
+//paragraph:: | lower | words @| %(total = count; unique = unique @| count)
+//paragraph:: | lower | words @| u:sort(-u) @| count
+//paragraph:: | sentences @| count
+/huts/*[::name = "Valley Inn"](--trail){;6_h}! | %(::name; hours = $-:total) @| unique
+/teams/1:::type
+/teams/1:::length
+/teams/1/members/1/name:::type
+/teams/1/members/1:meta
+/teams/1/members/1\\*
+/teams/1/members/1\\*::name
+/teams/1/members/1\\?*
+/teams/1/members/1\\!*
+/teams/1/members/1 | .(::name) | .(::level) | @.
+/teams/1 .T /members/* .M | @@.
+/teams/1 .T /members/1 | .(::name) | @.
+/teams/1/members/1 | .n(::name) | .l(::level) | %.
+/teams/1/members/1 | .n(::name) | .(::level) | %.*
+/teams/1 .T /members/* .M | %%.
+/teams/1/members/* | .n(::name) | .(::level) | #.* @| [1]
+/teams/1/members/* .M | .n(::name) | ##. @| [1]
+/teams/1/members/*::name
+/teams/1/name/x @| count
+/teams/1/members/*::name @| join(", ")
+/teams/1/members/1::name | upper
+/teams/1/members/1 | upper(::name)
+/teams/1/members/1 | %(n = upper(::name); c = count(::langs))
+= %(a = 1; b = 2) ++? %(b = 3; c = 4)
+/teams/1/members/1 | ::name ++ " " ++ ::level
+/teams/1/members/* | (::level = "staff" ? ::name : null)
+/teams/1/members/*:name
+/teams/1/members/*:index
+/teams/1/members/1:id
+/teams/1/members/1:depth
+/teams/1/members/*:kind
+/teams/1/members/1:props
+/albums/* <=>* /tracks/*[::album_id = $$0::id] | %(::title; track = $$1::title)
+/albums/* <=>? /tracks/*[::album_id = $$0::id && ::secs > 400] | [!$$1] | ::title
+/albums/* <=> /artists/*[::id = $$0::artist_id] <=>* /tracks/*[::album_id = $$0::id] | %(::title; by = $$1::name; track = $$2::title)
+/employees/* <=>* /employees/*[::manager_id = $$0::id && $$0::manager_id != null] | %(::name; report = $$1::name)
+/teams/1/members/1::name | _
+/teams/1/members/1::name | _:topic
+/teams/1/members/1::name | $$_::level
+/teams/1//name
+/albums/* :=:* /tracks/*[::album_id = ((0))::id] | ((1))::title
+/teams/1/members/1 | %(::name; n = ::level) | :n
+/teams/1/members/1 | .r%(::name; l = ::level) | $.r:l
+/teams/1/members/1 | @(%(a = 1); %(a = 2)) | :a
+/teams/1/members/1 | "x" | :name
+/teams/1/members/1 | %(::name; ::level) | :::keys
+/teams/1/members/1>>*::name
+/teams/1>>?*::name
+def &up: | upper; /teams/1/members/*::name | &up
+/teams/1/members/1 | "${::mentor:-none}"
+/teams/1/members/1 | "${::name | upper}!"
+/teams/* | .x(/members/1 | $$__::name) | $.x
+/teams/* | .x(/members/1 | $$_::name) | $.x
+/albums/* <=>* /tracks/*[::album_id = $$0::id] | $$1::secs
+/tracks/*[::secs > 400] .t <=> /albums/*[::id = $$.t::album_id] .al <=> /artists/*[::id = $$.al::artist_id] .ar | %(artist = $$.ar::name; album = $$.al::title; $$.t::title)
+/tracks/* .t <=>? /albums/*[::id = $$.t::album_id && ::year > 1930] .al | [!$$.al] | $$.t::title
+/teams/1 | @(/members/*::name)
+/teams/1/members/1::langs $| lower
+/teams/1/members/1::langs $| [$_ == (/^R/)]
+/teams/1 .T /members/*[::level = "staff"] | $$.T::name
+/teams/1 .T /members/* | ((T))::name
+/teams/1 .T /members/* | $.T
+/teams/1/members/1/(name || level)::
+/teams/1/members/1/(!langs)::
+/teams/1/members/1/(/^l/ && !langs)::
+/teams/1/members/1>*::name
+/teams/1/members/2>*::name @| count
+/teams/2>*::name
+/teams/1/members/1>2::name
+/teams/2/members/* | ::mentor ?? "-"
+/teams/2/members/* | %(::name; m = ::mentor ?? "none")
+/teams/1/members/1\
+/teams/2\::name
+/teams/1(/name|/members/*/name)::
+/teams/1/(name|members/*/name)::
+/teams/1(/name|/members/*/name)[:: *= "a"]::
+/teams/1/(name|/members/1/name)::
+/teams/1/(name|members)
+/teams/1/members/1/(name|level)::
+/teams/1/members/*::name | upper
+/teams/1/members/1 | json
+/teams/1/members/*::name __ upper
+/teams/2/members/2<<*::name
+/teams/3<<!*::name
+/teams/1/members/2<*::name
+/teams/2<*::name
+/teams/1/members/1::name
+/teams/1/members/1::langs
+/teams/1/members/1/"langs"/*::
+/teams/1/members/1 | %(::name) | ::level
+/teams/1/members/1 | %(a = ::name; b = ::level) | .% | %.
+/teams/1/members/1 | .(::name) | .%(::name; l = ::level) | $.
+/teams/1/members/1 | %(::name; lvl = ::level)
+/teams/1/members/1 | .n(::name) | %%(u = (::name | upper))
+/teams/1/members/1 .M /../.. | %($$.M; team = ::name)
+/teams/1 | %(/members/*)
+/teams/1/(/^m/)/*::name
+^/teams/1::name
+/teams/*/members/*[::level = ^/teams/1/members/1::level]::name
+/teams/1/members/1::langs | ...
+/teams/1/members/*::mentor | ... @| count
+/teams/1/members/*::mentor | ...? @| count
+/teams/1/members/1/langs/1::
+/teams/1/members/*::name | %(w = $_; n = cc)
+/teams/2/members/*[(::mentor ?? "-") = "-"]::name
+/teams/1/members/1::name | s/a/A/g
+/teams/1/members/1::name | s/(a)(d)/$2$1/
+/teams/1/members/1::name | s/A/x/i
+/teams/1/members/1::name | $_ ++ "!"
+/teams/1/members/1/*<string || array>
+/teams/1/members/1/*<string && scalar>
+/teams/1/members/1/*<(string || array) && !scalar>
+/teams/1/members/1/*<string>
+/teams/1/members/1/<array>
+/teams/1/members/1/*:traits
+/teams/1/members/1/*[:kind = "array"]
+/teams/1/members/1/*<*> @| count
+/teams/1/members/1 | .(::name) | .(::level) | $.
+/teams/1/members/1 | .(::name) | .(::level) | $..
+/teams/1/members/1 | .(::name) | .(::level) | $.1
+/teams/1/members/1 | .n(::name) | .(::level) | (.n)
+/teams/1/members/1 | "${::name}"
+/teams/1/members/1 | '${::name}'
+/airports/LJU(->*){max:;2_h}[::code = "MAD"] | %(steps = $-:steps; longest = $-:total)
+/airports/LJU(->* .(::code)){;1000_EUR}{;15_h}[::code = "SIN"]? | %(route = (@. | join(" > ")); costs = $-:costs)
+/airports/LJU(->* .(::code)){;1000_EUR}?{;15_h}[::code = "SIN"]? | %(route = (@. | join(" > ")); costs = $-:costs)

@@ -2587,6 +2587,10 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
     {
         if let Some(plan) = pushdown_plan(cli, query, Some(quarb_sql::Dialect::Mssql), Door::PLAIN)
         {
+            crosslinks_named(ctx, "the database", || {
+                let mut a = MssqlAdapter::connect(s).context("connecting to SQL Server")?;
+                Ok(a.hold_crosslinks(&ctx.crosslinks()))
+            })?;
             match quarb_mssql::raw_query(
                 s,
                 &plan.sql,
@@ -2611,7 +2615,9 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                 }
             }
         }
-        let adapter = match partial_plan_with(cli, query, Some(quarb_sql::Dialect::Mssql), true) {
+        let adapter = match partial_plan_with(cli, query, Some(quarb_sql::Dialect::Mssql), true)
+            .filter(|pl| !columns_compared_unchecked("prefilter", &pl.column_types))
+        {
             Some(pl) => {
                 let a = MssqlAdapter::connect_filtered(s, &pl.table, &pl.where_sql)
                     .context("connecting to SQL Server")?;
@@ -2652,6 +2658,10 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
     {
         if let Some(plan) = pushdown_plan(cli, query, Some(quarb_sql::Dialect::Oracle), Door::PLAIN)
         {
+            crosslinks_named(ctx, "the database", || {
+                let mut a = OracleAdapter::connect(s).context("connecting to Oracle")?;
+                Ok(a.hold_crosslinks(&ctx.crosslinks()))
+            })?;
             match quarb_oracle::raw_query(
                 s,
                 &plan.sql,
@@ -2676,7 +2686,9 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                 }
             }
         }
-        let adapter = match partial_plan_with(cli, query, Some(quarb_sql::Dialect::Oracle), true) {
+        let adapter = match partial_plan_with(cli, query, Some(quarb_sql::Dialect::Oracle), true)
+            .filter(|pl| !columns_compared_unchecked("prefilter", &pl.column_types))
+        {
             Some(pl) => {
                 let a = OracleAdapter::connect_filtered(s, &pl.table, &pl.where_sql)
                     .context("connecting to Oracle")?;
@@ -2716,6 +2728,10 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
         && s.starts_with("bigquery://")
     {
         if let Some(plan) = pushdown_plan(cli, query, None, Door::PLAIN) {
+            crosslinks_named(ctx, "the database", || {
+                let mut a = BigqueryAdapter::connect(s).context("connecting to BigQuery")?;
+                Ok(a.hold_crosslinks(&ctx.crosslinks()))
+            })?;
             match quarb_bigquery::raw_query(
                 s,
                 &plan.sql,
@@ -2785,6 +2801,10 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
         && s.starts_with("athena:")
     {
         if let Some(plan) = pushdown_plan(cli, query, None, Door::PLAIN) {
+            crosslinks_named(ctx, "the database", || {
+                let mut a = AthenaAdapter::connect(s).context("connecting to Athena")?;
+                Ok(a.hold_crosslinks(&ctx.crosslinks()))
+            })?;
             match quarb_athena::raw_query(
                 s,
                 &plan.sql,
@@ -2865,6 +2885,10 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                 },
             )
         {
+            crosslinks_named(ctx, "the database", || {
+                let mut a = MysqlAdapter::connect(s).context("connecting to MySQL")?;
+                Ok(a.hold_crosslinks(&ctx.crosslinks()))
+            })?;
             match quarb_mysql::raw_query(
                 s,
                 &plan.sql,
@@ -2938,19 +2962,33 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
     if let Some(s) = path.as_ref().and_then(|p| p.to_str())
         && is_pg_config(s)
     {
-        if let Some(plan) =
-            pushdown_plan(cli, query, Some(quarb_sql::Dialect::Postgres), Door::KEYED).filter(
-                |plan| {
-                    keyed_column_holds(cli, plan, || {
-                        let tables: Vec<&str> = plan.tables.iter().map(String::as_str).collect();
-                        Ok(quarb_postgres::column_catalog(s, &tables)?)
-                    })
+        if let Some(plan) = pushdown_plan(
+            cli,
+            query,
+            Some(quarb_sql::Dialect::Postgres),
+            Door::CHECKED,
+        )
+        .filter(|plan| {
+            column_types_hold(
+                cli,
+                "query",
+                &plan.column_types,
+                plan.keyed_by.as_ref(),
+                || {
+                    let tables: Vec<&str> = plan.tables.iter().map(String::as_str).collect();
+                    Ok(quarb_postgres::column_catalog(s, &tables)?)
                 },
             )
-        {
+        }) {
+            crosslinks_named(ctx, "the database", || {
+                let mut a = PostgresAdapter::connect(s).context("connecting to PostgreSQL")?;
+                Ok(a.hold_crosslinks(&ctx.crosslinks()))
+            })?;
+            let sql =
+                with_ordered_sums(&plan, |sums| quarb_postgres::float_sum_forms(s, sums).ok());
             match quarb_postgres::raw_query(
                 s,
-                &plan.sql,
+                &sql,
                 &plan_order(&plan),
                 plan.join_left
                     .as_ref()
@@ -2976,7 +3014,11 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
             }
         }
         let adapter = match partial_plan_with(cli, query, Some(quarb_sql::Dialect::Postgres), true)
-        {
+            .filter(|pl| {
+                column_types_hold(cli, "prefilter", &pl.column_types, None, || {
+                    Ok(quarb_postgres::column_catalog(s, &[pl.table.as_str()])?)
+                })
+            }) {
             Some(pl) => {
                 let a = PostgresAdapter::connect_filtered(s, &pl.table, &pl.where_sql)
                     .context("connecting to PostgreSQL")?;
@@ -3017,15 +3059,26 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("duckdb") || e.eq_ignore_ascii_case("ddb"))
     {
-        if let Some(plan) = pushdown_plan(cli, query, None, Door::KEYED).filter(|plan| {
-            keyed_column_holds(cli, plan, || {
-                let tables: Vec<&str> = plan.tables.iter().map(String::as_str).collect();
-                Ok(quarb_duckdb::column_catalog(p, &tables)?)
-            })
+        if let Some(plan) = pushdown_plan(cli, query, None, Door::CHECKED).filter(|plan| {
+            column_types_hold(
+                cli,
+                "query",
+                &plan.column_types,
+                plan.keyed_by.as_ref(),
+                || {
+                    let tables: Vec<&str> = plan.tables.iter().map(String::as_str).collect();
+                    Ok(quarb_duckdb::column_catalog(p, &tables)?)
+                },
+            )
         }) {
+            crosslinks_named(ctx, &p.display().to_string(), || {
+                let mut a = DuckdbAdapter::open(p).context("opening DuckDB database")?;
+                Ok(a.hold_crosslinks(&ctx.crosslinks()))
+            })?;
+            let sql = with_ordered_sums(&plan, |sums| quarb_duckdb::float_sum_forms(p, sums).ok());
             match quarb_duckdb::raw_query(
                 p,
-                &plan.sql,
+                &sql,
                 &plan_order(&plan),
                 plan.join_left
                     .as_ref()
@@ -3050,7 +3103,33 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                 }
             }
         }
-        let mut adapter = DuckdbAdapter::open(p).context("opening DuckDB database")?;
+        // The leading conditions the database can take go ahead of
+        // the scan, as on the other doors (0.71: this door opened
+        // the file whole). No dialect: the conditions are the
+        // portable ones, and a regex narrows by `strpos`.
+        let adapter = match partial_plan_with(cli, query, None, true).filter(|pl| {
+            column_types_hold(cli, "prefilter", &pl.column_types, None, || {
+                Ok(quarb_duckdb::column_catalog(p, &[pl.table.as_str()])?)
+            })
+        }) {
+            Some(pl) => {
+                let a = DuckdbAdapter::open_filtered(p, &pl.table, &pl.where_sql)
+                    .context("opening DuckDB database")?;
+                match a.prefetch(&pl.table) {
+                    Ok(()) => a,
+                    Err(e) => {
+                        note_info(
+                            quarb::diagnostic::STATEMENT_NOT_PUSHED,
+                            "prefilter",
+                            format!("the prefilter was rejected ({e}); scanning"),
+                        );
+                        DuckdbAdapter::open(p).context("opening DuckDB database")?
+                    }
+                }
+            }
+            None => DuckdbAdapter::open(p).context("opening DuckDB database")?,
+        };
+        let mut adapter = adapter;
         adapter
             .hold_crosslinks(&ctx.crosslinks())
             .map_err(|e| anyhow::anyhow!("{}: {e}", p.display()))?;
@@ -3088,6 +3167,11 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                 },
             )
         {
+            crosslinks_named(ctx, &p.display().to_string(), || {
+                let mut a = SqliteAdapter::open_with_refs(p, &relational_refs(&cli.refs)?)
+                    .context("opening SQLite database")?;
+                Ok(a.hold_crosslinks(&ctx.crosslinks()))
+            })?;
             match quarb_sqlite::raw_query(
                 p,
                 &plan.sql,
@@ -3402,7 +3486,10 @@ fn partial_plan(
     query: &str,
     dialect: Option<quarb_sql::Dialect>,
 ) -> Option<quarb_sql::Partial> {
+    // (BigQuery's and Athena's doors: no catalog is asked, so a
+    // partial plan that compares two columns is not used)
     partial_plan_with(cli, query, dialect, false)
+        .filter(|pl| !columns_compared_unchecked("prefilter", &pl.column_types))
 }
 
 /// Whether a plan's column-type assumptions hold in the driver's
@@ -3418,7 +3505,7 @@ fn column_types_hold(
     site: &str,
     types: &quarb_sql::ColumnTypes,
     keyed_by: Option<&(quarb_sql::Refusal, String)>,
-    catalog: impl FnOnce() -> anyhow::Result<Vec<(String, bool, bool)>>,
+    catalog: impl FnOnce() -> anyhow::Result<Vec<quarb_sql::ColumnFact>>,
 ) -> bool {
     if types.is_empty() {
         return true;
@@ -3467,40 +3554,95 @@ fn column_types_hold(
                     note_info(code, site, format!("{reason}; scanning"));
                 }
             }
-            None => note_info(
-                quarb::diagnostic::TYPE_NOT_PUSHED,
-                site,
-                format!(
-                    "the comparison or reducer on {} would follow the column's type where \
-                     the scan follows the value; scanning",
-                    unmet.join(", ")
-                ),
-            ),
+            None => {
+                // named by what the query holds: a column no
+                // computation and no reducer assumed was compared
+                let among = |list: &[String]| unmet.iter().any(|c| list.contains(c));
+                let (computed, reduced) = (among(&types.computed), among(&types.reduced));
+                let compared = unmet
+                    .iter()
+                    .any(|c| !types.computed.contains(c) && !types.reduced.contains(c));
+                let mut words: Vec<&str> = Vec::new();
+                if compared || !(computed || reduced) {
+                    words.push("comparison");
+                }
+                if computed {
+                    words.push("computation");
+                }
+                if reduced {
+                    words.push("reducer");
+                }
+                let constructs = match words.as_slice() {
+                    [a] => a.to_string(),
+                    [a, b] => format!("{a} or {b}"),
+                    _ => "comparison, computation or reducer".to_string(),
+                };
+                note_info(
+                    quarb::diagnostic::TYPE_NOT_PUSHED,
+                    site,
+                    format!(
+                        "the {constructs} on {} would follow the column's type where the \
+                         scan follows the value; scanning",
+                        unmet.join(", ")
+                    ),
+                )
+            }
         }
     }
     unmet.is_empty()
 }
 
-/// The catalog's word on the one column a plan sorts, folds or
-/// counts distinct by, for a strictly typed database: such a
-/// database refuses a mixed comparison itself, but it would run a
-/// sort or a GROUP BY over a text column by its own collation and
-/// grouping, so that column alone is held against the catalog. A
-/// plan with no such column needs no look.
+/// A mount's `crosslinks=` names references by their labels, and a
+/// label no reference carries is refused where the adapter holds
+/// them. A query pushed whole opens no adapter, so its labels were
+/// not looked at and a misspelled one passed in silence
+/// (`shop.db?crosslinks=ordr` with a count answered the count).
+/// Where the option is given and a whole plan is about to answer,
+/// the labels are held against the catalog first: `hold` opens the
+/// source and holds them, and its refusal ends the run as the
+/// scan's would.
 #[cfg(feature = "adapters")]
-fn keyed_column_holds(
-    cli: &Cli,
-    plan: &quarb_sql::Pushdown,
-    catalog: impl FnOnce() -> anyhow::Result<Vec<(String, bool, bool)>>,
-) -> bool {
-    let Some((_, column)) = &plan.keyed_by else {
-        return true;
-    };
-    let types = quarb_sql::ColumnTypes {
-        numeric: vec![column.clone()],
-        ..Default::default()
-    };
-    column_types_hold(cli, "query", &types, plan.keyed_by.as_ref(), catalog)
+fn crosslinks_named(
+    ctx: &SourceCtx,
+    shown: &str,
+    hold: impl FnOnce() -> anyhow::Result<Result<(), String>>,
+) -> anyhow::Result<()> {
+    if ctx.crosslinks().is_empty() {
+        return Ok(());
+    }
+    hold()?.map_err(|e| anyhow::anyhow!("{shown}: {e}"))
+}
+
+/// Whether a plan compares two columns for a source whose catalog is
+/// not asked, and so cannot be used; told once, under
+/// TYPE_NOT_PUSHED. The engine compares two values by what they
+/// read as and SQL by their types, which agree where both columns
+/// are numeric: a typed database runs two text columns against each
+/// other without complaint, so nothing but the catalog can say.
+#[cfg(feature = "adapters")]
+fn columns_compared_unchecked(site: &str, types: &quarb_sql::ColumnTypes) -> bool {
+    if !types.columns_compared {
+        return false;
+    }
+    if site == "prefilter" {
+        NOTES.with(|n| {
+            let mut n = n.borrow_mut();
+            if n.last()
+                .is_some_and(|d| d.code == PUSHED && d.site == "prefilter")
+            {
+                n.pop();
+            }
+        });
+    }
+    note_info(
+        quarb::diagnostic::TYPE_NOT_PUSHED,
+        site,
+        "a comparison of two columns is pushed where both are numeric, and this source's \
+         column types are not checked before a plan runs (SQLite's, MySQL's, PostgreSQL's \
+         and DuckDB's are); scanning"
+            .to_string(),
+    );
+    true
 }
 
 /// [`partial_plan`]; `keyed_hops` for an adapter that reads steps by
@@ -3610,16 +3752,10 @@ struct Door {
 
 #[cfg(feature = "adapters")]
 impl Door {
-    /// SQLite and MySQL: the order composed, the types checked.
+    /// SQLite, MySQL, PostgreSQL and DuckDB: the order composed,
+    /// and every assumption a plan makes of a column's type held
+    /// against the catalog before it runs ([`column_types_hold`]).
     const CHECKED: Door = Door {
-        orders: true,
-        catalog: true,
-    };
-    /// DuckDB and PostgreSQL: the order composed, and the catalog
-    /// asked of the one column a sort, a fold or a distinct count goes
-    /// by ([`keyed_column_holds`]); a mixed comparison is the
-    /// database's own to refuse, as before.
-    const KEYED: Door = Door {
         orders: true,
         catalog: true,
     };
@@ -3631,11 +3767,47 @@ impl Door {
 }
 
 /// The order a plan owes, as its driver takes it.
+/// A plan's statement with its float sums in the source's ordered
+/// form (`quarb_sql::FloatSum`): the door's driver says the form
+/// for each sum, from its catalog, or nothing for a sum that stays
+/// as written. A catalog that cannot be asked leaves the plan as it
+/// is.
+#[cfg(feature = "adapters")]
+fn with_ordered_sums(
+    plan: &quarb_sql::Pushdown,
+    forms: impl FnOnce(&[quarb_relational::FloatSum<'_>]) -> Option<Vec<Option<String>>>,
+) -> String {
+    if plan.sums.is_empty() {
+        return plan.sql.clone();
+    }
+    let asked: Vec<quarb_relational::FloatSum<'_>> = plan
+        .sums
+        .iter()
+        .map(|s| quarb_relational::FloatSum {
+            mean: s.mean,
+            table: &s.table,
+            column: &s.column,
+            column_sql: &s.column_sql,
+        })
+        .collect();
+    let Some(forms) = forms(&asked) else {
+        return plan.sql.clone();
+    };
+    let mut sql = plan.sql.clone();
+    for (s, form) in plan.sums.iter().zip(forms) {
+        if let Some(form) = form {
+            sql = sql.replace(&s.text, &form);
+        }
+    }
+    sql
+}
+
 #[cfg(feature = "adapters")]
 fn plan_order(plan: &quarb_sql::Pushdown) -> quarb_relational::PlanOrder<'_> {
     quarb_relational::PlanOrder {
         table: plan.order_table.as_deref(),
         then: plan.order_then.as_deref(),
+        then_as: plan.order_then_as.as_deref(),
         first: plan.order_first.as_deref(),
         desc: plan.order_desc,
         groups: plan.order_groups,
@@ -3727,6 +3899,9 @@ fn pushdown_plan(
             // plan and answer another order or other groups: the
             // catalog must confirm the type first, and a source whose
             // catalog is not asked scans.
+            if !door.catalog && columns_compared_unchecked("query", &plan.column_types) {
+                return None;
+            }
             if plan.keyed_by.is_some() && !door.catalog {
                 note_info(
                     quarb::diagnostic::TYPE_NOT_PUSHED,

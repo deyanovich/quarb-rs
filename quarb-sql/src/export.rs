@@ -56,6 +56,8 @@ pub fn export(quarb: &str) -> Result<Translation, SqlError> {
         keyed_hops: false,
         from_marks: Vec::new(),
         join_marks: Vec::new(),
+        join_alias: None,
+        sums: Vec::new(),
     };
     let query = ex.query()?;
     Ok(Translation {
@@ -106,8 +108,31 @@ fn refuse_marker(quarb: &str) -> Result<(), SqlError> {
 /// the rows (`None` for a single aggregate row, where order is
 /// moot). The driver appends the `ORDER BY`, since the key lives in
 /// its catalog.
+/// A sum or a mean over a column, as a plan's statement writes it
+/// (`text`: `SUM(unit_price)`). The engine adds a float column by
+/// the careful sum, in key order; SQLite adds the same way, and its
+/// SUM is the engine's to the last digit. PostgreSQL and DuckDB add
+/// plainly and across workers, in no fixed order, so a float sum
+/// there moves in its last digits from one run to the next: their
+/// doors ask the catalog whether the column is a float and rewrite
+/// the sum in the dialect's ordered form (`sum(x ORDER BY key)`),
+/// which is the same number every run. The plan says which sums it
+/// holds; the door does the rest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FloatSum {
+    pub text: String,
+    pub mean: bool,
+    pub table: String,
+    pub column: String,
+    pub column_sql: String,
+}
+
 pub struct Pushdown {
     pub sql: String,
+    /// The plan's sums and means over a column, for a source that
+    /// adds floats in its own order: see [`FloatSum`]. Empty for a
+    /// plan that joins.
+    pub sums: Vec<FloatSum>,
     pub order_table: Option<String>,
     /// Present when the plan contains a witness JOIN: the joined
     /// table and the columns its ON equalities bind on it
@@ -128,6 +153,10 @@ pub struct Pushdown {
     /// after the driver's (`order_table`'s key, then this table's).
     /// A driver that cannot order by both must decline the plan.
     pub order_then: Option<String>,
+    /// The name that second table bears in the statement where it
+    /// is not its own: a table joined to itself is aliased, and the
+    /// driver writes its key under the alias.
+    pub order_then_as: Option<String>,
     /// The plan's own sort, in SQL, where it has one: `(n IS NULL),
     /// n` for `sort_by(::n)`, a null key last as the engine puts it.
     /// The driver writes it before the keys, which keep the ties in
@@ -200,7 +229,36 @@ pub struct ColumnTypes {
     /// [`is_empty`]: Self::is_empty
     /// [`unmet`]: Self::unmet
     pub json_children: bool,
+    /// Whether the plan compares two values of the row with each
+    /// other (`[::a = ::b]`, a join's key equality, a column against
+    /// an arithmetic): the engine compares them by value, SQL by
+    /// their types, and the two agree only where every column
+    /// compared is numeric. The columns are among [`numeric`]; this
+    /// says that no typed engine enforces the assumption by itself
+    /// (two text columns compare without complaint, as texts), so a
+    /// source whose catalog is not asked does not get the plan.
+    ///
+    /// [`numeric`]: Self::numeric
+    pub columns_compared: bool,
+    /// The columns among [`numeric`] that a computation assumed
+    /// (`::a + 1`), and those a reducer assumed (`::a @| sum`): what
+    /// a front end names when it tells an assumption the catalog did
+    /// not bear out. A column in neither was assumed by a
+    /// comparison.
+    ///
+    /// [`numeric`]: Self::numeric
+    pub computed: Vec<String>,
+    pub reduced: Vec<String>,
 }
+
+/// One column of a source's catalog, as a plan's assumptions are
+/// held against it: its name; whether its type is numeric; whether
+/// it is declared json; and whether the database compares its text
+/// exactly, by characters, case and trailing spaces included (false
+/// for a `char(n)` of PostgreSQL, which ignores the padding it
+/// answers with, and for a column of SQLite declared under a
+/// collation).
+pub type ColumnFact = (String, bool, bool, bool);
 
 impl ColumnTypes {
     pub fn is_empty(&self) -> bool {
@@ -208,30 +266,28 @@ impl ColumnTypes {
     }
 
     /// The assumptions a catalog does not bear out: the columns
-    /// compared with a number that are not numeric-typed, and those
-    /// compared with text that are. `catalog` lists every column of
-    /// the tables read, with whether its type is numeric and
-    /// whether it is declared json; names meet without regard to
-    /// case. A column the catalog does not list is unknown, and
-    /// counts as unmet.
-    pub fn unmet(&self, catalog: &[(String, bool, bool)]) -> Vec<String> {
-        let met = |column: &str, pick: fn(&(String, bool, bool)) -> bool, want: bool| {
+    /// compared with a number (or with each other, or computed
+    /// with) that are not numeric-typed, and those compared with
+    /// text that are, or whose text the database does not compare
+    /// exactly. `catalog` lists every column of the tables read
+    /// ([`ColumnFact`]); names meet without regard to case. A column
+    /// the catalog does not list is unknown, and counts as unmet.
+    pub fn unmet(&self, catalog: &[ColumnFact]) -> Vec<String> {
+        let met = |column: &str, pick: fn(&ColumnFact) -> bool, want: bool| {
             let mut found = catalog
                 .iter()
                 .filter(|(name, ..)| name.eq_ignore_ascii_case(column))
                 .peekable();
             found.peek().is_some() && found.all(|entry| pick(entry) == want)
         };
-        let numeric = |e: &(String, bool, bool)| e.1;
-        let json = |e: &(String, bool, bool)| e.2;
+        let numeric = |e: &ColumnFact| e.1;
+        let json = |e: &ColumnFact| e.2;
+        // a text comparison: no number, and compared exactly
+        let exact_text = |e: &ColumnFact| !e.1 && e.3;
         let mut out: Vec<String> = Vec::new();
         for (columns, pick, want) in [
-            (
-                &self.numeric,
-                numeric as fn(&(String, bool, bool)) -> bool,
-                true,
-            ),
-            (&self.text, numeric, false),
+            (&self.numeric, numeric as fn(&ColumnFact) -> bool, true),
+            (&self.text, exact_text, true),
             (&self.json, json, true),
         ] {
             for c in columns {
@@ -295,6 +351,8 @@ pub fn pushdown_explained(quarb: &str, dialect: Option<Dialect>) -> Result<Pushd
         keyed_hops: false,
         from_marks: Vec::new(),
         join_marks: Vec::new(),
+        join_alias: None,
+        sums: Vec::new(),
     };
     let sql = ex.query()?;
     let order_table = if ex.aggregate && !ex.order.groups {
@@ -329,10 +387,28 @@ pub fn pushdown_explained(quarb: &str, dialect: Option<Dialect>) -> Result<Pushd
         };
         format!("({e} IS NULL){nulls}, {e}{dir}")
     });
+    // a sum's column is looked up in the one table of a plan that
+    // joins nothing
+    let sums = match tables.as_slice() {
+        [table] if join_left.is_none() && order_then.is_none() => ex
+            .sums
+            .iter()
+            .map(|(mean, column, column_sql)| FloatSum {
+                text: format!("{}({column_sql})", if *mean { "AVG" } else { "SUM" }),
+                mean: *mean,
+                table: table.clone(),
+                column: column.clone(),
+                column_sql: column_sql.clone(),
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
     Ok(Pushdown {
         sql,
+        sums,
         order_table,
         join_left,
+        order_then_as: order_then.as_ref().and(ex.join_alias.clone()),
         order_then,
         order_first,
         order_desc: ex.order.reversed,
@@ -462,13 +538,21 @@ pub(crate) fn required_literals(pattern: &str) -> Vec<String> {
     out
 }
 
-/// "`l` holds `lit`", by bytes and case, where the dialect says
-/// exactly that: SQLite's `instr`, and PostgreSQL's `LIKE`, which
-/// is case-sensitive there and reads a `char(n)` value with its
-/// padding, as the engine does. `None` elsewhere, and for a literal
-/// a SQL string would not carry as written on every server (a
-/// quote, a backslash, a control character).
-fn contains_sql(dialect: Dialect, l: &str, lit: &str) -> Option<String> {
+/// "`l` holds `lit`", as a filter that keeps every row whose text
+/// holds the literal by bytes and case, and may keep more (the
+/// engine runs the regex over what is fetched):
+/// - SQLite's `instr` is exactly that test;
+/// - PostgreSQL's `LIKE` is case-sensitive there;
+/// - MySQL's `instr` follows the column's collation, which folds
+///   case and accents by default: it keeps every text that holds
+///   the literal exactly, and some that hold it in another case;
+/// - under no dialect (the doors of DuckDB, BigQuery and Athena)
+///   `strpos`, which the three have, by characters and case.
+///
+/// `None` for SQL Server and Oracle, and for a literal a SQL string
+/// would not carry as written on every server (a quote, a
+/// backslash, a control character).
+fn contains_sql(dialect: Option<Dialect>, l: &str, lit: &str) -> Option<String> {
     if lit
         .chars()
         .any(|c| c.is_control() || c == '\\' || c == '\'')
@@ -476,12 +560,13 @@ fn contains_sql(dialect: Dialect, l: &str, lit: &str) -> Option<String> {
         return None;
     }
     match dialect {
-        Dialect::Sqlite => Some(format!("instr({l}, '{lit}') > 0")),
-        Dialect::Postgres => {
+        Some(Dialect::Sqlite | Dialect::MySql) => Some(format!("instr({l}, '{lit}') > 0")),
+        Some(Dialect::Postgres) => {
             let pat = lit.replace('%', "\\%").replace('_', "\\_");
             Some(format!("{l} LIKE '%{pat}%' ESCAPE '\\'"))
         }
-        _ => None,
+        None => Some(format!("strpos({l}, '{lit}') > 0")),
+        Some(Dialect::Mssql | Dialect::Oracle) => None,
     }
 }
 
@@ -697,6 +782,8 @@ fn partial_pushdown_with(
         keyed_hops,
         from_marks: Vec::new(),
         join_marks: Vec::new(),
+        join_alias: None,
+        sums: Vec::new(),
     };
     ex.partial()
 }
@@ -776,6 +863,13 @@ struct Exporter {
     /// column, `$$.al::col` the joined table's.
     from_marks: Vec<String>,
     join_marks: Vec<String>,
+    /// The joined table's name in the statement where it is not its
+    /// own: the alias of a table joined to itself.
+    join_alias: Option<String>,
+    /// The sums and means over a column the plan writes: the mean
+    /// flag, the column's name, the column as the statement writes
+    /// it. See [`FloatSum`].
+    sums: Vec<(bool, String, String)>,
 }
 
 impl Exporter {
@@ -959,7 +1053,9 @@ impl Exporter {
     /// numeric-looking strings numerically; and Str-to-Str
     /// ordering is bytewise.
     fn prefilter_expr(&mut self, e: NodeId) -> Option<String> {
-        let dialect = self.dialect?;
+        // (the JSON forms are a dialect's; a conjunction, a
+        // disjunction and a regex's literals need none)
+        let dialect = self.dialect;
         match self.kind(e).as_str() {
             // A bare truthy path: existence (with `::`, value
             // truthiness — existence is its superset). The type
@@ -969,6 +1065,7 @@ impl Exporter {
                 // scalar and on a list with an item: the key is
                 // present either way, so existence is its superset
                 // too.
+                let dialect = dialect?;
                 let (col, path) = self
                     .json_path_loose(e)
                     .or_else(|| self.json_property_path(e))?;
@@ -1013,6 +1110,7 @@ impl Exporter {
                 if op == "==" {
                     return self.regex_prefilter(dialect, &kids);
                 }
+                let dialect = dialect?;
                 for (pi, li) in [(0usize, 1usize), (1, 0)] {
                     let Some((col, path)) = self.json_path(kids[pi]) else {
                         continue;
@@ -1052,6 +1150,28 @@ impl Exporter {
                     self.note_json_column(kids[pi], &col);
                     return self.json_property_prefilter(dialect, &col, &path, &op, &ty, &raw);
                 }
+                // SQL Server: a text column equal to a text literal.
+                // The whole plan leaves the comparison to the engine
+                // there (the collation folds case, accents and
+                // trailing spaces), but what the collation calls
+                // equal holds every row the engine calls equal: a
+                // superset, which the engine checks again. A literal
+                // that reads as a number is left out: the engine
+                // meets it with '1.0' and '01' too.
+                if dialect == Dialect::Mssql && op == "=" {
+                    for (ci, li) in [(0usize, 1usize), (1, 0)] {
+                        let plain = self.column_operand(kids[ci]).is_some()
+                            && self.is_text_literal(kids[li])
+                            && self.prop(kids[li], "value").is_some_and(|v| {
+                                Value::Str(v.to_string()).numeric_reading().is_none()
+                            });
+                        if plain {
+                            let l = self.operand(kids[ci], None).ok()?;
+                            let r = self.operand(kids[li], None).ok()?;
+                            return Some(format!("{l} = {r}"));
+                        }
+                    }
+                }
                 None
             }
             _ => None,
@@ -1066,7 +1186,7 @@ impl Exporter {
     /// regex. The column is recorded as a text one, for the caller's
     /// catalog check: a number would be searched in the database's
     /// rendering of it, not the engine's.
-    fn regex_prefilter(&mut self, dialect: Dialect, kids: &[NodeId]) -> Option<String> {
+    fn regex_prefilter(&mut self, dialect: Option<Dialect>, kids: &[NodeId]) -> Option<String> {
         if !self.is_text_literal(kids[1]) {
             return None;
         }
@@ -1394,7 +1514,27 @@ impl Exporter {
             // or quoted); the raw names stay in the plan metadata,
             // which the driver matches against its catalog.
             let lsql = self.sql_ident(&ltable, "table name")?;
-            let rsql = self.sql_ident(&rtable, "table name")?;
+            let rtable_sql = self.sql_ident(&rtable, "table name")?;
+            // A table joined to itself stands in the statement
+            // twice, and one of the two needs a name of its own:
+            // the joined side is aliased, and everything said of it
+            // (the ON, the witness's columns, the second key of the
+            // order) is said under the alias. (It was written under
+            // the one name, `FROM employees JOIN employees ON
+            // employees.manager_id = employees.id`, which every
+            // database rejects as ambiguous: such a query always
+            // fell back to the scan.)
+            self.join_alias = (ltable == rtable).then(|| {
+                if is_plain_ident(&rtable) {
+                    format!("{rtable}_2")
+                } else {
+                    "joined_2".to_string()
+                }
+            });
+            let rsql = self
+                .join_alias
+                .clone()
+                .unwrap_or_else(|| rtable_sql.clone());
             self.from_sql = lsql.clone();
             self.join_sql = Some(rsql.clone());
             // The driver's own predicates are plain WHERE.
@@ -1440,7 +1580,12 @@ impl Exporter {
             sel.from = lsql.clone();
             self.from_table = ltable;
             self.join_table = Some(rtable);
-            sel.join = Some((rsql.clone(), on.join(" AND ")));
+            // (no AS: Oracle takes a table alias without the word)
+            let joined = match &self.join_alias {
+                Some(alias) => format!("{rtable_sql} {alias}"),
+                None => rtable_sql.clone(),
+            };
+            sel.join = Some((joined, on.join(" AND ")));
             sel.wheres = wheres;
             // A terminal projection on the driving branch is a
             // one-column select of the FROM table.
@@ -1612,6 +1757,43 @@ impl Exporter {
         Ok(parts.join(" AND "))
     }
 
+    /// A condition beneath a negation inside a join's bracket, in
+    /// SQL whose three truth values are the engine's there. The
+    /// engine reads a key comparison (one that reads the other side
+    /// of the join) as unknown for a null on either side and every
+    /// other test as true or false; unknown passes through `!`,
+    /// yields to a true under `||` and to a false under `&&`, and
+    /// only a true admits the candidate. SQL's AND, OR and NOT keep
+    /// the same table over TRUE, FALSE and UNKNOWN, and its
+    /// comparison is unknown for a NULL as the key comparison is. So
+    /// a key comparison is written as it stands, AND / OR / NOT as
+    /// themselves, and every other test is made two-valued (`CASE
+    /// WHEN … THEN 1 ELSE 0 END = 1`), since a NOT above it would
+    /// otherwise keep SQL's UNKNOWN where the engine has a plain
+    /// false to turn.
+    fn join_cond3(&mut self, e: NodeId, qual: Option<&str>) -> Result<String, SqlError> {
+        let kids = |ex: &mut Self, e: NodeId| -> Result<Vec<String>, SqlError> {
+            ex.arbor
+                .children(e)
+                .into_iter()
+                .map(|c| ex.join_cond3(c, qual))
+                .collect()
+        };
+        match self.kind(e).as_str() {
+            kind @ ("and" | "or") => {
+                let op = kind.to_uppercase();
+                Ok(format!("({})", kids(self, e)?.join(&format!(" {op} "))))
+            }
+            "not" => Ok(format!("NOT ({})", kids(self, e)?.join(" AND "))),
+            "parens" => Ok(format!("({})", kids(self, e)?.join(" AND "))),
+            "compare" if self.subtree_has_driver(e) => self.pred_expr(e, qual),
+            _ => Ok(format!(
+                "(CASE WHEN {} THEN 1 ELSE 0 END = 1)",
+                self.pred_expr(e, qual)?
+            )),
+        }
+    }
+
     fn pred_expr(&mut self, e: NodeId, qual: Option<&str>) -> Result<String, SqlError> {
         match self.kind(e).as_str() {
             "and" | "or" => {
@@ -1633,17 +1815,21 @@ impl Exporter {
                 // engine: the condition as a CASE, which takes
                 // UNKNOWN to its ELSE. Inside a join's bracket the
                 // engine's own logic is three-valued for the key
-                // comparisons and two-valued for the rest, which no
-                // one SQL form follows: there the negation stays
-                // with the engine.
-                if self.strict && self.in_on {
-                    return Err(mismatch(
-                        Refusal::Negation,
-                        "a negation inside a join condition (the engine leaves a key \
-                         comparison with a null unknown there, and reads the rest as \
-                         true or false)"
-                            .into(),
-                    ));
+                // comparisons and two-valued for the rest: a
+                // negation with no key comparison beneath it is the
+                // CASE form like any other, and one over a key
+                // comparison is written in SQL's own three values
+                // ([`join_cond3`]). (0.70 left both to the engine.)
+                //
+                // [`join_cond3`]: Self::join_cond3
+                if self.strict && self.in_on && self.subtree_has_driver(e) {
+                    let inner: Vec<String> = self
+                        .arbor
+                        .children(e)
+                        .into_iter()
+                        .map(|c| self.join_cond3(c, qual))
+                        .collect::<Result<_, _>>()?;
+                    return Ok(format!("NOT ({})", inner.join(" AND ")));
                 }
                 let inner: Vec<String> = self
                     .arbor
@@ -1877,6 +2063,39 @@ impl Exporter {
                 // regex is no value: its refusal below is the
                 // pattern's, whatever its text reads as.
                 if self.strict && !matches!(op.as_str(), "==" | "!==") {
+                    // Two values of the row compared with each other
+                    // (`[::a = ::b]`, a join's `::album_id =
+                    // $$0::id`, `[::n + 1 > ::m]`): the engine
+                    // compares by value, so two texts that read as
+                    // numbers compare as numbers ('1.0' equals '1',
+                    // '10' is above '9'), and SQL compares two text
+                    // columns as texts. The two agree where every
+                    // column compared is numeric: the catalog
+                    // decides. (They were pushed unchecked: over
+                    // text columns the plan answered other rows.)
+                    let value =
+                        |k: NodeId| matches!(self.kind(k).as_str(), "path" | "context" | "arith");
+                    if value(kids[0]) && value(kids[1]) {
+                        for k in [kids[0], kids[1]] {
+                            let column = self.column_operand(k);
+                            self.assume_numeric(column);
+                        }
+                        self.column_types.columns_compared = true;
+                    }
+                    // A text literal against anything but a plain
+                    // column: a computed value is a number or
+                    // nothing, and SQL orders a number below any
+                    // text where the engine says the two never meet.
+                    for (ci, li) in [(0usize, 1usize), (1, 0)] {
+                        if self.is_text_literal(kids[li]) && self.kind(kids[ci]) == "arith" {
+                            return Err(mismatch(
+                                Refusal::Type,
+                                "a text literal compared with a computed value (SQL orders a \
+                                 number below every text; to the engine the two never meet)"
+                                    .into(),
+                            ));
+                        }
+                    }
                     for (ci, li) in [(0usize, 1usize), (1, 0)] {
                         let Some(column) = self.column_operand(kids[ci]) else {
                             continue;
@@ -1945,6 +2164,12 @@ impl Exporter {
                                 .to_string(),
                         );
                     }
+                    // LIKE is the pattern's test over a column whose
+                    // text PostgreSQL compares as it stands (a
+                    // `char(n)` is read without its padding there, a
+                    // `citext` without its case): the catalog says
+                    let column = self.column_operand(kids[0]);
+                    self.assume_text(column);
                     let mut like = String::new();
                     for kid in self.arbor.children(kids[1]) {
                         match self.kind(kid).as_str() {
@@ -1978,6 +2203,65 @@ impl Exporter {
                     .collect();
                 let keyed = self.in_on
                     && (self.subtree_has_driver(kids[0]) || self.subtree_has_driver(kids[1]));
+                // A text column against a text literal. The engine
+                // compares two texts by their characters: case,
+                // accents and trailing spaces all tell, and an order
+                // is the order of their UTF-8 bytes. A database
+                // compares under the column's collation, and what
+                // that is differs by engine:
+                // - MySQL and MariaDB fold case and accents and pad
+                //   with spaces by default ('holst' met 'Holst',
+                //   'Holst ' and 'hölst'), so the comparison is
+                //   written over the UTF-8 bytes of both sides, with
+                //   the collation's own equality kept beside an `=`
+                //   for the index it can use;
+                // - PostgreSQL's `=` is exact under its deterministic
+                //   collations and its order is the collation's: an
+                //   order is written under "C", the order of bytes;
+                // - SQL Server folds case by default and no server
+                //   stood here to hold another form against: the
+                //   comparison stays with the engine there (an `=`
+                //   still narrows the fetch, through the partial
+                //   plan);
+                // - SQLite compares bytes unless the column is
+                //   declared under a collation, which its catalog
+                //   reports; DuckDB compares bytes.
+                let text_pair = self.strict
+                    && ((self.is_text_literal(kids[1]) && self.column_operand(kids[0]).is_some())
+                        || (self.is_text_literal(kids[0])
+                            && self.column_operand(kids[1]).is_some()));
+                if text_pair && matches!(op.as_str(), "=" | "!=" | "<" | "<=" | ">" | ">=") {
+                    match self.dialect {
+                        Some(Dialect::Mssql) => {
+                            return Err(mismatch(
+                                Refusal::Type,
+                                "a text comparison follows the database's collation on SQL \
+                                 Server (case, accents and trailing spaces), where the engine \
+                                 compares the characters"
+                                    .into(),
+                            ));
+                        }
+                        Some(Dialect::MySql) => {
+                            let bytes = |s: &str| format!("BINARY CONVERT({s} USING utf8mb4)");
+                            let (bl, br) = (bytes(&l), bytes(&r));
+                            return Ok(match op.as_str() {
+                                "=" => format!("({l} = {r} AND {bl} = {br})"),
+                                // (a join's key comparison stays
+                                // unknown for a null, as SQL's is)
+                                "!=" if keyed => format!("{bl} <> {br}"),
+                                "!=" => {
+                                    let column = nullable.first().copied().unwrap_or(l.as_str());
+                                    format!("({bl} <> {br} OR {column} IS NULL)")
+                                }
+                                order => format!("{bl} {order} {br}"),
+                            });
+                        }
+                        Some(Dialect::Postgres) if !matches!(op.as_str(), "=" | "!=") => {
+                            return Ok(format!("{l} {op} {r} COLLATE \"C\""));
+                        }
+                        _ => {}
+                    }
+                }
                 Ok(match op.as_str() {
                     // Two NULLs are equal in Quarb (`value_eq`), and
                     // SQL's `=` is UNKNOWN for them: an equality of
@@ -2266,6 +2550,79 @@ impl Exporter {
             "arith" => {
                 let op = self.prop_s(o, "op");
                 let kids = self.arbor.children(o);
+                // The engine computes with values: a text that reads
+                // as a number is one, any other text gives null. SQL
+                // computes by the column's type (SQLite reads 'abc'
+                // as 0, so `::a + 1 = 1` answered such rows). A
+                // column computed with is a numeric one, by the
+                // catalog; a text literal is not computed with.
+                if self.strict {
+                    for &k in &kids {
+                        if self.is_text_literal(k) {
+                            return Err(mismatch(
+                                Refusal::Type,
+                                "arithmetic with a text literal (the engine reads the number \
+                                 it spells; SQL's reading differs per engine)"
+                                    .into(),
+                            ));
+                        }
+                        let column = self.column_operand(k);
+                        if let Some(c) = &column
+                            && self.strict
+                            && !self.column_types.computed.contains(c)
+                        {
+                            self.column_types.computed.push(c.clone());
+                        }
+                        self.assume_numeric(column);
+                    }
+                }
+                // `div` is the true division: 7 div 2 is 3.5, and a
+                // division by zero answers inf or nan. SQL's `/`
+                // divides two integers as integers on most engines,
+                // and answers NULL or an error for a zero divisor.
+                // So the plan divides only by a number written in
+                // the query that is not zero, with the dividend
+                // read as a float. (It was pushed as the bare `/`:
+                // `::n div 4` answered 2 where the scan answers 2.5.)
+                if self.strict && op == "div" {
+                    let nonzero = self.kind(kids[1]) == "literal"
+                        && self
+                            .prop(kids[1], "value")
+                            .and_then(|v| Value::Str(v.to_string()).numeric_reading())
+                            .is_some_and(|n| {
+                                !matches!(n, Value::Int(0))
+                                    && !matches!(n, Value::Float(f) if f == 0.0)
+                            });
+                    if !nonzero {
+                        return Err(mismatch(
+                            Refusal::Operator,
+                            "'div' by anything but a number other than zero (for a zero \
+                             divisor the engine answers inf or nan, SQL no value or an error)"
+                                .into(),
+                        ));
+                    }
+                    let l = self.operand(kids[0], qual)?;
+                    let r = self.operand(kids[1], qual)?;
+                    let float = match self.dialect {
+                        Some(Dialect::Sqlite) => "REAL",
+                        Some(Dialect::Postgres) => "DOUBLE PRECISION",
+                        Some(Dialect::Mssql) => "FLOAT",
+                        Some(Dialect::Oracle) => "BINARY_DOUBLE",
+                        Some(Dialect::MySql) | None => "DOUBLE",
+                    };
+                    return Ok(format!("(CAST({l} AS {float}) / {r})"));
+                }
+                // `mod` keeps a fraction (9.5 mod 3 is 0.5) and
+                // answers nan for a zero divisor; SQL's `%` reads
+                // integers and answers NULL or an error.
+                if self.strict && op == "mod" {
+                    return Err(mismatch(
+                        Refusal::Operator,
+                        "'mod' (SQL's % reads its operands as integers, and answers no value \
+                         for a zero divisor)"
+                            .into(),
+                    ));
+                }
                 let l = self.operand(kids[0], qual)?;
                 let r = self.operand(kids[1], qual)?;
                 Ok(match op.as_str() {
@@ -2315,6 +2672,32 @@ impl Exporter {
     /// text column by its leading digits and orders it by
     /// collation. Recorded for the caller's catalog as a
     /// comparison's assumption is.
+    /// The column a reducer folds: assumed numeric, and noted where
+    /// the reducer is a sum or a mean over a column by its name
+    /// ([`FloatSum`]).
+    fn fold_column(
+        &mut self,
+        reducer: &str,
+        name: &mut Option<String>,
+        col: &mut Option<String>,
+    ) -> Option<String> {
+        let column = name.clone();
+        if let Some(c) = &column
+            && self.strict
+            && !self.column_types.reduced.contains(c)
+        {
+            self.column_types.reduced.push(c.clone());
+        }
+        self.assume_numeric(name.take());
+        let sql = col.take();
+        if let (true, Some(column), Some(sql)) =
+            (matches!(reducer, "sum" | "mean"), column, sql.as_ref())
+        {
+            self.sums.push((reducer == "mean", column, sql.clone()));
+        }
+        sql
+    }
+
     fn assume_numeric(&mut self, column: Option<String>) {
         if !self.strict {
             return;
@@ -2323,6 +2706,20 @@ impl Exporter {
             && !self.column_types.numeric.contains(&c)
         {
             self.column_types.numeric.push(c);
+        }
+    }
+
+    /// A column whose text the plan compares as the engine does
+    /// only where the database compares it exactly: recorded for the
+    /// caller's catalog, as a text literal's column is.
+    fn assume_text(&mut self, column: Option<String>) {
+        if !self.strict {
+            return;
+        }
+        if let Some(c) = column
+            && !self.column_types.text.contains(&c)
+        {
+            self.column_types.text.push(c);
         }
     }
 
@@ -2669,8 +3066,7 @@ impl Exporter {
                             let col = if name == "count" {
                                 pending_col.take().filter(|_| values)
                             } else {
-                                self.assume_numeric(pending_name.take());
-                                pending_col.take()
+                                self.fold_column(&name, &mut pending_name, &mut pending_col)
                             };
                             let agg = sql_agg(&name, col)?;
                             grouped = Some((key.clone(), agg.clone(), agg));
@@ -2845,8 +3241,7 @@ impl Exporter {
                         // COUNT(col); the bare count is every row
                         pending_col.take().filter(|_| values)
                     } else {
-                        self.assume_numeric(pending_name.take());
-                        pending_col.take()
+                        self.fold_column(&name, &mut pending_name, &mut pending_col)
                     };
                     let agg = sql_agg(&name, col)?;
                     grouped = Some((key, agg.clone(), agg));
@@ -2877,8 +3272,7 @@ impl Exporter {
                             let col = if name == "count" {
                                 pending_col.take().filter(|_| values)
                             } else {
-                                self.assume_numeric(pending_name.take());
-                                pending_col.take()
+                                self.fold_column(&name, &mut pending_name, &mut pending_col)
                             };
                             sel.select = vec![sql_agg(&name, col)?];
                             self.aggregate = true;
@@ -3609,8 +4003,24 @@ mod null_and_literal_tests {
         ] {
             assert_eq!(part(q, Dialect::Sqlite), None, "{q}");
         }
-        // no function says "holds, by bytes and case" on MySQL
-        assert_eq!(part("/t/*[::a == (/Ven/)]::b", Dialect::MySql), None);
+        // MySQL's instr follows the collation: it keeps every text
+        // that holds the literal, and some in another case (0.71)
+        assert_eq!(
+            part("/t/*[::a == (/Ven/)]::b", Dialect::MySql).map(|p| p.0),
+            Some("instr(a, 'Ven') > 0".to_string())
+        );
+        // under no dialect (DuckDB's, BigQuery's and Athena's doors)
+        assert_eq!(
+            partial_pushdown("/t/*[::a == (/^Ma.*s$/)]::b", None).map(|p| p.where_sql),
+            Some("strpos(a, 'Ma') > 0 AND strpos(a, 's') > 0".to_string())
+        );
+        assert_eq!(
+            partial_pushdown("/t/*[::n > 2 && ::a == (/on/)]::b", None).map(|p| p.where_sql),
+            Some("(n > 2 AND strpos(a, 'on') > 0)".to_string())
+        );
+        // SQL Server and Oracle: not narrowed
+        assert_eq!(part("/t/*[::a == (/Ven/)]::b", Dialect::Mssql), None);
+        assert_eq!(part("/t/*[::a == (/Ven/)]::b", Dialect::Oracle), None);
     }
 
     #[test]
