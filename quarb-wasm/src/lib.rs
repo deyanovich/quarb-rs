@@ -124,7 +124,7 @@ pub fn run(format: &str, input: &str, query: &str, now_millis: f64) -> String {
             match parsed {
                 Ok(a) => go(query, &a, |n| a.locator(n), secs, nanos),
                 Err(e) => Err(quarb::Diagnostic::error(
-                    "ERROR",
+                    quarb::diagnostic::ERROR,
                     "mount",
                     format!("reading CoNLL-U: {e}"),
                 )),
@@ -141,7 +141,7 @@ pub fn run(format: &str, input: &str, query: &str, now_millis: f64) -> String {
             go(query, &a, |n| a.locator(n), secs, nanos)
         }
         other => Err(quarb::Diagnostic::error(
-            "ERROR",
+            quarb::diagnostic::ERROR,
             "mount",
             format!("unknown format: {other}"),
         )),
@@ -203,7 +203,7 @@ fn go<A: AstAdapter>(
 /// A source that would not open: an error at the mount, with no
 /// rule's code.
 fn mount_error(message: String) -> quarb::Diagnostic {
-    quarb::Diagnostic::error("ERROR", "mount", message)
+    quarb::Diagnostic::error(quarb::diagnostic::ERROR, "mount", message)
 }
 
 /// A run's answer for JS: the lines, the HTML grid of a closing
@@ -221,14 +221,19 @@ type Ran = (
 
 /// The JSON of a run: `{"ok": true, "lines", "html", "diagnostics"}`,
 /// or `{"ok": false, "error", "diagnostics"}` with the error as the
-/// array's one item, code and site beside the message.
+/// array's one item, code and site beside the message; `tail` is
+/// the door to the code's remedy (`Narrow first: man
+/// SORT_NOT_PUSHED`), null for a code that has none.
 fn outcome_json(outcome: Result<Ran, quarb::Diagnostic>) -> String {
+    // the manual is a line of the session here
+    quarb::diagnostic::set_manual_door("man");
     let diag = |d: &quarb::Diagnostic| {
         serde_json::json!({
             "severity": d.severity.word(),
             "code": d.code,
             "site": d.site,
             "message": d.message,
+            "tail": d.tail(),
         })
     };
     match outcome {

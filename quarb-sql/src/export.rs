@@ -28,7 +28,7 @@
 //! (Quarb's existential binding never multiplies rows; SQL `JOIN`
 //! does when several left rows match).
 
-use crate::{SqlError, Translation};
+use crate::{Refusal, SqlError, Translation};
 use quarb::reflect::QueryArbor;
 use quarb::{AstAdapter, NodeId, Value};
 
@@ -51,6 +51,7 @@ pub fn export(quarb: &str) -> Result<Translation, SqlError> {
         from_sql: String::new(),
         join_sql: None,
         in_on: false,
+        order: PlanOrder::default(),
         aggregate: false,
         keyed_hops: false,
         from_marks: Vec::new(),
@@ -63,6 +64,26 @@ pub fn export(quarb: &str) -> Result<Translation, SqlError> {
     })
 }
 
+/// A part SQL has no form for, under the word its refusal is told
+/// by.
+fn not_pushed(word: Refusal, reason: String) -> SqlError {
+    SqlError::NotPushed {
+        word,
+        mismatch: false,
+        reason,
+    }
+}
+
+/// A part SQL can spell, with other semantics: the reason names the
+/// divergence.
+fn mismatch(word: Refusal, reason: String) -> SqlError {
+    SqlError::NotPushed {
+        word,
+        mismatch: true,
+        reason,
+    }
+}
+
 /// The exporter rewrites `__LEFT__` (the join's left table) and
 /// `__AGG__` (the HAVING aggregate) as internal placeholders.
 /// Query text containing either marker would be rewritten inside
@@ -71,9 +92,10 @@ pub fn export(quarb: &str) -> Result<Translation, SqlError> {
 fn refuse_marker(quarb: &str) -> Result<(), SqlError> {
     for marker in ["__LEFT__", "__AGG__"] {
         if quarb.contains(marker) {
-            return Err(SqlError::Unsupported(format!(
-                "query text contains the reserved marker \"{marker}\""
-            )));
+            return Err(not_pushed(
+                Refusal::Name,
+                format!("query text contains the reserved marker \"{marker}\""),
+            ));
         }
     }
     Ok(())
@@ -106,6 +128,36 @@ pub struct Pushdown {
     /// after the driver's (`order_table`'s key, then this table's).
     /// A driver that cannot order by both must decline the plan.
     pub order_then: Option<String>,
+    /// The plan's own sort, in SQL, where it has one: `(n IS NULL),
+    /// n` for `sort_by(::n)`, a null key last as the engine puts it.
+    /// The driver writes it before the keys, which keep the ties in
+    /// the tables' order as the engine's stable sort does.
+    pub order_first: Option<String>,
+    /// The keys descending: the context reversed (`@| reverse`).
+    pub order_desc: bool,
+    /// The plan is a fold: one row a group, in the order each group
+    /// first appears, which the driver writes as the least key of
+    /// each (`ORDER BY MIN(key)`).
+    pub order_groups: bool,
+    /// The first rows alone (`@| [..n]`), after the order.
+    pub limit: Option<u64>,
+    /// The plan's rows are records the query built (`| %(…)`, the
+    /// `%.` of a fold): a row of one column is then a record of one
+    /// field, where a projection's is the bare value.
+    pub record: bool,
+    /// The plan's rows are the records of the rows' own properties
+    /// (`| %`): a NULL cell is no property of its row, and is left
+    /// out of that row's record, as the scan leaves it out.
+    pub properties: bool,
+    /// The column a sort, a fold or a distinct count goes by, with
+    /// the word of that construct. The plan is the scan's only where
+    /// the catalog says the column is numeric (it is among
+    /// `column_types.numeric`), and unlike a comparison the database
+    /// would not refuse it over a text column: it would run, and
+    /// answer its collation's order or its own groups. A caller with
+    /// no catalog to ask scans; one whose catalog says the column is
+    /// not numeric scans and tells of it under the word.
+    pub keyed_by: Option<(Refusal, String)>,
     /// What the plan takes for granted about column types. Quarb
     /// compares by value (a numeric-looking text and a number meet
     /// as numbers, a number and other text never meet); SQL
@@ -238,13 +290,14 @@ pub fn pushdown_explained(quarb: &str, dialect: Option<Dialect>) -> Result<Pushd
         from_sql: String::new(),
         join_sql: None,
         in_on: false,
+        order: PlanOrder::default(),
         aggregate: false,
         keyed_hops: false,
         from_marks: Vec::new(),
         join_marks: Vec::new(),
     };
     let sql = ex.query()?;
-    let order_table = if ex.aggregate {
+    let order_table = if ex.aggregate && !ex.order.groups {
         None
     } else {
         // Rows come back in the driver's document order — the FROM
@@ -265,11 +318,29 @@ pub fn pushdown_explained(quarb: &str, dialect: Option<Dialect>) -> Result<Pushd
     };
     let mut tables = vec![ex.from_table.clone()];
     tables.extend(ex.join_table.clone());
+    // the plan's own sort: a null key last, the ties left to the
+    // keys; reversed, every term turns
+    let order_first = ex.order.sort.as_ref().map(|(e, desc)| {
+        let nulls = if ex.order.reversed { " DESC" } else { "" };
+        let dir = if *desc != ex.order.reversed {
+            " DESC"
+        } else {
+            ""
+        };
+        format!("({e} IS NULL){nulls}, {e}{dir}")
+    });
     Ok(Pushdown {
         sql,
         order_table,
         join_left,
         order_then,
+        order_first,
+        order_desc: ex.order.reversed,
+        order_groups: ex.order.groups,
+        limit: ex.order.limit,
+        record: ex.order.record,
+        properties: ex.order.properties,
+        keyed_by: ex.order.keyed_by.clone(),
         column_types: ex.column_types.clone(),
         tables,
     })
@@ -356,6 +427,61 @@ fn json_type_probe(
             path.join(",")
         )),
         Dialect::MySql | Dialect::Mssql | Dialect::Oracle => None,
+    }
+}
+
+/// The literals no match of `pattern` can do without: each is a
+/// substring of every text the regex matches. Read from the regex
+/// crate's own parse (the engine compiles with its defaults): a
+/// literal of a concatenation, of a group, of a repetition that
+/// runs at least once. An alternation, a class (a letter under
+/// `(?i)` is one) and an optional part promise nothing.
+pub(crate) fn required_literals(pattern: &str) -> Vec<String> {
+    use regex_syntax::hir::{Hir, HirKind};
+    fn walk(h: &Hir, out: &mut Vec<String>) {
+        match h.kind() {
+            HirKind::Literal(lit) => {
+                if let Ok(s) = std::str::from_utf8(&lit.0)
+                    && !s.is_empty()
+                    && !out.iter().any(|o| o == s)
+                {
+                    out.push(s.to_string());
+                }
+            }
+            HirKind::Capture(c) => walk(&c.sub, out),
+            HirKind::Concat(parts) => parts.iter().for_each(|p| walk(p, out)),
+            HirKind::Repetition(r) if r.min >= 1 => walk(&r.sub, out),
+            _ => {}
+        }
+    }
+    let Ok(hir) = regex_syntax::parse(pattern) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    walk(&hir, &mut out);
+    out
+}
+
+/// "`l` holds `lit`", by bytes and case, where the dialect says
+/// exactly that: SQLite's `instr`, and PostgreSQL's `LIKE`, which
+/// is case-sensitive there and reads a `char(n)` value with its
+/// padding, as the engine does. `None` elsewhere, and for a literal
+/// a SQL string would not carry as written on every server (a
+/// quote, a backslash, a control character).
+fn contains_sql(dialect: Dialect, l: &str, lit: &str) -> Option<String> {
+    if lit
+        .chars()
+        .any(|c| c.is_control() || c == '\\' || c == '\'')
+    {
+        return None;
+    }
+    match dialect {
+        Dialect::Sqlite => Some(format!("instr({l}, '{lit}') > 0")),
+        Dialect::Postgres => {
+            let pat = lit.replace('%', "\\%").replace('_', "\\_");
+            Some(format!("{l} LIKE '%{pat}%' ESCAPE '\\'"))
+        }
+        _ => None,
     }
 }
 
@@ -566,6 +692,7 @@ fn partial_pushdown_with(
         from_sql: String::new(),
         join_sql: None,
         in_on: false,
+        order: PlanOrder::default(),
         aggregate: false,
         keyed_hops,
         from_marks: Vec::new(),
@@ -583,13 +710,36 @@ fn refuse_groups(arbor: &QueryArbor) -> Result<(), SqlError> {
     let mut stack = vec![arbor.root()];
     while let Some(n) = stack.pop() {
         if arbor.name(n).as_deref() == Some("group") {
-            return Err(SqlError::Unsupported(
+            return Err(not_pushed(
+                Refusal::Walk,
                 "path patterns (groups and quantifiers)".into(),
             ));
         }
         stack.extend(arbor.children(n));
     }
     Ok(())
+}
+
+/// The order a strict plan asks its driver for ([`Pushdown`]'s
+/// `order_first`, `order_desc`, `order_groups`, `limit`).
+#[derive(Default)]
+struct PlanOrder {
+    /// `sort_by(::n)`: the key as SQL, and whether `--desc`.
+    sort: Option<(String, bool)>,
+    /// `@| reverse`.
+    reversed: bool,
+    /// `@| [..n]`.
+    limit: Option<u64>,
+    /// A fold by one key.
+    groups: bool,
+    /// The numeric column the plan sorts, folds or counts distinct
+    /// by, and the word of the construct.
+    keyed_by: Option<(Refusal, String)>,
+    /// The rows are records the query built.
+    record: bool,
+    /// The records are the rows' own properties (`| %`): a NULL
+    /// cell is left out of its row's record.
+    properties: bool,
 }
 
 struct Exporter {
@@ -613,6 +763,8 @@ struct Exporter {
     from_sql: String,
     join_sql: Option<String>,
     in_on: bool,
+    /// The order of a strict plan, for its driver.
+    order: PlanOrder,
     aggregate: bool,
     /// The adapter reads steps by key (the pushed-down WHERE filters
     /// the table's listing only), so crosslinks and resolutions are
@@ -661,7 +813,7 @@ impl Exporter {
         let root = self.arbor.root();
         let q = self
             .kid(root, "query")
-            .ok_or_else(|| SqlError::Unsupported("empty query".into()))?;
+            .ok_or_else(|| not_pushed(Refusal::Name, "empty query".into()))?;
         // A correlation does not forbid the prefilter: the driver's
         // own predicates restrict the driver's rows whatever the join
         // then binds. What must not happen is the join (or anything
@@ -671,7 +823,7 @@ impl Exporter {
         // correlation entries too.
         let branches = self.kids(q, "branch");
         if branches.len() != 1 {
-            return Err(SqlError::Unsupported("a branch union".into()));
+            return Err(not_pushed(Refusal::Union, "a branch union".into()));
         }
         let (table, preds) = self.table_branch_lead(branches[0], self.keyed_hops)?;
 
@@ -709,7 +861,8 @@ impl Exporter {
                                 lists_other_table
                             };
                         if !safe {
-                            return Err(SqlError::Unsupported(
+                            return Err(not_pushed(
+                                Refusal::Condition,
                                 "crosslink/resolution axes could reach \
                                  the filtered table"
                                     .into(),
@@ -721,7 +874,8 @@ impl Exporter {
                     }
                 }
                 "projection" if self.prop_s(*n, "kind") != "property" => {
-                    return Err(SqlError::Unsupported(
+                    return Err(not_pushed(
+                        Refusal::Condition,
                         "metadata would observe the filtering \
                          (:::n-rows, :index)"
                             .into(),
@@ -731,7 +885,8 @@ impl Exporter {
             }
         }
         if table_mentions != 1 {
-            return Err(SqlError::Unsupported(
+            return Err(not_pushed(
+                Refusal::Condition,
                 "the table is reached more than once".into(),
             ));
         }
@@ -762,7 +917,8 @@ impl Exporter {
             }
         }
         if conds.is_empty() {
-            return Err(SqlError::Unsupported(
+            return Err(not_pushed(
+                Refusal::Nothing,
                 "no leading expression predicates to push".into(),
             ));
         }
@@ -825,11 +981,37 @@ impl Exporter {
                     format!("{probe} IS NOT NULL"),
                 ))
             }
+            // A conjunction keeps what either side keeps and more
+            // when one side is left out; a disjunction needs both.
+            "and" | "or" => {
+                let kind = self.kind(e);
+                let sides: Vec<Option<String>> = self
+                    .arbor
+                    .children(e)
+                    .into_iter()
+                    .map(|c| {
+                        self.pred_expr(c, None)
+                            .ok()
+                            .or_else(|| self.prefilter_expr(c))
+                    })
+                    .collect();
+                if kind == "or" {
+                    let sides: Option<Vec<String>> = sides.into_iter().collect();
+                    return sides
+                        .filter(|s| !s.is_empty())
+                        .map(|s| format!("({})", s.join(" OR ")));
+                }
+                let sides: Vec<String> = sides.into_iter().flatten().collect();
+                (!sides.is_empty()).then(|| format!("({})", sides.join(" AND ")))
+            }
             "compare" => {
                 let op = self.prop_s(e, "op");
                 let kids = self.arbor.children(e);
                 if kids.len() != 2 {
                     return None;
+                }
+                if op == "==" {
+                    return self.regex_prefilter(dialect, &kids);
                 }
                 for (pi, li) in [(0usize, 1usize), (1, 0)] {
                     let Some((col, path)) = self.json_path(kids[pi]) else {
@@ -874,6 +1056,35 @@ impl Exporter {
             }
             _ => None,
         }
+    }
+
+    /// The superset prefilter for `::col == (/regex/)`: every literal
+    /// the regex cannot match without is a substring of the text it
+    /// matches, so the rows that hold them all are a superset of the
+    /// rows the engine keeps; the engine runs the regex itself over
+    /// what is fetched. A NULL holds no substring and matches no
+    /// regex. The column is recorded as a text one, for the caller's
+    /// catalog check: a number would be searched in the database's
+    /// rendering of it, not the engine's.
+    fn regex_prefilter(&mut self, dialect: Dialect, kids: &[NodeId]) -> Option<String> {
+        if !self.is_text_literal(kids[1]) {
+            return None;
+        }
+        let column = self.column_operand(kids[0])?;
+        let pattern = self.prop(kids[1], "value")?.to_string();
+        let literals = required_literals(&pattern);
+        let l = self.operand(kids[0], None).ok()?;
+        let conds: Vec<String> = literals
+            .iter()
+            .filter_map(|lit| contains_sql(dialect, &l, lit))
+            .collect();
+        if conds.is_empty() {
+            return None;
+        }
+        if !self.column_types.text.contains(&column) {
+            self.column_types.text.push(column);
+        }
+        Some(conds.join(" AND "))
     }
 
     /// The superset prefilter for `/col/a::b OP literal`, the
@@ -1143,21 +1354,23 @@ impl Exporter {
         let root = self.arbor.root();
         let q = self
             .kid(root, "query")
-            .ok_or_else(|| SqlError::Unsupported("empty query".into()))?;
+            .ok_or_else(|| not_pushed(Refusal::Name, "empty query".into()))?;
         let mut sel = Select::default();
 
         // Correlations: exactly one becomes the JOIN's left table.
         let corrs = self.kids(q, "query");
         let branches = self.kids(q, "branch");
         if branches.len() != 1 {
-            return Err(SqlError::Unsupported(
+            return Err(not_pushed(
+                Refusal::Union,
                 "a branch union (SQL has UNION, but result shapes differ; export one branch)"
                     .into(),
             ));
         }
 
         if corrs.len() > 1 {
-            return Err(SqlError::Unsupported(
+            return Err(not_pushed(
+                Refusal::Join,
                 "more than one correlation context".into(),
             ));
         }
@@ -1172,7 +1385,8 @@ impl Exporter {
             // a joined expression with a pipeline of its own binds
             // what that pipeline leaves: not a row of its table
             if self.kid(*corr, "pipeline").is_some() {
-                return Err(SqlError::Unsupported(
+                return Err(not_pushed(
+                    Refusal::Join,
                     "a joined expression with a pipeline of its own".into(),
                 ));
             }
@@ -1203,7 +1417,8 @@ impl Exporter {
             }
             sel.join_outer = outer;
             if on.is_empty() {
-                return Err(SqlError::Unsupported(
+                return Err(not_pushed(
+                    Refusal::Join,
                     "a correlation without a '$$' equality (no JOIN condition)".into(),
                 ));
             }
@@ -1241,7 +1456,8 @@ impl Exporter {
                 .kid(self.kids(*corr, "branch")[0], "projection")
                 .is_some()
             {
-                return Err(SqlError::Unsupported(
+                return Err(not_pushed(
+                    Refusal::Join,
                     "a projection on the joined expression (project the witness \
                      in the pipeline: '$$1::col')"
                         .into(),
@@ -1267,6 +1483,20 @@ impl Exporter {
             }
             self.pipeline(q, &mut sel, None, projected)?;
         }
+        // A whole plan answers values: a column, a record, a
+        // reduction. A query that ends on row nodes is answered by
+        // their locators, which are the scan's to write (ruling
+        // 2026-11-18); it was pushed as SELECT * and printed each
+        // row as a record, where the scan printed `/books/1`. Its
+        // conditions still go ahead of the scan through the partial
+        // plan, and nothing the reader wrote is refused, so the
+        // refusal carries no code.
+        if self.strict && sel.select.is_empty() {
+            return Err(not_pushed(
+                Refusal::Nodes,
+                "a selection of row nodes is answered by their locators".into(),
+            ));
+        }
         Ok(sel.render())
     }
 
@@ -1287,7 +1517,8 @@ impl Exporter {
     ) -> Result<(String, Vec<NodeId>), SqlError> {
         let steps = self.kids(b, "step");
         if steps.len() < 2 || (steps.len() > 2 && !more) {
-            return Err(SqlError::Unsupported(
+            return Err(not_pushed(
+                Refusal::Walk,
                 "navigation beyond /table/* (SQL sees tables and rows)".into(),
             ));
         }
@@ -1297,12 +1528,14 @@ impl Exporter {
             || self.prop_s(rows, "axis") != "/"
             || self.prop_s(rows, "matcher-kind") != "any"
         {
-            return Err(SqlError::Unsupported(
+            return Err(not_pushed(
+                Refusal::Walk,
                 "navigation beyond /table/* (SQL sees tables and rows)".into(),
             ));
         }
         if self.kid(t, "predicate").is_some() {
-            return Err(SqlError::Unsupported(
+            return Err(not_pushed(
+                Refusal::Walk,
                 "a predicate on the table step".into(),
             ));
         }
@@ -1324,7 +1557,8 @@ impl Exporter {
                 continue;
             }
             if i < after {
-                return Err(SqlError::Unsupported(
+                return Err(not_pushed(
+                    Refusal::Walk,
                     "a mark before the rows (SQL sees tables and rows)".into(),
                 ));
             }
@@ -1364,7 +1598,8 @@ impl Exporter {
     /// `qualifier` when joining).
     fn predicate_cond(&mut self, p: NodeId, qual: Option<&str>) -> Result<String, SqlError> {
         if self.prop_s(p, "kind") != "expr" {
-            return Err(SqlError::Unsupported(
+            return Err(not_pushed(
+                Refusal::Take,
                 "a positional predicate on rows (SQL rows are unordered; ORDER BY + LIMIT)".into(),
             ));
         }
@@ -1393,12 +1628,20 @@ impl Exporter {
                 // SQL's `NOT` propagates UNKNOWN: `NOT (x = 5)` is
                 // UNKNOWN for a NULL `x` and drops the row, but Quarb's
                 // negation keeps it (the inner `value_eq` is false, so
-                // its negation is true). Not provably identical without
-                // the schema — the pushdown paths refuse it and scan.
-                if self.strict {
-                    return Err(SqlError::Semantics(
-                        "SQL NOT propagates UNKNOWN, dropping the NULL rows \
-                         Quarb keeps"
+                // its negation is true). A pushed plan says the
+                // negation the way that keeps the row on every
+                // engine: the condition as a CASE, which takes
+                // UNKNOWN to its ELSE. Inside a join's bracket the
+                // engine's own logic is three-valued for the key
+                // comparisons and two-valued for the rest, which no
+                // one SQL form follows: there the negation stays
+                // with the engine.
+                if self.strict && self.in_on {
+                    return Err(mismatch(
+                        Refusal::Negation,
+                        "a negation inside a join condition (the engine leaves a key \
+                         comparison with a null unknown there, and reads the rest as \
+                         true or false)"
                             .into(),
                     ));
                 }
@@ -1408,6 +1651,12 @@ impl Exporter {
                     .into_iter()
                     .map(|c| self.pred_expr(c, qual))
                     .collect::<Result<_, _>>()?;
+                if self.strict {
+                    return Ok(format!(
+                        "(CASE WHEN {} THEN 0 ELSE 1 END = 1)",
+                        inner.join(" AND ")
+                    ));
+                }
                 Ok(format!("NOT ({})", inner.join(" AND ")))
             }
             "parens" => {
@@ -1438,6 +1687,22 @@ impl Exporter {
                     } else {
                         kids[0]
                     };
+                    // Inside a join condition a comparison that reads
+                    // the driver is a key comparison, unknown for a
+                    // null on either side, the literal too (spec:
+                    // Null keys): `[$$0::x != null && …]` admits no
+                    // candidate. IS [NOT] NULL would answer, so the
+                    // plan is not the scan's. (It was pushed so: five
+                    // pairs from the plan, none from the scan.)
+                    if self.in_on && self.subtree_has_driver(other) {
+                        return Err(not_pushed(
+                            Refusal::Join,
+                            "a test of the driver's key for null inside the join condition (a \
+                             key comparison never holds for a null there: test it on the \
+                             driver, '/t/*[::x != null] <=> …')"
+                                .into(),
+                        ));
+                    }
                     let col = self.operand(other, qual)?;
                     return Ok(if op == "=" {
                         format!("{col} IS NULL")
@@ -1481,7 +1746,8 @@ impl Exporter {
                                 .map(|v| v.to_string())
                                 .unwrap_or_default();
                             if raw.trim().parse::<f64>().is_ok() {
-                                return Err(SqlError::Semantics(
+                                return Err(mismatch(
+                                    Refusal::Type,
                                     "a numeric-looking text literal against a \
                                      JSON path compares numerically in Quarb \
                                      (value coercion); no SQL extractor \
@@ -1500,7 +1766,8 @@ impl Exporter {
                             // container's does not, so such a
                             // literal rides the prefilter.
                             if raw.starts_with('[') || raw.starts_with('{') {
-                                return Err(SqlError::Semantics(
+                                return Err(mismatch(
+                                    Refusal::Type,
                                     "a text literal that opens like a JSON container \
                                      could equal an array's or an object's own text \
                                      in the extractor, which has no value in Quarb"
@@ -1537,7 +1804,8 @@ impl Exporter {
                                 .map(|v| v.to_string())
                                 .unwrap_or_default();
                             if raw.trim().parse::<f64>().is_ok() {
-                                return Err(SqlError::Semantics(
+                                return Err(mismatch(
+                                    Refusal::Type,
                                     "a numeric-looking text literal against a \
                                      JSON path compares numerically in Quarb \
                                      (value coercion); no SQL extractor \
@@ -1551,7 +1819,8 @@ impl Exporter {
                             let shadowed = qual.is_none()
                                 && JSON_EACH_COLUMNS.contains(&col.to_ascii_lowercase().as_str());
                             if dialect != Dialect::Sqlite || shadowed {
-                                return Err(SqlError::Semantics(
+                                return Err(mismatch(
+                                    Refusal::Type,
                                     "a property of a JSON value may be a list (an \
                                      array of scalars equals the literal when any \
                                      item does); only SQLite's condition carries \
@@ -1595,7 +1864,8 @@ impl Exporter {
                             || self.json_path_loose(side).is_some()
                             || self.json_property_path(side).is_some()
                         {
-                            return Err(SqlError::Semantics(
+                            return Err(mismatch(
+                                Refusal::Type,
                                 "a JSON-path comparison pushes whole only as \
                                  fixed-path string equality (Quarb coerces \
                                  numeric-looking values; no extractor matches \
@@ -1613,8 +1883,10 @@ impl Exporter {
                 // catalog decides, so both are recorded for the
                 // caller. A numeric-looking TEXT literal meets
                 // numbers as a number in Quarb and compares as text
-                // in SQL, on every engine, so it does not push.
-                if self.strict {
+                // in SQL, on every engine, so it does not push. A
+                // regex is no value: its refusal below is the
+                // pattern's, whatever its text reads as.
+                if self.strict && !matches!(op.as_str(), "==" | "!==") {
                     for (ci, li) in [(0usize, 1usize), (1, 0)] {
                         let Some(column) = self.column_operand(kids[ci]) else {
                             continue;
@@ -1628,7 +1900,8 @@ impl Exporter {
                         let list = match (self.prop_s(kids[li], "type").as_str(), numeric) {
                             ("null", _) => continue,
                             ("text", true) => {
-                                return Err(SqlError::Semantics(
+                                return Err(mismatch(
+                                    Refusal::Type,
                                     "a numeric-looking text literal compares \
                                      numerically in Quarb (value coercion); SQL \
                                      compares it as text"
@@ -1654,9 +1927,10 @@ impl Exporter {
                 // the NULL rows Quarb keeps).
                 if self.kind(kids[1]) == "pattern" {
                     if op.as_str() != "=" {
-                        return Err(SqlError::Unsupported(format!(
-                            "a pattern literal on '{op}' (only '=' pushes)"
-                        )));
+                        return Err(not_pushed(
+                            Refusal::Pattern,
+                            format!("a pattern literal on '{op}' (only '=' pushes)"),
+                        ));
                     }
                     // PostgreSQL's LIKE is case-sensitive under its
                     // deterministic collations — provably what the
@@ -1666,7 +1940,8 @@ impl Exporter {
                     // case folding is ambient state (SQLite pragma,
                     // MySQL/MSSQL collation), so strict refuses.
                     if self.strict && self.dialect != Some(Dialect::Postgres) {
-                        return Err(SqlError::Semantics(
+                        return Err(mismatch(
+                            Refusal::Pattern,
                             "LIKE case folding differs per engine \
                              (provably case-sensitive only on PostgreSQL)"
                                 .into(),
@@ -1701,24 +1976,44 @@ impl Exporter {
                     return Ok(format!("{l} LIKE '{like}' ESCAPE '\\'"));
                 }
                 let r = self.operand(kids[1], qual)?;
+                // Which sides can be NULL: every side that is no
+                // literal. And whether this is a key comparison of a
+                // join condition, which the engine leaves unknown for
+                // a null on either side, as SQL does: there the plain
+                // operators are the engine's own.
+                let nullable: Vec<&str> = [(kids[0], l.as_str()), (kids[1], r.as_str())]
+                    .into_iter()
+                    .filter(|(k, _)| self.kind(*k) != "literal")
+                    .map(|(_, sql)| sql)
+                    .collect();
+                let keyed = self.in_on
+                    && (self.subtree_has_driver(kids[0]) || self.subtree_has_driver(kids[1]));
                 Ok(match op.as_str() {
+                    // Two NULLs are equal in Quarb (`value_eq`), and
+                    // SQL's `=` is UNKNOWN for them: an equality of
+                    // two columns says the second case too. (It was
+                    // pushed as the bare `a = b`, which dropped the
+                    // row where both are NULL.)
+                    "=" if self.strict && !keyed && nullable.len() == 2 => {
+                        format!("({l} = {r} OR ({l} IS NULL AND {r} IS NULL))")
+                    }
                     "=" => format!("{l} = {r}"),
+                    // Quarb's `!=` holds for a NULL against a value
+                    // and fails for two NULLs; SQL's `<>` is UNKNOWN
+                    // for either. The plan adds the cases `<>` leaves
+                    // out, in SQL every engine reads.
+                    "!=" if self.strict && !keyed => match nullable.as_slice() {
+                        [] => format!("{l} <> {r}"),
+                        [one] => format!("({l} <> {r} OR {one} IS NULL)"),
+                        _ => format!(
+                            "({l} <> {r} OR ({l} IS NULL AND {r} IS NOT NULL) OR ({l} IS NOT \
+                             NULL AND {r} IS NULL))"
+                        ),
+                    },
+                    "!=" if self.strict => format!("{l} <> {r}"),
                     "!=" => {
-                        // Quarb keeps rows whose operand is NULL (its
-                        // `value_eq` is false there, so `!=` is true);
-                        // SQL's `<>` is UNKNOWN for a NULL operand and
-                        // drops those rows. Not provably identical
-                        // without the schema, so pushdown refuses it;
-                        // the display translation keeps `<>` and notes
-                        // the divergence.
-                        if self.strict {
-                            return Err(SqlError::Semantics(
-                                "'!=' drops the NULL rows Quarb keeps \
-                                 (SQL '<>' is UNKNOWN for NULL; use '!= null' \
-                                 for IS NOT NULL)"
-                                    .into(),
-                            ));
-                        }
+                        // The display translation keeps `<>` and
+                        // notes the divergence.
                         self.notes.push(
                             "'!=' → '<>': Quarb keeps rows whose column is NULL; \
                              SQL's '<>' drops them (use '!= null' for IS NOT NULL)"
@@ -1727,15 +2022,30 @@ impl Exporter {
                         format!("{l} <> {r}")
                     }
                     "<" | "<=" | ">" | ">=" => format!("{l} {op} {r}"),
+                    // SQLite's instr is a substring test by bytes,
+                    // case and all, as `*=` is; the column is a text
+                    // one (recorded above with the literal: a number
+                    // would be searched in SQLite's rendering of it,
+                    // not the engine's). A NULL has no substring on
+                    // either side.
+                    "*=" if self.strict
+                        && self.dialect == Some(Dialect::Sqlite)
+                        && self.is_text_literal(kids[1])
+                        && self.column_operand(kids[0]).is_some() =>
+                    {
+                        format!("instr({l}, {r}) > 0")
+                    }
                     "*=" => {
                         // The same PostgreSQL rung as the pattern
                         // literal above: LIKE is provably
                         // case-sensitive there, so `*=` pushes
                         // strict too.
                         if self.strict && self.dialect != Some(Dialect::Postgres) {
-                            return Err(SqlError::Semantics(
+                            return Err(mismatch(
+                                Refusal::Pattern,
                                 "LIKE case folding differs per engine \
-                                 (provably case-sensitive only on PostgreSQL)"
+                                 (a substring test is pushed on SQLite as instr and on \
+                                 PostgreSQL as LIKE)"
                                     .into(),
                             ));
                         }
@@ -1744,7 +2054,8 @@ impl Exporter {
                         // not a pattern, and SQL LIKE cannot express
                         // "contains that value" portably.
                         if !self.is_text_literal(kids[1]) {
-                            return Err(SqlError::Unsupported(
+                            return Err(not_pushed(
+                                Refusal::Pattern,
                                 "'*=' with a non-literal pattern".into(),
                             ));
                         }
@@ -1769,21 +2080,26 @@ impl Exporter {
                         format!("{l} LIKE '%{pat}%' ESCAPE '\\'")
                     }
                     "==" | "!==" | "=~" | "!~" => {
-                        return Err(SqlError::Semantics(
+                        return Err(mismatch(
+                            Refusal::Pattern,
                             "regex matching means a different REGEXP engine per \
                              backend; regexes run engine-side"
                                 .into(),
                         ));
                     }
                     other => {
-                        return Err(SqlError::Unsupported(format!("the '{other}' comparison")));
+                        return Err(not_pushed(
+                            Refusal::Operator,
+                            format!("the '{other}' comparison"),
+                        ));
                     }
                 })
             }
             // A bare truthy operand.
             _ => {
                 if self.strict {
-                    return Err(SqlError::Semantics(
+                    return Err(mismatch(
+                        Refusal::Type,
                         "truthiness diverges (0 and '' are falsy in Quarb)".into(),
                     ));
                 }
@@ -1815,7 +2131,8 @@ impl Exporter {
                         // the caller scan. (The display translation
                         // keeps its best-effort `''`-doubling.)
                         if self.strict && (s.contains('\'') || s.contains('\\')) {
-                            return Err(SqlError::Semantics(
+                            return Err(mismatch(
+                                Refusal::Name,
                                 "a text literal with a quote or backslash \
                                  has no escaping portable across SQL dialects"
                                     .into(),
@@ -1833,39 +2150,44 @@ impl Exporter {
                     // a resolution chain (refused with the reason).
                     let s = self.kids(o, "step")[0];
                     if self.prop_s(s, "axis") == "-->" {
-                        return Err(SqlError::Unsupported(
+                        return Err(not_pushed(
+                            Refusal::Resolution,
                             "a '-->' resolution chain: the foreign-key targets live in \
                              the schema, not the query — spell the join with '<=>' to \
                              export it"
                                 .into(),
                         ));
                     }
-                    return Err(SqlError::Unsupported(
+                    return Err(not_pushed(
+                        Refusal::Resolution,
                         "navigation inside a predicate (SQL rows are flat)".into(),
                     ));
                 }
                 let p = self
                     .kid(o, "projection")
-                    .ok_or_else(|| SqlError::Unsupported("an empty path operand".into()))?;
+                    .ok_or_else(|| not_pushed(Refusal::Operator, "an empty path operand".into()))?;
                 let col = self.projection_col(p)?;
                 let col = self.sql_ident(&col, "column name")?;
                 // a read through a mark: the row the mark names
                 let (named, any) = self.mark_anchor(o);
                 if any {
                     let Some(name) = named else {
-                        return Err(SqlError::Unsupported(
+                        return Err(not_pushed(
+                            Refusal::State,
                             "a mark read by position, or of several marks".into(),
                         ));
                     };
                     if self.join_marks.contains(&name) {
                         // `$$.al::col`: the witness, as `$$1::col`
                         if self.in_on {
-                            return Err(SqlError::Unsupported(
+                            return Err(not_pushed(
+                                Refusal::Join,
                                 "the joined expression's own mark inside its ON".into(),
                             ));
                         }
                         let Some(join) = self.join_sql.clone() else {
-                            return Err(SqlError::Unsupported(
+                            return Err(not_pushed(
+                                Refusal::Join,
                                 "a join mark outside a correlation join".into(),
                             ));
                         };
@@ -1883,9 +2205,10 @@ impl Exporter {
                             }
                         });
                     }
-                    return Err(SqlError::Unsupported(format!(
-                        "a read of the mark '.{name}' (not a row of the query's tables)"
-                    )));
+                    return Err(not_pushed(
+                        Refusal::State,
+                        format!("a read of the mark '.{name}' (not a row of the query's tables)"),
+                    ));
                 }
                 Ok(match qual {
                     Some(q) => format!("{q}.{col}"),
@@ -1898,7 +2221,7 @@ impl Exporter {
                 // Anything else is outside the verified-safe set.
                 let p = self
                     .kid(o, "projection")
-                    .ok_or_else(|| SqlError::Unsupported("a bare '$$N' reference".into()))?;
+                    .ok_or_else(|| not_pushed(Refusal::Join, "a bare '$$N' reference".into()))?;
                 let col = self.projection_col(p)?;
                 let col = self.sql_ident(&col, "column name")?;
                 if matches!(self.prop(o, "index"), Some(Value::Int(0))) {
@@ -1906,33 +2229,38 @@ impl Exporter {
                     // joined expression's ON bracket (the parser
                     // refuses it anywhere else).
                     if !self.in_on {
-                        return Err(SqlError::Unsupported(
+                        return Err(not_pushed(
+                            Refusal::Join,
                             "a '$$0' reference outside the join's ON".into(),
                         ));
                     }
                     if self.kid(o, "step").is_some() {
-                        return Err(SqlError::Unsupported(
+                        return Err(not_pushed(
+                            Refusal::Join,
                             "a '$$0' reference beyond a plain column ($$0::col)".into(),
                         ));
                     }
                     return Ok(format!("{}.{col}", self.from_sql.clone()));
                 }
                 if self.in_on {
-                    return Err(SqlError::Unsupported(
+                    return Err(not_pushed(
+                        Refusal::Join,
                         "a '$$N' reference inside the ON (the driver is '$$0')".into(),
                     ));
                 }
                 let Some(join) = self.join_sql.clone() else {
-                    return Err(SqlError::Unsupported(
+                    return Err(not_pushed(
+                        Refusal::Join,
                         "a '$$N' reference outside a correlation join".into(),
                     ));
                 };
                 match self.prop(o, "index") {
                     Some(Value::Int(1)) => Ok(format!("{join}.{col}")),
-                    None => Err(SqlError::Unsupported("a bare '$$N' reference".into())),
-                    Some(v) => Err(SqlError::Unsupported(format!(
-                        "pushdown: $${v} beyond a two-branch correlation"
-                    ))),
+                    None => Err(not_pushed(Refusal::Join, "a bare '$$N' reference".into())),
+                    Some(v) => Err(not_pushed(
+                        Refusal::Join,
+                        format!("$${v} beyond a two-branch correlation"),
+                    )),
                 }
             }
             "invoking" => {
@@ -1940,7 +2268,8 @@ impl Exporter {
                 // query body, never the driver (that is `$$0`, a
                 // context of index 0, since draft 153). SQL has no
                 // enclosing body to read.
-                Err(SqlError::Unsupported(
+                Err(not_pushed(
+                    Refusal::Join,
                     "a '$$__' reference (the driver inside the ON is '$$0')".into(),
                 ))
             }
@@ -1953,12 +2282,20 @@ impl Exporter {
                     "+" | "-" | "*" => format!("({l} {op} {r})"),
                     "div" => format!("({l} / {r})"),
                     "mod" => format!("({l} % {r})"),
-                    other => return Err(SqlError::Unsupported(format!("'{other}' arithmetic"))),
+                    other => {
+                        return Err(not_pushed(
+                            Refusal::Operator,
+                            format!("'{other}' arithmetic"),
+                        ));
+                    }
                 })
             }
-            other => Err(SqlError::Unsupported(format!(
-                "the '{other}' operand (registers, topics, and captures are Quarb-side state)"
-            ))),
+            other => Err(not_pushed(
+                Refusal::State,
+                format!(
+                    "the '{other}' operand (registers, topics, and captures are Quarb-side state)"
+                ),
+            )),
         }
     }
 
@@ -1966,13 +2303,15 @@ impl Exporter {
         match self.prop_s(p, "kind").as_str() {
             "property" => match self.prop(p, "key") {
                 Some(k) => Ok(k.to_string()),
-                None => Err(SqlError::Unsupported(
+                None => Err(not_pushed(
+                    Refusal::Operator,
                     "the bare '::' projection (name the column)".into(),
                 )),
             },
-            other => Err(SqlError::Unsupported(format!(
-                "the {other} metadata projection"
-            ))),
+            other => Err(not_pushed(
+                Refusal::Operator,
+                format!("the {other} metadata projection"),
+            )),
         }
     }
 
@@ -2122,10 +2461,13 @@ impl Exporter {
             return Ok(name.to_string());
         }
         if self.strict {
-            return Err(SqlError::Unsupported(format!(
-                "pushdown: field name {name:?} needs SQL quoting \
+            return Err(not_pushed(
+                Refusal::Name,
+                format!(
+                    "field name {name:?} needs SQL quoting \
                  (dialects disagree); rename the field"
-            )));
+                ),
+            ));
         }
         self.notes
             .push(format!("field name {name:?} double-quoted (ANSI)"));
@@ -2143,9 +2485,10 @@ impl Exporter {
             return Ok(name.to_string());
         }
         if self.strict {
-            return Err(SqlError::Unsupported(format!(
-                "pushdown: {what} {name:?} is not a plain SQL identifier"
-            )));
+            return Err(not_pushed(
+                Refusal::Name,
+                format!("{what} {name:?} is not a plain SQL identifier"),
+            ));
         }
         self.notes
             .push(format!("{what} {name:?} double-quoted (ANSI)"));
@@ -2163,7 +2506,8 @@ impl Exporter {
         wheres: &mut Vec<String>,
     ) -> Result<(), SqlError> {
         if self.prop_s(p, "kind") != "expr" {
-            return Err(SqlError::Unsupported(
+            return Err(not_pushed(
+                Refusal::Take,
                 "a positional predicate on the joined side".into(),
             ));
         }
@@ -2272,6 +2616,11 @@ impl Exporter {
         let mut grouped: Option<(String, String, String)> = None;
         // A pushed key awaiting its fold: (the regula's name, key_sql).
         let mut pushed_key: Option<(String, String)> = None;
+        // …and the column it is, where it is one plain column.
+        let mut pushed_key_column: Option<String> = None;
+        // The regula a fold went by: the name its key has in the
+        // record `%.` answers.
+        let mut grouped_reg: Option<String> = None;
 
         while i < commands.len() {
             let s = commands[i];
@@ -2286,21 +2635,49 @@ impl Exporter {
                     match name.as_str() {
                         "rec" | "record" => {
                             sel.select = self.record_fields(s, join)?;
+                            self.order.record = true;
+                        }
+                        // `| %` on a row node is the record of its
+                        // properties, which are the row's columns in
+                        // the table's order: SELECT *, a record even
+                        // of one field. It is the plan a bare
+                        // selection of row nodes had before the
+                        // ruling of 2026-11-18 gave that one its
+                        // locators. Last in the pipeline and over
+                        // the rows themselves: after a projection
+                        // the thread holds a value, and a joined
+                        // row's record is the driver's alone.
+                        "%" if self.strict
+                            && join.is_none()
+                            && sel.select.is_empty()
+                            && pending_col.is_none()
+                            && grouped.is_none()
+                            && pushed_key.is_none()
+                            && !self.aggregate
+                            && self.arbor.children(s).is_empty()
+                            && i + 1 == commands.len() =>
+                        {
+                            sel.select = vec!["*".to_string()];
+                            self.order.record = true;
+                            self.order.properties = true;
                         }
                         // A reducing aggregate on the plain pipe:
                         // the grouped reduction.
                         "count" | "sum" | "mean" | "min" | "max" => {
                             let (key, _, _) = grouped.as_ref().ok_or_else(|| {
-                                SqlError::Unsupported(format!(
-                                    "'| {name}' outside a group (use '@| {name}')"
-                                ))
+                                not_pushed(
+                                    Refusal::Reducer,
+                                    format!("'| {name}' outside a group (use '@| {name}')"),
+                                )
                             })?;
                             // Quarb's count counts every member,
-                            // nulls included: COUNT(*), never the
-                            // NULL-skipping COUNT(col).
+                            // nulls included: COUNT(*); the
+                            // NULL-skipping COUNT(col) is
+                            // `count(--values)`.
+                            let values =
+                                self.reducer_counts_values(s, &name, pending_col.is_some())?;
                             let col = if name == "count" {
-                                pending_col = None;
-                                None
+                                pending_col.take().filter(|_| values)
                             } else {
                                 self.assume_numeric(pending_name.take());
                                 pending_col.take()
@@ -2315,15 +2692,23 @@ impl Exporter {
                             // name the divergence, not a missing
                             // feature.
                             if matches!(other, "sort" | "sort_by" | "unique" | "top" | "bottom") {
-                                return Err(SqlError::Semantics(format!(
-                                    "'{other}' means the backend's collation and \
+                                return Err(mismatch(
+                                    if other == "unique" {
+                                        Refusal::Unique
+                                    } else {
+                                        Refusal::Sort
+                                    },
+                                    format!(
+                                        "'{other}' means the backend's collation and \
                                      duplicate semantics; one engine-side ordering \
                                      keeps it identical everywhere"
-                                )));
+                                    ),
+                                ));
                             }
-                            return Err(SqlError::Unsupported(format!(
-                                "the '{other}' pipeline command"
-                            )));
+                            return Err(not_pushed(
+                                Refusal::Operator,
+                                format!("the '{other}' pipeline command"),
+                            ));
                         }
                     }
                 }
@@ -2333,7 +2718,8 @@ impl Exporter {
                         let alias = self.prop_s(s, "name");
                         grouped = Some((k, agg, alias));
                     } else {
-                        return Err(SqlError::Unsupported(
+                        return Err(not_pushed(
+                            Refusal::State,
                             "a register push (Quarb-side state)".into(),
                         ));
                     }
@@ -2344,9 +2730,12 @@ impl Exporter {
                     let kids = self.arbor.children(s);
                     let key = self.operand(kids[0], join.map(|(l, _)| l))?;
                     pushed_key = Some((self.prop_s(s, "name"), key));
+                    pushed_key_column = self.column_operand(kids[0]);
                 }
                 "subcontext" if grouped.is_none() && pushed_key.is_none() => {
                     let key = self.pushed_column(s, join.map(|(l, _)| l))?;
+                    // (unqualified, the SQL is the column's own name)
+                    pushed_key_column = join.is_none().then(|| key.clone());
                     pushed_key = Some((self.prop_s(s, "name"), key));
                 }
                 "filter" => {
@@ -2356,7 +2745,8 @@ impl Exporter {
                         let cond = self.having_cond(s)?;
                         sel.having = Some(cond);
                     } else {
-                        return Err(SqlError::Unsupported(
+                        return Err(not_pushed(
+                            Refusal::State,
                             "a mid-pipeline filter (put it in the row predicate)".into(),
                         ));
                     }
@@ -2364,15 +2754,24 @@ impl Exporter {
                 "recall" => {
                     // `| %.` finalizes the grouped record.
                     if self.prop_s(s, "ref") != "%." {
-                        return Err(SqlError::Unsupported(
+                        return Err(not_pushed(
+                            Refusal::State,
                             "a register recall (Quarb-side state)".into(),
                         ));
                     }
                     let (key, agg, alias) = grouped.clone().ok_or_else(|| {
-                        SqlError::Unsupported("'%.', with nothing grouped".into())
+                        not_pushed(Refusal::Fold, "'%.', with nothing grouped".into())
                     })?;
                     let alias = self.alias(&alias)?;
-                    sel.select = vec![key.clone(), format!("{agg} AS {alias}")];
+                    // The record names the key by its regula (`.a`),
+                    // which need not be the column's name: the scan
+                    // answers %(a = …), and so must the plan.
+                    let key_field = match &grouped_reg {
+                        Some(reg) if *reg != key => format!("{key} AS {}", self.alias(reg)?),
+                        _ => key.clone(),
+                    };
+                    sel.select = vec![key_field, format!("{agg} AS {alias}")];
+                    self.order.record = true;
                     // The HAVING condition compared the aggregate
                     // through $_ — substitute the real expression.
                     if let Some(h) = sel.having.take() {
@@ -2380,37 +2779,81 @@ impl Exporter {
                     }
                 }
                 "agg" if self.prop(s, "group").is_some() => {
+                    // The plan takes its first rows last: a command
+                    // over the rows a selection kept is the engine's.
+                    if self.strict && self.order.limit.is_some() {
+                        return Err(not_pushed(
+                            Refusal::Take,
+                            format!(
+                                "the '{}' command after a positional selection (a plan \
+                                 takes its first rows last)",
+                                self.prop_s(s, "name")
+                            ),
+                        ));
+                    }
                     // `@|{.k} agg`: the fold by the pushed key is the
                     // grouped reduction, GROUP BY key.
                     let name = self.prop_s(s, "name");
                     if !matches!(name.as_str(), "count" | "sum" | "mean" | "min" | "max") {
-                        return Err(SqlError::Unsupported(format!(
-                            "the '{name}' command per group (GROUP BY reduces)"
-                        )));
+                        return Err(not_pushed(
+                            Refusal::Fold,
+                            format!("the '{name}' command per group (GROUP BY reduces)"),
+                        ));
                     }
                     let selector = self.prop_s(s, "group");
                     if selector.contains(';') {
-                        return Err(SqlError::Unsupported(
+                        return Err(not_pushed(
+                            Refusal::Fold,
                             "a fold by several regulae (one GROUP BY key translates)".into(),
                         ));
                     }
                     let (reg, key) = pushed_key.take().ok_or_else(|| {
-                        SqlError::Unsupported("a fold by a regula no push of a key made".into())
+                        not_pushed(
+                            Refusal::Fold,
+                            "a fold by a regula no push of a key made".into(),
+                        )
                     })?;
+                    grouped_reg = Some(reg.clone());
                     if selector != "." && selector != format!(".{reg}") {
-                        return Err(SqlError::Unsupported(format!(
-                            "a fold by '{selector}' (the pushed key is '.{reg}')"
-                        )));
-                    }
-                    if self.strict {
-                        return Err(SqlError::Semantics(
-                            "GROUP BY result order is unordered in SQL".into(),
+                        return Err(not_pushed(
+                            Refusal::Fold,
+                            format!("a fold by '{selector}' (the pushed key is '.{reg}')"),
                         ));
                     }
+                    if self.strict {
+                        // SQL gives its groups in no stated order; the
+                        // engine gives them as each first appears. A
+                        // fold by one numeric column of the table is
+                        // pushed with that order asked of the driver
+                        // (the least key of each group). Numeric: two
+                        // texts that read as one number are one key
+                        // to the engine and two to GROUP BY.
+                        let plain = join.is_none()
+                            && self.order.sort.is_none()
+                            && self.order.limit.is_none()
+                            && !self.order.reversed;
+                        match pushed_key_column.take() {
+                            Some(column) if plain => {
+                                self.assume_numeric(Some(column.clone()));
+                                self.order.groups = true;
+                                self.order.keyed_by = Some((Refusal::Fold, column));
+                            }
+                            _ => {
+                                return Err(mismatch(
+                                    Refusal::Fold,
+                                    "a fold over a join, or after a sort or a selection, or by \
+                                     anything but one column"
+                                        .into(),
+                                ));
+                            }
+                        }
+                    }
                     sel.group_by = Some(key.clone());
+                    let values = self.reducer_counts_values(s, &name, pending_col.is_some())?;
                     let col = if name == "count" {
-                        pending_col = None;
-                        None
+                        // `count(--values)` over a projected column is
+                        // COUNT(col); the bare count is every row
+                        pending_col.take().filter(|_| values)
                     } else {
                         self.assume_numeric(pending_name.take());
                         pending_col.take()
@@ -2419,15 +2862,30 @@ impl Exporter {
                     grouped = Some((key, agg.clone(), agg));
                 }
                 "agg" => {
+                    // The plan takes its first rows last: a command
+                    // over the rows a selection kept is the engine's.
+                    if self.strict && self.order.limit.is_some() {
+                        return Err(not_pushed(
+                            Refusal::Take,
+                            format!(
+                                "the '{}' command after a positional selection (a plan \
+                                 takes its first rows last)",
+                                self.prop_s(s, "name")
+                            ),
+                        ));
+                    }
                     let name = self.prop_s(s, "name");
                     match name.as_str() {
                         "count" | "sum" | "mean" | "min" | "max" => {
                             // Quarb's count counts every row, nulls
                             // included: COUNT(*) regardless of a
-                            // pending column.
+                            // pending column. `count(--values)`
+                            // counts the values other than null:
+                            // COUNT(col) over a projected column.
+                            let values =
+                                self.reducer_counts_values(s, &name, pending_col.is_some())?;
                             let col = if name == "count" {
-                                pending_col = None;
-                                None
+                                pending_col.take().filter(|_| values)
                             } else {
                                 self.assume_numeric(pending_name.take());
                                 pending_col.take()
@@ -2435,25 +2893,77 @@ impl Exporter {
                             sel.select = vec![sql_agg(&name, col)?];
                             self.aggregate = true;
                         }
-                        "sort_by" => {
-                            if self.strict {
-                                return Err(SqlError::Semantics(
-                                    "ORDER BY collations differ per engine".into(),
-                                ));
+                        "sort_by" if self.strict => {
+                            // A database orders text by its own
+                            // collation. A sort by one numeric column
+                            // of the table has one order everywhere:
+                            // it is pushed, the key recorded for the
+                            // catalog to confirm, a null key last and
+                            // the ties in the table's order, which the
+                            // driver's ORDER BY says after the plan's.
+                            let kids = self.arbor.children(s);
+                            let column = kids.first().and_then(|&k| self.column_operand(k));
+                            let plain = join.is_none()
+                                && self.order.sort.is_none()
+                                && self.order.limit.is_none()
+                                && !self.order.reversed
+                                && !self.order.groups
+                                && !self.aggregate
+                                && grouped.is_none();
+                            let column = match (column, plain) {
+                                (Some(column), true) => column,
+                                // one column, and no place for its
+                                // order in the plan
+                                (Some(_), false) => {
+                                    return Err(not_pushed(
+                                        Refusal::Sort,
+                                        "a sort over a join, or after a selection, a fold or \
+                                         another sort (a plan has one order)"
+                                            .into(),
+                                    ));
+                                }
+                                (None, _) => {
+                                    return Err(mismatch(
+                                        Refusal::Sort,
+                                        "ORDER BY collations differ per engine".into(),
+                                    ));
+                                }
+                            };
+                            let mut desc = false;
+                            for &k in &kids[1..] {
+                                let named =
+                                    (self.kind(k) == "option").then(|| self.prop_s(k, "name"));
+                                match named.as_deref() {
+                                    Some("--desc" | "-d") => desc = true,
+                                    _ => {
+                                        return Err(mismatch(
+                                            Refusal::Sort,
+                                            "ORDER BY collations differ per engine".into(),
+                                        ));
+                                    }
+                                }
                             }
+                            let e = self.operand(kids[0], None)?;
+                            self.assume_numeric(Some(column.clone()));
+                            self.order.sort = Some((e, desc));
+                            self.order.keyed_by = Some((Refusal::Sort, column));
+                        }
+                        "sort_by" => {
                             // A sort after a positional selection
                             // (or a second sort) cannot render: the
                             // fixed SELECT shape orders before
                             // LIMIT, and has one ORDER BY.
                             if sel.limit.is_some() {
-                                return Err(SqlError::Unsupported(
+                                return Err(not_pushed(
+                                    Refusal::Sort,
                                     "a sort after a positional selection (SQL orders \
                                      before LIMIT)"
                                         .into(),
                                 ));
                             }
                             if sel.order_by.is_some() {
-                                return Err(SqlError::Unsupported(
+                                return Err(not_pushed(
+                                    Refusal::Sort,
                                     "a second sort (SQL has a single ORDER BY)".into(),
                                 ));
                             }
@@ -2467,14 +2977,16 @@ impl Exporter {
                             let mut desc = false;
                             for &k in &kids[1..] {
                                 if self.kind(k) != "option" {
-                                    return Err(SqlError::Unsupported(
+                                    return Err(not_pushed(
+                                        Refusal::Sort,
                                         "a sort by several keys".into(),
                                     ));
                                 }
                                 match self.prop_s(k, "name").as_str() {
                                     "--desc" | "-d" => desc = true,
                                     "--locale" => {
-                                        return Err(SqlError::Semantics(
+                                        return Err(mismatch(
+                                            Refusal::Sort,
                                             "sort_by(--locale=…) names the engine's collation; \
                                              a backend's differs"
                                                 .into(),
@@ -2484,45 +2996,109 @@ impl Exporter {
                                     // collation's (ruling 2026-11-12)
                                     "--upper-first" | "-u" | "--lower-first" | "-l"
                                     | "--ignore-case" | "-i" => {
-                                        return Err(SqlError::Semantics(
+                                        return Err(mismatch(
+                                            Refusal::Sort,
                                             "sort_by's case order is the engine's collation's; \
                                              a backend's differs"
                                                 .into(),
                                         ));
                                     }
                                     other => {
-                                        return Err(SqlError::Unsupported(format!(
-                                            "the '{other}' option of sort_by"
-                                        )));
+                                        return Err(not_pushed(
+                                            Refusal::Sort,
+                                            format!("the '{other}' option of sort_by"),
+                                        ));
                                     }
                                 }
                             }
                             let e = self.operand(kids[0], join.map(|(l, _)| l))?;
                             sel.order_by = Some((e, desc));
                         }
+                        // The context reversed: every term of the
+                        // plan's order turned, the keys too.
+                        "reverse" if self.strict => {
+                            if self.order.reversed
+                                || self.order.limit.is_some()
+                                || self.order.groups
+                                || self.aggregate
+                                || grouped.is_some()
+                            {
+                                return Err(not_pushed(
+                                    Refusal::Sort,
+                                    "reverse after a positional selection, a fold or another \
+                                     reverse"
+                                        .into(),
+                                ));
+                            }
+                            self.order.reversed = true;
+                        }
                         "reverse" => match &mut sel.order_by {
                             Some((_, desc)) => *desc = true,
                             None => {
-                                return Err(SqlError::Unsupported(
+                                return Err(not_pushed(
+                                    Refusal::Sort,
                                     "reverse without an ORDER BY (rows are unordered)".into(),
                                 ));
                             }
                         },
-                        "top" => {
-                            if self.strict {
-                                return Err(SqlError::Semantics(
-                                    "ORDER BY collations differ per engine".into(),
+                        // `top(k; ::n)` and `bottom(k; ::n)` in a plan:
+                        // the rows whose key is not null, by the key
+                        // descending or ascending, the ties in the
+                        // table's order, and the first k of them. A
+                        // sort and a cut, so the sort's conditions:
+                        // one numeric column of the table, nothing
+                        // ordered or cut before.
+                        "top" | "bottom" if self.strict => {
+                            let kids = self.arbor.children(s);
+                            let count = kids.first().and_then(|&k| {
+                                (self.kind(k) == "literal")
+                                    .then(|| self.prop(k, "value"))
+                                    .flatten()
+                            });
+                            let column = kids.get(1).and_then(|&k| self.column_operand(k));
+                            let plain = kids.len() == 2
+                                && join.is_none()
+                                && self.order.sort.is_none()
+                                && self.order.limit.is_none()
+                                && !self.order.reversed
+                                && !self.order.groups
+                                && !self.aggregate
+                                && grouped.is_none();
+                            let (Some(Value::Int(k)), Some(column), true) = (count, column, plain)
+                            else {
+                                return Err(not_pushed(
+                                    Refusal::Sort,
+                                    "'top' and 'bottom' by anything but one column of the \
+                                     table, under an option, over a join, or after a sort, a \
+                                     selection or a fold (a plan has one order)"
+                                        .into(),
+                                ));
+                            };
+                            if k < 1 {
+                                return Err(not_pushed(
+                                    Refusal::Sort,
+                                    "'top' and 'bottom' of no rows".into(),
                                 ));
                             }
+                            let e = self.operand(kids[1], None)?;
+                            sel.wheres.push(format!("{e} IS NOT NULL"));
+                            self.assume_numeric(Some(column.clone()));
+                            self.order.sort = Some((e, name == "top"));
+                            self.order.limit = Some(k as u64);
+                            self.order.keyed_by = Some((Refusal::Sort, column));
+                        }
+                        "top" => {
                             if sel.limit.is_some() {
-                                return Err(SqlError::Unsupported(
+                                return Err(not_pushed(
+                                    Refusal::Sort,
                                     "'top' after a positional selection (SQL orders \
                                      before LIMIT)"
                                         .into(),
                                 ));
                             }
                             if sel.order_by.is_some() {
-                                return Err(SqlError::Unsupported(
+                                return Err(not_pushed(
+                                    Refusal::Sort,
                                     "a second sort (SQL has a single ORDER BY)".into(),
                                 ));
                             }
@@ -2535,10 +3111,13 @@ impl Exporter {
                                 .get(2..)
                                 .and_then(|rest| rest.iter().find(|&&k| self.kind(k) == "option"))
                             {
-                                return Err(SqlError::Semantics(format!(
-                                    "top({}) names the engine's collation; a backend's differs",
-                                    self.prop_s(k, "name")
-                                )));
+                                return Err(mismatch(
+                                    Refusal::Sort,
+                                    format!(
+                                        "top({}) names the engine's collation; a backend's differs",
+                                        self.prop_s(k, "name")
+                                    ),
+                                ));
                             }
                             let n = self.prop_s(kids[0], "value");
                             let e = self.operand(kids[1], join.map(|(l, _)| l))?;
@@ -2547,14 +3126,53 @@ impl Exporter {
                         }
                         "unique" => {
                             if self.strict {
-                                return Err(SqlError::Unsupported(
-                                    "pushdown: DISTINCT result order is unordered in SQL".into(),
-                                ));
+                                // A count of the distinct values asks
+                                // for no order: `| ::n @| unique @|
+                                // count`, the last two commands of the
+                                // pipeline. COUNT(DISTINCT n) leaves
+                                // the NULLs out, and a null is one
+                                // value to `unique`: the plan adds it.
+                                // The column is a numeric one: two
+                                // texts that read as one number
+                                // ('300', '300.0') are one value to
+                                // the engine and two to DISTINCT.
+                                let counted = self.arbor.children(s).is_empty()
+                                    && i + 2 == commands.len()
+                                    && commands.get(i + 1).is_some_and(|&c| {
+                                        self.kind(c) == "agg"
+                                            && self.prop_s(c, "name") == "count"
+                                            && self.prop(c, "group").is_none()
+                                            && self.arbor.children(c).is_empty()
+                                    });
+                                match (counted, pending_col.take(), pending_name.take()) {
+                                    (true, Some(col), Some(name)) => {
+                                        self.assume_numeric(Some(name.clone()));
+                                        self.order.keyed_by = Some((Refusal::Unique, name));
+                                        sel.select = vec![format!(
+                                            "COUNT(DISTINCT {col}) + COALESCE(MAX(CASE WHEN \
+                                             {col} IS NULL THEN 1 ELSE 0 END), 0)"
+                                        )];
+                                        self.aggregate = true;
+                                        // the count is taken with it
+                                        i += 2;
+                                        continue;
+                                    }
+                                    _ => {
+                                        return Err(not_pushed(
+                                            Refusal::Unique,
+                                            "DISTINCT returns rows in no stated order (a count \
+                                             of the distinct values of a numeric column is \
+                                             pushed: '| ::col @| unique @| count')"
+                                                .into(),
+                                        ));
+                                    }
+                                }
                             }
                             // Quarb dedups the limited rows; SQL
                             // applies DISTINCT before LIMIT.
                             if sel.limit.is_some() {
-                                return Err(SqlError::Unsupported(
+                                return Err(not_pushed(
+                                    Refusal::Unique,
                                     "'unique' after a positional selection (SQL applies \
                                      DISTINCT before LIMIT)"
                                         .into(),
@@ -2566,19 +3184,50 @@ impl Exporter {
                             sel.distinct = true;
                         }
                         other => {
-                            return Err(SqlError::Unsupported(format!("the '{other}' aggregate")));
+                            return Err(not_pushed(
+                                Refusal::Reducer,
+                                format!("the '{other}' aggregate"),
+                            ));
+                        }
+                    }
+                }
+                // `@| [..n]` in a plan: the first rows of the order the
+                // driver writes (the plan's own sort, then the keys),
+                // so the rows the scan's context begins with.
+                "select" if self.strict => {
+                    if self.order.limit.is_some()
+                        || self.order.groups
+                        || self.aggregate
+                        || grouped.is_some()
+                        || pushed_key.is_some()
+                    {
+                        return Err(not_pushed(
+                            Refusal::Take,
+                            "a positional selection after a reducer, a fold or another \
+                             selection"
+                                .into(),
+                        ));
+                    }
+                    let p = self.arbor.children(s)[0];
+                    match (self.prop_s(p, "kind").as_str(), self.prop(p, "to")) {
+                        ("range", Some(Value::Int(n)))
+                            if self.prop(p, "from").is_none() && n > 0 =>
+                        {
+                            self.order.limit = Some(n as u64);
+                        }
+                        _ => {
+                            return Err(not_pushed(
+                                Refusal::Take,
+                                "positional selection beyond '@| [..n]'".into(),
+                            ));
                         }
                     }
                 }
                 "select" => {
-                    if self.strict {
-                        return Err(SqlError::Unsupported(
-                            "pushdown: LIMIT without a guaranteed order".into(),
-                        ));
-                    }
                     // `@| [..n]` → LIMIT.
                     if sel.limit.is_some() {
-                        return Err(SqlError::Unsupported(
+                        return Err(not_pushed(
+                            Refusal::Take,
                             "a second positional selection".into(),
                         ));
                     }
@@ -2590,17 +3239,21 @@ impl Exporter {
                             sel.limit = Some(n.to_string());
                         }
                         _ => {
-                            return Err(SqlError::Unsupported(
+                            return Err(not_pushed(
+                                Refusal::Take,
                                 "positional selection beyond '@| [..n]'".into(),
                             ));
                         }
                     }
                 }
                 other => {
-                    return Err(SqlError::Unsupported(format!(
-                        "the '{other}' command (windows, subcontexts, and registers are \
+                    return Err(not_pushed(
+                        Refusal::Operator,
+                        format!(
+                            "the '{other}' command (windows, subcontexts, and registers are \
                          Quarb-side state)"
-                    )));
+                        ),
+                    ));
                 }
             }
             i += 1;
@@ -2610,6 +3263,26 @@ impl Exporter {
             && sel.select.is_empty()
         {
             sel.select = vec![c];
+        }
+        // A plan answers row nodes as their rows, where the scan
+        // answers the nodes: a sorted, reversed or cut selection of
+        // nodes was the scan's to answer, and stays so; with a
+        // projection or a record after it, it is the plan's.
+        if self.strict
+            && sel.select.is_empty()
+            && (self.order.sort.is_some() || self.order.reversed || self.order.limit.is_some())
+        {
+            let word = if self.order.limit.is_some() {
+                Refusal::Take
+            } else {
+                Refusal::Sort
+            };
+            return Err(not_pushed(
+                word,
+                "a sorted, reversed or cut selection of row nodes (project a column or build \
+                 a record after it: '| ::col', '| %(…)')"
+                    .into(),
+            ));
         }
         // A grouped reduction never recorded (`@|{.k} count` with no
         // `| .n | %.`) answers one value per group: the aggregate
@@ -2637,7 +3310,7 @@ impl Exporter {
             bare.then_some(p)
         };
         let p = body()
-            .ok_or_else(|| SqlError::Unsupported("a pushed body (Quarb-side state)".into()))?;
+            .ok_or_else(|| not_pushed(Refusal::State, "a pushed body (Quarb-side state)".into()))?;
         let col = self.projection_col(p)?;
         let col = self.sql_ident(&col, "column name")?;
         Ok(match qual {
@@ -2650,7 +3323,8 @@ impl Exporter {
     fn having_cond(&mut self, s: NodeId) -> Result<String, SqlError> {
         let kids = self.arbor.children(s);
         if kids.len() != 1 || self.kind(kids[0]) != "compare" {
-            return Err(SqlError::Unsupported(
+            return Err(not_pushed(
+                Refusal::Fold,
                 "HAVING translates for a single comparison".into(),
             ));
         }
@@ -2660,7 +3334,8 @@ impl Exporter {
         let l = match self.kind(cmp_kids[0]).as_str() {
             "topic" | "recall" => "__AGG__".to_string(),
             _ => {
-                return Err(SqlError::Unsupported(
+                return Err(not_pushed(
+                    Refusal::Fold,
                     "HAVING compares the aggregate ($_ or its register)".into(),
                 ));
             }
@@ -2696,6 +3371,55 @@ impl Exporter {
     }
 }
 
+impl Exporter {
+    /// What a reducer's own arguments ask of the plan. A pushed
+    /// reducer is the bare command: `count` is COUNT(*), `sum` is
+    /// SUM(col). `count(--values)` counts the values other than
+    /// null, which over a projected column is what COUNT(col)
+    /// counts.
+    /// Any other option, and any operand, changes what is reduced
+    /// (`--nulls`, `--of=`, `--by=`), and the reducer stays with the
+    /// engine. The plan took no notice of them until 0.68:
+    /// `count(--values)` and `count(--nulls)` were both answered as
+    /// COUNT(*), where the scan counts five and one of six.
+    fn reducer_counts_values(
+        &self,
+        s: NodeId,
+        name: &str,
+        projected: bool,
+    ) -> Result<bool, SqlError> {
+        let mut values = false;
+        for k in self.arbor.children(s) {
+            if self.kind(k) != "option" {
+                return Err(not_pushed(
+                    Refusal::Reducer,
+                    format!("an operand of '{name}'"),
+                ));
+            }
+            match (name, self.prop_s(k, "name").as_str()) {
+                ("count", "--values" | "-v") => values = true,
+                (_, option) => {
+                    return Err(not_pushed(
+                        Refusal::Reducer,
+                        format!("the '{option}' option of '{name}'"),
+                    ));
+                }
+            }
+        }
+        // a row node is no value: what the count answers there is
+        // the engine's to say
+        if values && !projected {
+            return Err(not_pushed(
+                Refusal::Reducer,
+                "'count(--values)' over row nodes (project a column: '/table/*::col @| \
+                 count(--values)')"
+                    .into(),
+            ));
+        }
+        Ok(values)
+    }
+}
+
 fn sql_agg(name: &str, col: Option<String>) -> Result<String, SqlError> {
     let f = match name {
         "count" => "COUNT",
@@ -2710,9 +3434,10 @@ fn sql_agg(name: &str, col: Option<String>) -> Result<String, SqlError> {
         // Only COUNT aggregates bare rows; SUM(*) and friends are
         // not SQL.
         None if f == "COUNT" => Ok("COUNT(*)".to_string()),
-        None => Err(SqlError::Unsupported(format!(
-            "'{name}' over row nodes (project a column: '/table/*::col @| {name}')"
-        ))),
+        None => Err(not_pushed(
+            Refusal::Reducer,
+            format!("'{name}' over row nodes (project a column: '/table/*::col @| {name}')"),
+        )),
     }
 }
 
@@ -2755,7 +3480,16 @@ mod null_and_literal_tests {
         // the `*=` alias gains the same PostgreSQL rung
         let p = pushdown("/users/*[::name *= 'web']::id", Some(Dialect::Postgres)).unwrap();
         assert!(p.sql.contains("LIKE '%web%'"), "{}", p.sql);
-        assert!(pushdown("/users/*[::name *= 'web']::id", Some(Dialect::Sqlite)).is_none());
+        // and on SQLite it is instr, a substring test by bytes and by
+        // case as `*=` is; MySQL's INSTR folds case, and scans
+        assert_eq!(
+            pushdown("/users/*[::name *= 'web']::id", Some(Dialect::Sqlite))
+                .unwrap()
+                .sql,
+            "SELECT id FROM users WHERE instr(name, 'web') > 0"
+        );
+        assert!(pushdown("/users/*[::name *= 'web']::id", Some(Dialect::MySql)).is_none());
+        assert!(pushdown("/users/*[::name *= 'web']::id", None).is_none());
     }
 
     #[test]
@@ -2812,6 +3546,81 @@ mod null_and_literal_tests {
         let q = "/orders/*[/data/total:: = '150']::id";
         assert!(pushdown(q, Some(Dialect::Sqlite)).is_none());
         assert!(pushdown(q, Some(Dialect::Postgres)).is_none());
+    }
+
+    #[test]
+    fn a_regex_names_the_literals_it_cannot_match_without() {
+        let lits = |p: &str| super::required_literals(p);
+        assert_eq!(lits("^Ma.*s$"), ["Ma", "s"]);
+        assert_eq!(lits("(us)+$"), ["us"]);
+        assert_eq!(lits("a?b"), ["b"]);
+        assert_eq!(lits("(?:foo|bar)baz"), ["baz"]);
+        assert_eq!(lits("fo{2,}"), ["f", "o"]);
+        assert_eq!(lits(r"\d+-\d+"), ["-"]);
+        assert_eq!(lits(r"\bfoo\b"), ["foo"]);
+        assert_eq!(lits(r"No\.1"), ["No.1"]);
+        assert_eq!(lits("na\u{ef}ve"), ["na\u{ef}ve"]);
+        assert_eq!(lits("(?x) a b"), ["ab"]);
+        assert_eq!(lits("(a|b)c*d"), ["d"]);
+        assert_eq!(lits("x{0}y"), ["y"]);
+        assert_eq!(lits("ab(ab)"), ["ab"]);
+        // nothing promised: a class, an alternation, an optional
+        // part, a letter under (?i), a pattern that does not parse
+        for p in ["(?i)ma", "Ven|Jup", "a*", "[ab]", "(ab)?", ".*", "", "["] {
+            assert!(lits(p).is_empty(), "{p}");
+        }
+    }
+
+    #[test]
+    fn a_regex_is_narrowed_by_its_literals() {
+        let part = |q: &str, d: Dialect| {
+            partial_pushdown(q, Some(d)).map(|p| (p.where_sql, p.column_types.text))
+        };
+        assert_eq!(
+            part("/t/*[::a == (/^Ma.*s$/)]::b", Dialect::Sqlite),
+            Some((
+                "instr(a, 'Ma') > 0 AND instr(a, 's') > 0".to_string(),
+                vec!["a".to_string()]
+            ))
+        );
+        assert_eq!(
+            part("/t/*[::a == (/50%_off/)]::b", Dialect::Postgres).map(|p| p.0),
+            Some(r"a LIKE '%50\%\_off%' ESCAPE '\'".to_string())
+        );
+        // a conjunction keeps the side that translates; a
+        // disjunction needs both
+        assert_eq!(
+            part("/t/*[::n > 2 && ::a == (/on/)]::b", Dialect::Sqlite).map(|p| p.0),
+            Some("(n > 2 AND instr(a, 'on') > 0)".to_string())
+        );
+        assert_eq!(
+            part(
+                "/t/*[::a == (/(?i)x/) && ::a == (/on/)]::b",
+                Dialect::Sqlite
+            )
+            .map(|p| p.0),
+            Some("(instr(a, 'on') > 0)".to_string())
+        );
+        assert_eq!(
+            part("/t/*[::a == (/Ven/) || ::a == (/Jup/)]::b", Dialect::Sqlite).map(|p| p.0),
+            Some("(instr(a, 'Ven') > 0 OR instr(a, 'Jup') > 0)".to_string())
+        );
+        for q in [
+            // one side promises nothing: the disjunction is not narrowed
+            "/t/*[::a == (/Ven/) || ::a == (/(?i)jup/)]::b",
+            // a negation is never narrowed, nor a non-match
+            "/t/*[!(::a == (/Ven/))]::b",
+            "/t/*[::a !== (/Ven/)]::b",
+            // a literal a SQL string would not carry everywhere
+            "/t/*[::a == (/it's/)]::b",
+            // no literal at all
+            "/t/*[::a == (/(?i)ven/)]::b",
+            "/t/*[::a == (/Ven|Jup/)]::b",
+        ] {
+            assert_eq!(part(q, Dialect::Sqlite), None, "{q}");
+        }
+        // no function says "holds, by bytes and case" on MySQL
+        assert_eq!(part("/t/*[::a == (/Ven/)]::b", Dialect::MySql), None);
     }
 
     #[test]
@@ -3062,14 +3871,37 @@ mod null_and_literal_tests {
     }
 
     #[test]
-    fn ne_and_not_refuse_pushdown_but_display_diverges() {
-        // `!=` against a non-null value and `not(...)` drop the NULL
-        // rows Quarb keeps under SQL three-valued logic: the pushdown
-        // paths refuse (and scan), full and partial alike.
-        assert!(pushdown("/t/*[::x != 5] | ::x", None).is_none());
-        assert!(pushdown("/t/*[!::x = 5] | ::x", None).is_none());
-        assert!(partial_pushdown(&format!("/t/*[::x != 5]{GROUPED}"), None).is_none());
-        assert!(partial_pushdown(&format!("/t/*[!::x = 5]{GROUPED}"), None).is_none());
+    fn ne_and_not_push_in_the_form_that_keeps_the_null_rows() {
+        // `!=` against a value and `!(...)` hold for a NULL in Quarb
+        // and are UNKNOWN in SQL. The plan says the cases SQL's
+        // operators leave out, in SQL every engine reads (the scan's
+        // answers beside the plan's: tests/sql.rs).
+        assert_eq!(
+            pushdown("/t/*[::x != 5] | ::x", None).unwrap().sql,
+            "SELECT x FROM t WHERE (x <> 5 OR x IS NULL)"
+        );
+        assert_eq!(
+            pushdown("/t/*[::x != ::y] | ::x", None).unwrap().sql,
+            "SELECT x FROM t WHERE (x <> y OR (x IS NULL AND y IS NOT NULL) OR (x IS NOT NULL \
+             AND y IS NULL))"
+        );
+        assert_eq!(
+            pushdown("/t/*[!::x = 5] | ::x", None).unwrap().sql,
+            "SELECT x FROM t WHERE (CASE WHEN x = 5 THEN 0 ELSE 1 END = 1)"
+        );
+        // two NULLs are equal in Quarb: an equality of two columns
+        // says so
+        assert_eq!(
+            pushdown("/t/*[::x = ::y] | ::x", None).unwrap().sql,
+            "SELECT x FROM t WHERE (x = y OR (x IS NULL AND y IS NULL))"
+        );
+        // the prefilter takes them too
+        assert_eq!(
+            partial_pushdown(&format!("/t/*[::x != 5]{GROUPED}"), None)
+                .unwrap()
+                .where_sql,
+            "(x <> 5 OR x IS NULL)"
+        );
         // The display translation still emits `<>`, flagged with a note.
         let t = export("/t/*[::x != 5] | ::x").unwrap();
         assert_eq!(t.query, "SELECT x FROM t WHERE x <> 5");

@@ -344,15 +344,7 @@ fn lower(bytes: &[u8]) -> Result<(Vec<Block>, HeadMeta), RtfError> {
         note_counter: 0,
         frames: Vec::new(),
         quote_open: false,
-        head: HeadMeta {
-            // the plain names this reader answered under until 0.63
-            renamed: vec![
-                ("description", "doccomm"),
-                ("created", "creatim"),
-                ("modified", "revtim"),
-            ],
-            ..HeadMeta::default()
-        },
+        head: HeadMeta::default(),
         rows: Vec::new(),
         row: Vec::new(),
         row_header: false,

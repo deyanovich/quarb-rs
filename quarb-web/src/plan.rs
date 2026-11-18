@@ -38,6 +38,11 @@ pub struct Plan {
     /// Why this rung: the construct that stopped a higher one, or
     /// what the clause covers.
     pub reason: String,
+    /// A scan's diagnostic code, the word of what stopped the push
+    /// (`WALK_NOT_PUSHED`); `None` on the other rungs, and for a
+    /// scan with nothing refused (no predicate to push, a walk that
+    /// is narrow already), which no diagnostic tells of.
+    pub code: Option<&'static str>,
     /// The conjuncts the engine must still verify (Prefilter).
     pub unverified: Vec<String>,
     /// `@| top(n; ::col)` / `bottom`: the candidates are the first
@@ -55,9 +60,10 @@ pub struct Limit {
 }
 
 impl Plan {
-    fn scan(reason: impl Into<String>) -> Plan {
+    fn scan(code: Option<&'static str>, reason: impl Into<String>) -> Plan {
         Plan {
             rung: Rung::Scan,
+            code,
             where_sql: String::new(),
             params: Vec::new(),
             reason: reason.into(),
@@ -723,25 +729,37 @@ fn translate_trait(q: &Q, t: NodeId, sql: &mut Sql) -> Option<Conj> {
 /// rename what the planner reads.
 pub fn plan(query: &str, dialect: Dialect, model_in_force: bool) -> Plan {
     if model_in_force {
-        return Plan::scan("a model file is in force");
+        return Plan::scan(
+            Some(quarb::diagnostic::OPTION_NOT_PUSHED),
+            "a model file is in force",
+        );
     }
     let arbor = match QueryArbor::parse(query) {
         Ok(a) => a,
-        Err(e) => return Plan::scan(format!("parse: {e}")),
+        Err(e) => return Plan::scan(None, format!("parse: {e}")),
     };
     let q = Q { a: &arbor };
     let root = q.a.root();
     let queries = q.kids_named(root, "query");
     if queries.len() != 1 {
-        return Plan::scan("not one query");
+        return Plan::scan(
+            Some(quarb::diagnostic::OPERATOR_NOT_PUSHED),
+            "not one query",
+        );
     }
     let qn = queries[0];
     if !q.kids_named(qn, "query").is_empty() {
-        return Plan::scan("a correlation (<=>) is present");
+        return Plan::scan(
+            Some(quarb::diagnostic::JOIN_NOT_PUSHED),
+            "a correlation (<=>) is present",
+        );
     }
     let branches = q.kids_named(qn, "branch");
     if branches.len() != 1 {
-        return Plan::scan("more than one branch");
+        return Plan::scan(
+            Some(quarb::diagnostic::UNION_NOT_PUSHED),
+            "more than one branch",
+        );
     }
     let branch = branches[0];
     let elems: Vec<NodeId> = q
@@ -759,7 +777,10 @@ pub fn plan(query: &str, dialect: Dialect, model_in_force: bool) -> Plan {
     let mut prefix: Vec<String> = Vec::new();
     for (i, &e) in elems.iter().enumerate() {
         if q.name(e) != "step" {
-            return Plan::scan(format!("a {} before the enumerating step", q.name(e)));
+            return Plan::scan(
+                Some(quarb::diagnostic::WALK_NOT_PUSHED),
+                format!("a {} before the enumerating step", q.name(e)),
+            );
         }
         let axis = q.text(e, "axis").unwrap_or_default();
         let matcher = q.text(e, "matcher").unwrap_or_default();
@@ -775,7 +796,10 @@ pub fn plan(query: &str, dialect: Dialect, model_in_force: bool) -> Plan {
             || !q.kids_named(e, "predicate").is_empty()
             || !q.kids_named(e, "trait").is_empty()
         {
-            return Plan::scan("a prefix step with tests before //page");
+            return Plan::scan(
+                Some(quarb::diagnostic::WALK_NOT_PUSHED),
+                "a prefix step with tests before //page",
+            );
         }
         if prev_matcher == "sites" && mkind == "name" {
             host = Some(matcher.clone());
@@ -788,7 +812,10 @@ pub fn plan(query: &str, dialect: Dialect, model_in_force: bool) -> Plan {
         || (prefix.len() == 2 && prefix[0] == "sites")
         || (prefix.len() == 1 && prefix[0] == "sites");
     let Some(ei) = enumerating else {
-        return Plan::scan("no //page enumeration");
+        return Plan::scan(
+            Some(quarb::diagnostic::WALK_NOT_PUSHED),
+            "no //page enumeration",
+        );
     };
     let estep = elems[ei];
     let kind = q
@@ -802,26 +829,41 @@ pub fn plan(query: &str, dialect: Dialect, model_in_force: bool) -> Plan {
             for alt in q.kids_named(e, "alt") {
                 let inner: Vec<NodeId> = q.kids(alt);
                 if inner.iter().any(|s| q.name(*s) != "step") || !path_is_safe(&q, e, &inner) {
-                    return Plan::scan("a group after //page with an unsafe step");
+                    return Plan::scan(
+                        Some(quarb::diagnostic::WALK_NOT_PUSHED),
+                        "a group after //page with an unsafe step",
+                    );
                 }
             }
             for p in q.kids_named(e, "predicate") {
                 if !pred_is_safe(&q, p) {
-                    return Plan::scan("a group predicate that re-enters the tree");
+                    return Plan::scan(
+                        Some(quarb::diagnostic::WALK_NOT_PUSHED),
+                        "a group predicate that re-enters the tree",
+                    );
                 }
             }
             continue;
         }
         if name != "step" {
-            return Plan::scan(format!("a {name} after //page"));
+            return Plan::scan(
+                Some(quarb::diagnostic::WALK_NOT_PUSHED),
+                format!("a {name} after //page"),
+            );
         }
         let axis = q.text(e, "axis").unwrap_or_default();
         if !SAFE_AXES.contains(&axis.as_str()) {
-            return Plan::scan(format!("the {axis} axis after //page re-enters the tree"));
+            return Plan::scan(
+                Some(quarb::diagnostic::WALK_NOT_PUSHED),
+                format!("the {axis} axis after //page re-enters the tree"),
+            );
         }
         for p in q.kids_named(e, "predicate") {
             if !pred_is_safe(&q, p) {
-                return Plan::scan("a later predicate that re-enters the tree");
+                return Plan::scan(
+                    Some(quarb::diagnostic::WALK_NOT_PUSHED),
+                    "a later predicate that re-enters the tree",
+                );
             }
         }
     }
@@ -833,11 +875,17 @@ pub fn plan(query: &str, dialect: Dialect, model_in_force: bool) -> Plan {
         for s in &commands {
             let name = q.name(*s);
             if matches!(name.as_str(), "subcontext" | "push" | "expr-push") {
-                return Plan::scan(format!("a {name} command"));
+                return Plan::scan(
+                    Some(quarb::diagnostic::OPERATOR_NOT_PUSHED),
+                    format!("a {name} command"),
+                );
             }
             for n in q.all_below(*s) {
                 if q.name(n) == "path" && anchored(&q, n) {
-                    return Plan::scan("an anchored path in the pipeline");
+                    return Plan::scan(
+                        Some(quarb::diagnostic::WALK_NOT_PUSHED),
+                        "an anchored path in the pipeline",
+                    );
                 }
                 // the topic as a projector's base (`| #(:a; :b)`,
                 // `| %(::path)`) reads the enumerated row itself, as
@@ -846,7 +894,10 @@ pub fn plan(query: &str, dialect: Dialect, model_in_force: bool) -> Plan {
                     continue;
                 }
                 if UNSAFE_KINDS.contains(&q.name(n).as_str()) {
-                    return Plan::scan(format!("a {} in the pipeline", q.name(n)));
+                    return Plan::scan(
+                        Some(quarb::diagnostic::OPERATOR_NOT_PUSHED),
+                        format!("a {} in the pipeline", q.name(n)),
+                    );
                 }
             }
         }
@@ -857,11 +908,17 @@ pub fn plan(query: &str, dialect: Dialect, model_in_force: bool) -> Plan {
         .iter()
         .any(|p| q.text(*p, "kind").as_deref() != Some("expr"))
     {
-        return Plan::scan("a positional predicate on //page");
+        return Plan::scan(
+            Some(quarb::diagnostic::TAKE_NOT_PUSHED),
+            "a positional predicate on //page",
+        );
     }
     for &p in &preds {
         if !pred_is_safe(&q, p) {
-            return Plan::scan("a predicate on //page that re-enters the tree");
+            return Plan::scan(
+                Some(quarb::diagnostic::WALK_NOT_PUSHED),
+                "a predicate on //page that re-enters the tree",
+            );
         }
     }
     let mut sql = Sql {
@@ -923,6 +980,7 @@ pub fn plan(query: &str, dialect: Dialect, model_in_force: bool) -> Plan {
     if bare_count && all_exact && whole_container {
         return Plan {
             rung: Rung::Full,
+            code: None,
             where_sql,
             params: sql.params,
             reason: format!("count over {translated} exact conjunct(s)"),
@@ -942,6 +1000,7 @@ pub fn plan(query: &str, dialect: Dialect, model_in_force: bool) -> Plan {
     if let Some(l) = limit {
         return Plan {
             rung: Rung::Prefilter,
+            code: None,
             where_sql,
             params: sql.params,
             reason: format!(
@@ -958,21 +1017,28 @@ pub fn plan(query: &str, dialect: Dialect, model_in_force: bool) -> Plan {
     // set pays only when it spares the text level.
     let text_reach = conjs.iter().any(|c| c.note == "the text-model reach");
     if !whole_container && !text_reach {
-        return Plan::scan("a subtree prefix: the walk is narrow already");
+        return Plan::scan(None, "a subtree prefix: the walk is narrow already");
     }
     if translated == 0 {
-        return Plan::scan(if dropped.is_empty() {
-            if bare_count && !whole_container {
-                "a count below a directory: the tree walk".to_string()
-            } else {
-                "no predicate to push".to_string()
-            }
+        return if dropped.is_empty() {
+            Plan::scan(
+                None,
+                if bare_count && !whole_container {
+                    "a count below a directory: the tree walk"
+                } else {
+                    "no predicate to push"
+                },
+            )
         } else {
-            dropped.join("; ")
-        });
+            Plan::scan(
+                Some(quarb::diagnostic::OPERATOR_NOT_PUSHED),
+                dropped.join("; "),
+            )
+        };
     }
     Plan {
         rung: Rung::Prefilter,
+        code: None,
         where_sql,
         params: sql.params,
         reason: format!(

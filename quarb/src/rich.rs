@@ -253,8 +253,12 @@ pub fn diagnostics_html(diagnostics: &[Diagnostic], level: Severity) -> String {
         return String::new();
     }
     let line = |d: &Diagnostic| {
+        // the door to the code's remedy, where it has one
+        let tail = d.tail().map_or_else(String::new, |t| {
+            format!(" <span class=\"diag-tail\">{}</span>", escape(&t))
+        });
         format!(
-            "<div class=\"quarb-diag {}\"><span class=\"diag-code\">{}</span> <span class=\"diag-site\">({})</span> {}</div>",
+            "<div class=\"quarb-diag {}\"><span class=\"diag-code\">{}</span> <span class=\"diag-site\">({})</span> {}{tail}</div>",
             d.severity.word(),
             escape(&d.code),
             escape(&d.site),

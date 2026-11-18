@@ -23,7 +23,7 @@ use quarb_relational::{RelationalModel, RowSpec, TableSpec};
 pub enum DuckdbError {
     #[error("duckdb: {0}")]
     Duckdb(#[from] duckdb::Error),
-    #[error("pushdown plan: {0}")]
+    #[error("{0}")]
     Plan(String),
 }
 
@@ -364,10 +364,60 @@ fn fetch_rows(
 /// Execute pushed-down SQL directly: the column names and rows,
 /// ordered by `order_table`'s key when one is given (the pushdown
 /// contract: row order must match the adapter's document order).
+/// The catalog for a plan's column types: every column of `tables`
+/// with whether its type is numeric, and whether it is declared
+/// JSON. A sort, a fold and a distinct count are the scan's only
+/// over a numeric column, and DuckDB would run them over a text one
+/// by its own collation and grouping: the caller asks here first.
+pub fn column_catalog(
+    path: &std::path::Path,
+    tables: &[&str],
+) -> Result<Vec<(String, bool, bool)>, DuckdbError> {
+    let conn = Connection::open_with_flags(
+        path,
+        duckdb::Config::default().access_mode(duckdb::AccessMode::ReadOnly)?,
+    )?;
+    let mut catalog = Vec::new();
+    for table in tables {
+        let mut stmt = conn.prepare(
+            "SELECT column_name, data_type FROM information_schema.columns \
+             WHERE table_schema = 'main' AND table_name = ? \
+             ORDER BY ordinal_position",
+        )?;
+        let mut rows = stmt.query([table])?;
+        while let Some(r) = rows.next()? {
+            let name: String = r.get(0)?;
+            let declared: String = r.get(1)?;
+            let d = declared.to_ascii_uppercase();
+            // the integer, floating and decimal types (DECIMAL(18,3)
+            // carries its parameters in the name)
+            let base = d.split('(').next().unwrap_or("").trim();
+            let numeric = matches!(
+                base,
+                "TINYINT"
+                    | "SMALLINT"
+                    | "INTEGER"
+                    | "BIGINT"
+                    | "HUGEINT"
+                    | "UTINYINT"
+                    | "USMALLINT"
+                    | "UINTEGER"
+                    | "UBIGINT"
+                    | "UHUGEINT"
+                    | "FLOAT"
+                    | "DOUBLE"
+                    | "DECIMAL"
+            );
+            catalog.push((name, numeric, d == "JSON"));
+        }
+    }
+    Ok(catalog)
+}
+
 pub fn raw_query(
     path: &std::path::Path,
     sql: &str,
-    order_table: Option<&str>,
+    order: &quarb_relational::PlanOrder<'_>,
     join_left: Option<(&str, &[String])>,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>), DuckdbError> {
     // Witness-JOIN plans carry a uniqueness obligation this
@@ -383,16 +433,23 @@ pub fn raw_query(
         path,
         duckdb::Config::default().access_mode(duckdb::AccessMode::ReadOnly)?,
     )?;
-    let sql = match order_table {
-        Some(t) => {
-            let key = introspect(&conn)?
-                .into_iter()
-                .find(|s| s.name == t)
-                .and_then(|s| s.pk.map(|i| s.columns[i].clone()));
-            match key {
-                Some(k) => format!("{sql} ORDER BY \"{t}\".\"{k}\""),
-                None => sql.to_string(),
-            }
+    // The plan's order: its own sort where it has one, then the
+    // primary keys the whole reads are ordered by. A plan that needs
+    // a key a table lacks could not keep the scan's order, and
+    // declines.
+    let sql = match order.table {
+        Some(_) => {
+            let specs = introspect(&conn)?;
+            let key_of = |name: &str| {
+                specs
+                    .iter()
+                    .find(|s| s.name == name)
+                    .and_then(|s| s.pk.map(|i| s.columns[i].clone()))
+            };
+            let clause =
+                quarb_relational::order_clause(order, &key_of, &|t, k| format!("\"{t}\".\"{k}\""))
+                    .map_err(DuckdbError::Plan)?;
+            format!("{sql}{clause}")
         }
         None => sql.to_string(),
     };

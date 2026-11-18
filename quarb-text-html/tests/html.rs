@@ -429,21 +429,8 @@ fn head_declarations_land_on_the_document() {
         Some(Value::Str("The Quarb Project".into()))
     );
     // three colons are the reader's own facts: a declared name
-    // asked for there answers nothing, and for one release is told
-    // where it went, a flattened JSON-LD name as the path into the
-    // block
+    // asked for there answers nothing
     assert_eq!(m.metadata(root, "og:type"), None);
-    let head = m.head_meta();
-    assert_eq!(head.retired("og:type").as_deref(), Some(r#""og:type""#));
-    assert_eq!(
-        head.retired("schema:author.name").as_deref(),
-        Some("ld:author:name")
-    );
-    assert_eq!(
-        head.retired("schema:@type").as_deref(),
-        Some(r#"ld:"@type""#)
-    );
-    assert_eq!(head.retired("nothing-declared"), None);
     // Sections are untouched: no page traits leak onto them.
     let section = m.children(root)[0];
     assert!(!m.traits(section).contains(&"tag:capsa".to_string()));

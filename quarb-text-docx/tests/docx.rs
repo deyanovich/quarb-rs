@@ -477,21 +477,8 @@ fn core_properties_declare_the_identity() {
     );
     // the declared language is the curated `::lang`
     assert_eq!(values(&m, "::lang"), ["en-GB"]);
-    // the plain names this reader answered under until 0.63 are told
-    // where they went (RETIRED_KEY names the field): `:::title` read
-    // the title, and answered null in silence once the record took
-    // the file's names
-    let head = m.head_meta();
-    assert_eq!(head.retired("title").as_deref(), Some(r#""dc:title""#));
-    assert_eq!(head.retired("author").as_deref(), Some(r#""dc:creator""#));
-    assert_eq!(
-        head.retired("created").as_deref(),
-        Some(r#""dcterms:created""#)
-    );
-    assert_eq!(head.retired("dc:title").as_deref(), Some(r#""dc:title""#));
-    // a name the file never declared has nowhere to point
-    assert_eq!(head.retired("modified"), None);
-    assert_eq!(head.retired("publisher"), None);
+    // three colons are the reader's own facts: the title is the
+    // record's, and `:::title` answers nothing
     assert_eq!(values(&m, "^:::title"), [""]);
 }
 

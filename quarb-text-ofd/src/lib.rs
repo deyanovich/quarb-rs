@@ -819,36 +819,6 @@ fn document_property(
             _ => Value::Str(text),
         });
     }
-    // the reader's own names of 0.63 for the entries whose file
-    // name is another word
-    let was = [
-        ("created", "CreationDate"),
-        ("creator-version", "CreatorVersion"),
-        ("doc-id", "DocID"),
-        ("usage", "DocUsage"),
-    ];
-    let asked = was
-        .iter()
-        .find(|(old, _)| *old == name)
-        .map_or(name, |(_, now)| *now);
-    if let Some((key, _)) = identity.iter().find(|(k, _)| k.eq_ignore_ascii_case(asked)) {
-        let field = if key
-            .chars()
-            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-'))
-        {
-            key.clone()
-        } else {
-            format!("\"{key}\"")
-        };
-        quarb::record_warning(
-            quarb::diagnostic::RETIRED_KEY,
-            &format!("::{name}"),
-            format!(
-                "'::{name}' no longer reads what the document declares: the declarations \
-                 are the record '::head', and this one is '::head:{field}'"
-            ),
-        );
-    }
     None
 }
 

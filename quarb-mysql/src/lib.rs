@@ -33,7 +33,7 @@ use std::str::FromStr;
 pub enum MysqlError {
     #[error("mysql: {0}")]
     Mysql(#[from] sqlx::Error),
-    #[error("pushdown plan: {0}")]
+    #[error("{0}")]
     Plan(String),
     #[error("mysql runtime: {0}")]
     Runtime(#[from] std::io::Error),
@@ -111,6 +111,13 @@ pub struct MysqlAdapter {
 }
 
 impl MysqlAdapter {
+    /// Hold the crosslinks of these labels in memory (the mount's
+    /// `crosslinks=order,customer`, written in the URL's query
+    /// string): see [`RelationalModel::hold_crosslinks`].
+    pub fn hold_crosslinks(&mut self, labels: &[String]) -> Result<(), String> {
+        self.model.hold_crosslinks(labels)
+    }
+
     /// Connect and introspect. `config` is a `mysql://` URL
     /// (`mysql://user@host:3306/db`, or over a socket:
     /// `mysql://user@localhost/db?socket=/run/mysqld/mysqld.sock`).
@@ -412,7 +419,7 @@ pub fn column_catalog(
 pub fn raw_query(
     config: &str,
     sql: &str,
-    order_table: Option<&str>,
+    order: &quarb_relational::PlanOrder<'_>,
     join_left: Option<(&str, &[String])>,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>), MysqlError> {
     // Witness-JOIN plans carry a uniqueness obligation this
@@ -430,17 +437,23 @@ pub fn raw_query(
     let opts = MySqlConnectOptions::from_str(config)?;
     rt.block_on(async {
         let mut conn = opts.connect().await?;
-        let sql = match order_table {
-            Some(t) => {
+        // The plan's order: its own sort where it has one, then
+        // the primary keys the whole reads are ordered by. A plan
+        // that needs a key a table lacks could not keep the scan's
+        // order, and declines.
+        let sql = match order.table {
+            Some(_) => {
                 let (specs, _) = introspect(&mut conn).await?;
-                let key = specs
-                    .into_iter()
-                    .find(|s| s.name == t)
-                    .and_then(|s| s.pk.map(|i| s.columns[i].clone()));
-                match key {
-                    Some(k) => format!("{sql} ORDER BY `{t}`.`{k}`"),
-                    None => sql.to_string(),
-                }
+                let key_of = |name: &str| {
+                    specs
+                        .iter()
+                        .find(|s| s.name == name)
+                        .and_then(|s| s.pk.map(|i| s.columns[i].clone()))
+                };
+                let clause =
+                    quarb_relational::order_clause(order, &key_of, &|t, k| format!("`{t}`.`{k}`"))
+                        .map_err(MysqlError::Plan)?;
+                format!("{sql}{clause}")
             }
             None => sql.to_string(),
         };

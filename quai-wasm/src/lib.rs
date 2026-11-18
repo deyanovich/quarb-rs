@@ -347,13 +347,18 @@ fn embedded_frozen_ref(line: &str) -> bool {
 }
 
 /// One diagnostic as the page reads it: `{severity, code, site,
-/// message}`, the severity word in lower case.
+/// message, tail}`, the severity word in lower case; `tail` is the
+/// door to the code's remedy (`Narrow first: man SORT_NOT_PUSHED`),
+/// null for a code that has none.
 fn diag_json(d: &quarb::Diagnostic) -> serde_json::Value {
+    // the manual is a line of the session here
+    quarb::diagnostic::set_manual_door("man");
     json!({
         "severity": d.severity.word(),
         "code": d.code,
         "site": d.site,
         "message": d.message,
+        "tail": d.tail(),
     })
 }
 
@@ -365,7 +370,7 @@ fn error_envelope(label: &str, e: &anyhow::Error) -> String {
     let message = format!("{e:#}");
     let d = match e.downcast_ref::<quarb::QuarbError>() {
         Some(q) => q.diagnostic(),
-        None => quarb::Diagnostic::error("ERROR", "query", message.clone()),
+        None => quarb::Diagnostic::error(quarb::diagnostic::ERROR, "query", message.clone()),
     };
     envelope_full(
         label,

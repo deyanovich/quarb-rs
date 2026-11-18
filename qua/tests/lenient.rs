@@ -44,15 +44,22 @@ const FILTER: &str = ".events | sort_by(.payload.duration_ms) | .[0].id";
 fn a_by_key_function_is_refused_strictly_and_names_the_flag() {
     let (ok, out, err) = qua(&["--jq", FILTER, "events.json"]);
     assert!(!ok, "{out}");
+    // one line: the word of the reason, the Quarb way in the text,
+    // the flag in the tail
     assert!(
-        err.contains("unsupported jq construct: the sort_by function"),
+        err.starts_with("error SORT_NOT_TRANSLATED (jq): the sort_by function"),
         "{err}"
     );
     assert!(
         err.contains("/events/* @| sort_by(/payload/duration_ms::)"),
         "{err}"
     );
-    assert!(err.contains("--lenient translates it so"), "{err}");
+    assert!(
+        err.trim_end()
+            .ends_with("first in jq). Or pass --lenient: qua man SORT_NOT_TRANSLATED"),
+        "{err}"
+    );
+    assert_eq!(err.trim_end().lines().count(), 1, "{err}");
 }
 
 #[test]
@@ -96,9 +103,10 @@ fn lenient_is_silent_where_no_leniency_was_needed() {
 fn lenient_xpath_reads_a_relative_path_from_the_root() {
     let (ok, _, err) = qua(&["--xpath", "count(r/x)", "r.xml"]);
     assert!(!ok);
-    assert!(
-        err.contains("--lenient reads one from the document root"),
-        "{err}"
+    assert_eq!(
+        err.trim_end(),
+        "error PATH_NOT_TRANSLATED (xpath): relative paths (Quarb queries are root-anchored; \
+         start with / or //). Or pass --lenient: qua man PATH_NOT_TRANSLATED"
     );
     let (ok, out, err) = qua(&["--xpath", "--lenient", "count(r/x)", "r.xml"]);
     assert!(ok, "{err}");

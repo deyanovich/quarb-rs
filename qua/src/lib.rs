@@ -39,7 +39,7 @@ use quarb_mysql::MysqlAdapter;
 #[cfg(feature = "adapters")]
 use quarb_open::*;
 #[cfg(feature = "adapters")]
-pub use quarb_open::{Mounted, OpenOpts, SourceCtx, open_target};
+pub use quarb_open::{Mounted, OpenOpts, SourceCtx, open_target, split_database_url};
 #[cfg(feature = "adapters")]
 use quarb_oracle::OracleAdapter;
 #[cfg(feature = "adapters")]
@@ -642,8 +642,57 @@ fn report_top_error(r: anyhow::Result<()>) -> anyhow::Result<()> {
         return Ok(());
     };
     let (pre, post) = paint(quarb::Severity::Error);
-    eprintln!("{pre}Error{post}: {e:?}");
+    match e.downcast_ref::<Told>() {
+        // a refusal with a code is its diagnostic's own line
+        Some(Told(line)) => {
+            let rest = line.strip_prefix("error").unwrap_or(line);
+            eprintln!("{pre}error{post}{rest}");
+        }
+        None => eprintln!("{pre}Error{post}: {e:?}"),
+    }
     std::process::exit(1)
+}
+
+/// A refusal that ends the run and is told as a diagnostic's line,
+/// code and site and the door to its remedy, in place of the bare
+/// `Error: …`: a translator's refusal of a construct it has a word
+/// for (`error SORT_NOT_TRANSLATED (jq): … Or pass --lenient: qua
+/// man SORT_NOT_TRANSLATED`; ruling 2026-11-17).
+#[derive(Debug)]
+struct Told(String);
+
+impl std::fmt::Display for Told {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Told {}
+
+/// A translator's error as the run's refusal: its one line where it
+/// has a word (`worded`: the code, the reason, whether the lenient
+/// translator takes the construct), else the error under the
+/// bridge's name.
+fn translator_error<E>(
+    bridge: &'static str,
+    worded: Option<(&'static str, String, bool)>,
+    lenient: bool,
+    e: E,
+) -> anyhow::Error
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let line = worded.map(|(code, reason, takes)| {
+        quarb::diagnostic::translator_refusal(bridge, code, &reason, takes, lenient)
+    });
+    match line {
+        Some(line) => anyhow::Error::new(Told(line)),
+        None => anyhow::Error::new(e).context(match bridge {
+            "xpath" => "translating XPath",
+            "jq" => "translating jq",
+            _ => "translating SQL",
+        }),
+    }
 }
 
 /// `qc`'s entry point: the calculator. The query runs as `qua` runs
@@ -709,14 +758,15 @@ impl Paint {
         (pre, "\x1b[0m")
     }
 
-    /// A diagnostic's line: `severity CODE (site): message`, the
-    /// severity word alone painted.
+    /// A diagnostic's line (`severity CODE (site): message`, and
+    /// the tail of a code that has a remedy), the severity word
+    /// alone painted.
     pub fn line(&self, d: &quarb::Diagnostic) -> String {
         let (pre, post) = self.word(d.severity);
-        format!(
-            "{pre}{}{post} {} ({}): {}",
-            d.severity, d.code, d.site, d.message
-        )
+        let line = d.line();
+        // the line opens with the severity word
+        let word = d.severity.word();
+        format!("{pre}{word}{post}{}", &line[word.len()..])
     }
 
     /// The word `text` painted as an error (the `Error` of a
@@ -956,7 +1006,10 @@ fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
         } else {
             quarb_xpath::translate(&cli.query)
         }
-        .context("translating XPath")?;
+        .map_err(|e| {
+            let worded = e.not_translated().map(|(c, r, t)| (c, r.to_string(), t));
+            translator_error("xpath", worded, cli.lenient, e)
+        })?;
         for warning in &translation.warnings {
             note_warning(LENIENT_TRANSLATION, "xpath", warning.clone());
         }
@@ -972,7 +1025,10 @@ fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
         } else {
             quarb_jq::translate(&cli.query)
         }
-        .context("translating jq")?;
+        .map_err(|e| {
+            let worded = e.not_translated().map(|(c, r, t)| (c, r.to_string(), t));
+            translator_error("jq", worded, cli.lenient, e)
+        })?;
         // What the lenient translation gave up, one warning each.
         for warning in &translation.warnings {
             note_warning(LENIENT_TRANSLATION, "jq", warning.clone());
@@ -984,7 +1040,10 @@ fn cli_main_with(profile: Profile) -> anyhow::Result<()> {
     }
     #[cfg(feature = "adapters")]
     if cli.sql {
-        let translation = quarb_sql::translate(&cli.query).context("translating SQL")?;
+        let translation = quarb_sql::translate(&cli.query).map_err(|e| {
+            let worded = e.not_translated().map(|(c, r, t)| (c, r.to_string(), t));
+            translator_error("sql", worded, cli.lenient, e)
+        })?;
         for note in &translation.notes {
             eprintln!("note: {note}");
         }
@@ -2011,27 +2070,19 @@ fn resident_serve_loop<A: AstAdapter>(
     Ok(())
 }
 
-/// The planner's and the locale layer's codes (spec: Diagnostics):
-/// infos of what was pushed to a source, what stayed with the
-/// engine and why, what a source answered natively, and the locale
-/// in force; a warning for a locale tag without rules.
-const PUSHED: &str = "PUSHED";
-const NOT_PUSHED: &str = "NOT_PUSHED";
-const DELEGATED: &str = "DELEGATED";
-const LOCALE: &str = "LOCALE";
-const LOCALE_UNKNOWN: &str = "LOCALE_UNKNOWN";
-/// The tool's own codes beside the specification's: an external
-/// reference the run left unresolved, a reading a mount declined.
-const UNRESOLVED: &str = "UNRESOLVED";
-const READING: &str = "READING";
-/// A warning of `--lenient`: a translator took the nearest Quarb
-/// construct for one with no exact counterpart, and the answer can
-/// differ from the source language's in the way the message names.
-const LENIENT_TRANSLATION: &str = "LENIENT_TRANSLATION";
-/// Debug codes: the plan a source was handed, the mount a query ran
-/// over (content the implementation's own).
-const PLAN: &str = "PLAN";
-const MOUNT: &str = "MOUNT";
+/// The codes the tool itself raises, named in the engine's list
+/// with every other (`quarb::diagnostic`): the planner's account
+/// (what was pushed to a source, what a source answered natively;
+/// what stayed with the engine goes under the word of its reason,
+/// `SORT_NOT_PUSHED` and its kin), the locale in force and a locale
+/// tag without rules, an external reference the run left
+/// unresolved, a reading a mount declined, a lenient translation,
+/// and the debug codes of the plan a source was handed and the
+/// mount a query ran over.
+use quarb::diagnostic::{
+    DELEGATED, LENIENT_TRANSLATION, LOCALE, LOCALE_UNKNOWN, MOUNT, PLAN, PUSHED, READING,
+    UNRESOLVED,
+};
 
 thread_local! {
     /// The diagnostics the tool itself raises around a run — the
@@ -2534,7 +2585,8 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
     if let Some(s) = path.as_ref().and_then(|p| p.to_str())
         && s.starts_with("mssql://")
     {
-        if let Some(plan) = pushdown_plan(cli, query, Some(quarb_sql::Dialect::Mssql)) {
+        if let Some(plan) = pushdown_plan(cli, query, Some(quarb_sql::Dialect::Mssql), Door::PLAIN)
+        {
             match quarb_mssql::raw_query(
                 s,
                 &plan.sql,
@@ -2544,15 +2596,15 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                     .map(|(t, c)| (t.as_str(), c.as_slice())),
             ) {
                 Ok((cols, rows)) => {
-                    print_raw(&cols, rows, oc)?;
+                    print_raw(&cols, rows, plan.record, plan.properties, oc)?;
                     return Ok(());
                 }
                 Err(e) => {
                     note_info(
-                        NOT_PUSHED,
+                        quarb::diagnostic::STATEMENT_NOT_PUSHED,
                         "query",
                         format!(
-                            "pushdown: plan not executed ({e}); scanning — the plan: {}",
+                            "the plan was not executed ({e}); scanning — the plan: {}",
                             plan.sql
                         ),
                     );
@@ -2567,9 +2619,9 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                     Ok(()) => a,
                     Err(e) => {
                         note_info(
-                            NOT_PUSHED,
+                            quarb::diagnostic::STATEMENT_NOT_PUSHED,
                             "prefilter",
-                            format!("partial pushdown: prefilter rejected ({e}); scanning"),
+                            format!("the prefilter was rejected ({e}); scanning"),
                         );
                         MssqlAdapter::connect(s).context("connecting to SQL Server")?
                     }
@@ -2577,6 +2629,12 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
             }
             None => MssqlAdapter::connect(s).context("connecting to SQL Server")?,
         };
+        // the mount's `crosslinks=`, written in the URL's query
+        // string: the references of these labels held in memory
+        let mut adapter = adapter;
+        adapter
+            .hold_crosslinks(&ctx.crosslinks())
+            .map_err(|e| anyhow::anyhow!("the database: {e}"))?;
         return run_relational(
             adapter,
             cli.no_graft,
@@ -2592,7 +2650,8 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
     if let Some(s) = path.as_ref().and_then(|p| p.to_str())
         && s.starts_with("oracle://")
     {
-        if let Some(plan) = pushdown_plan(cli, query, Some(quarb_sql::Dialect::Oracle)) {
+        if let Some(plan) = pushdown_plan(cli, query, Some(quarb_sql::Dialect::Oracle), Door::PLAIN)
+        {
             match quarb_oracle::raw_query(
                 s,
                 &plan.sql,
@@ -2602,15 +2661,15 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                     .map(|(t, c)| (t.as_str(), c.as_slice())),
             ) {
                 Ok((cols, rows)) => {
-                    print_raw(&cols, rows, oc)?;
+                    print_raw(&cols, rows, plan.record, plan.properties, oc)?;
                     return Ok(());
                 }
                 Err(e) => {
                     note_info(
-                        NOT_PUSHED,
+                        quarb::diagnostic::STATEMENT_NOT_PUSHED,
                         "query",
                         format!(
-                            "pushdown: plan not executed ({e}); scanning — the plan: {}",
+                            "the plan was not executed ({e}); scanning — the plan: {}",
                             plan.sql
                         ),
                     );
@@ -2625,9 +2684,9 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                     Ok(()) => a,
                     Err(e) => {
                         note_info(
-                            NOT_PUSHED,
+                            quarb::diagnostic::STATEMENT_NOT_PUSHED,
                             "prefilter",
-                            format!("partial pushdown: prefilter rejected ({e}); scanning"),
+                            format!("the prefilter was rejected ({e}); scanning"),
                         );
                         OracleAdapter::connect(s).context("connecting to Oracle")?
                     }
@@ -2635,6 +2694,12 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
             }
             None => OracleAdapter::connect(s).context("connecting to Oracle")?,
         };
+        // the mount's `crosslinks=`, written in the URL's query
+        // string: the references of these labels held in memory
+        let mut adapter = adapter;
+        adapter
+            .hold_crosslinks(&ctx.crosslinks())
+            .map_err(|e| anyhow::anyhow!("the database: {e}"))?;
         return run_relational(
             adapter,
             cli.no_graft,
@@ -2650,7 +2715,7 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
     if let Some(s) = path.as_ref().and_then(|p| p.to_str())
         && s.starts_with("bigquery://")
     {
-        if let Some(plan) = pushdown_plan(cli, query, None) {
+        if let Some(plan) = pushdown_plan(cli, query, None, Door::PLAIN) {
             match quarb_bigquery::raw_query(
                 s,
                 &plan.sql,
@@ -2660,7 +2725,7 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                     .map(|(t, c)| (t.as_str(), c.as_slice())),
             ) {
                 Ok((cols, rows)) => {
-                    print_raw(&cols, rows, oc)?;
+                    print_raw(&cols, rows, plan.record, plan.properties, oc)?;
                     return Ok(());
                 }
                 Err(e) => {
@@ -2668,10 +2733,10 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                     // witness-JOIN uniqueness obligation): fall back to
                     // the scan, but never silently under --diagnostics=info.
                     note_info(
-                        NOT_PUSHED,
+                        quarb::diagnostic::STATEMENT_NOT_PUSHED,
                         "query",
                         format!(
-                            "pushdown: plan not executed ({e}); scanning — the plan: {}",
+                            "the plan was not executed ({e}); scanning — the plan: {}",
                             plan.sql
                         ),
                     );
@@ -2686,9 +2751,9 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                     Ok(()) => a,
                     Err(e) => {
                         note_info(
-                            NOT_PUSHED,
+                            quarb::diagnostic::STATEMENT_NOT_PUSHED,
                             "prefilter",
-                            format!("partial pushdown: prefilter rejected ({e}); scanning"),
+                            format!("the prefilter was rejected ({e}); scanning"),
                         );
                         BigqueryAdapter::connect(s).context("connecting to BigQuery")?
                     }
@@ -2696,6 +2761,12 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
             }
             None => BigqueryAdapter::connect(s).context("connecting to BigQuery")?,
         };
+        // the mount's `crosslinks=`, written in the URL's query
+        // string: the references of these labels held in memory
+        let mut adapter = adapter;
+        adapter
+            .hold_crosslinks(&ctx.crosslinks())
+            .map_err(|e| anyhow::anyhow!("the database: {e}"))?;
         return run_relational(
             adapter,
             cli.no_graft,
@@ -2713,7 +2784,7 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
     if let Some(s) = path.as_ref().and_then(|p| p.to_str())
         && s.starts_with("athena:")
     {
-        if let Some(plan) = pushdown_plan(cli, query, None) {
+        if let Some(plan) = pushdown_plan(cli, query, None, Door::PLAIN) {
             match quarb_athena::raw_query(
                 s,
                 &plan.sql,
@@ -2723,15 +2794,15 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                     .map(|(t, c)| (t.as_str(), c.as_slice())),
             ) {
                 Ok((cols, rows)) => {
-                    print_raw(&cols, rows, oc)?;
+                    print_raw(&cols, rows, plan.record, plan.properties, oc)?;
                     return Ok(());
                 }
                 Err(e) => {
                     note_info(
-                        NOT_PUSHED,
+                        quarb::diagnostic::STATEMENT_NOT_PUSHED,
                         "query",
                         format!(
-                            "pushdown: plan not executed ({e}); scanning — the plan: {}",
+                            "the plan was not executed ({e}); scanning — the plan: {}",
                             plan.sql
                         ),
                     );
@@ -2746,9 +2817,9 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                     Ok(()) => a,
                     Err(e) => {
                         note_info(
-                            NOT_PUSHED,
+                            quarb::diagnostic::STATEMENT_NOT_PUSHED,
                             "prefilter",
-                            format!("partial pushdown: prefilter rejected ({e}); scanning"),
+                            format!("the prefilter was rejected ({e}); scanning"),
                         );
                         AthenaAdapter::connect(s).context("connecting to Athena")?
                     }
@@ -2756,6 +2827,12 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
             }
             None => AthenaAdapter::connect(s).context("connecting to Athena")?,
         };
+        // the mount's `crosslinks=`, written in the URL's query
+        // string: the references of these labels held in memory
+        let mut adapter = adapter;
+        adapter
+            .hold_crosslinks(&ctx.crosslinks())
+            .map_err(|e| anyhow::anyhow!("the database: {e}"))?;
         return run_relational(
             adapter,
             cli.no_graft,
@@ -2772,23 +2849,32 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
         && s.starts_with("mysql://")
     {
         if let Some(plan) =
-            pushdown_plan(cli, query, Some(quarb_sql::Dialect::MySql)).filter(|plan| {
-                column_types_hold(cli, "pushdown", &plan.column_types, || {
-                    let tables: Vec<&str> = plan.tables.iter().map(String::as_str).collect();
-                    Ok(quarb_mysql::column_catalog(s, &tables)?)
-                })
-            })
+            pushdown_plan(cli, query, Some(quarb_sql::Dialect::MySql), Door::CHECKED).filter(
+                |plan| {
+                    column_types_hold(
+                        cli,
+                        "query",
+                        &plan.column_types,
+                        plan.keyed_by.as_ref(),
+                        || {
+                            let tables: Vec<&str> =
+                                plan.tables.iter().map(String::as_str).collect();
+                            Ok(quarb_mysql::column_catalog(s, &tables)?)
+                        },
+                    )
+                },
+            )
         {
             match quarb_mysql::raw_query(
                 s,
                 &plan.sql,
-                plan.order_table.as_deref(),
+                &plan_order(&plan),
                 plan.join_left
                     .as_ref()
                     .map(|(t, c)| (t.as_str(), c.as_slice())),
             ) {
                 Ok((cols, rows)) => {
-                    print_raw(&cols, rows, oc)?;
+                    print_raw(&cols, rows, plan.record, plan.properties, oc)?;
                     return Ok(());
                 }
                 Err(e) => {
@@ -2796,10 +2882,10 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                     // witness-JOIN uniqueness obligation): fall back to
                     // the scan, but never silently under --diagnostics=info.
                     note_info(
-                        NOT_PUSHED,
+                        quarb::diagnostic::STATEMENT_NOT_PUSHED,
                         "query",
                         format!(
-                            "pushdown: plan not executed ({e}); scanning — the plan: {}",
+                            "the plan was not executed ({e}); scanning — the plan: {}",
                             plan.sql
                         ),
                     );
@@ -2808,7 +2894,7 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
         }
         let adapter = match partial_plan_with(cli, query, Some(quarb_sql::Dialect::MySql), true)
             .filter(|pl| {
-                column_types_hold(cli, "partial pushdown", &pl.column_types, || {
+                column_types_hold(cli, "prefilter", &pl.column_types, None, || {
                     Ok(quarb_mysql::column_catalog(s, &[pl.table.as_str()])?)
                 })
             }) {
@@ -2819,9 +2905,9 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                     Ok(()) => a,
                     Err(e) => {
                         note_info(
-                            NOT_PUSHED,
+                            quarb::diagnostic::STATEMENT_NOT_PUSHED,
                             "prefilter",
-                            format!("partial pushdown: prefilter rejected ({e}); scanning"),
+                            format!("the prefilter was rejected ({e}); scanning"),
                         );
                         MysqlAdapter::connect(s).context("connecting to MySQL")?
                     }
@@ -2829,6 +2915,12 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
             }
             None => MysqlAdapter::connect(s).context("connecting to MySQL")?,
         };
+        // the mount's `crosslinks=`, written in the URL's query
+        // string: the references of these labels held in memory
+        let mut adapter = adapter;
+        adapter
+            .hold_crosslinks(&ctx.crosslinks())
+            .map_err(|e| anyhow::anyhow!("the database: {e}"))?;
         return run_relational(
             adapter,
             cli.no_graft,
@@ -2846,17 +2938,26 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
     if let Some(s) = path.as_ref().and_then(|p| p.to_str())
         && is_pg_config(s)
     {
-        if let Some(plan) = pushdown_plan(cli, query, Some(quarb_sql::Dialect::Postgres)) {
+        if let Some(plan) =
+            pushdown_plan(cli, query, Some(quarb_sql::Dialect::Postgres), Door::KEYED).filter(
+                |plan| {
+                    keyed_column_holds(cli, plan, || {
+                        let tables: Vec<&str> = plan.tables.iter().map(String::as_str).collect();
+                        Ok(quarb_postgres::column_catalog(s, &tables)?)
+                    })
+                },
+            )
+        {
             match quarb_postgres::raw_query(
                 s,
                 &plan.sql,
-                plan.order_table.as_deref(),
+                &plan_order(&plan),
                 plan.join_left
                     .as_ref()
                     .map(|(t, c)| (t.as_str(), c.as_slice())),
             ) {
                 Ok((cols, rows)) => {
-                    print_raw(&cols, rows, oc)?;
+                    print_raw(&cols, rows, plan.record, plan.properties, oc)?;
                     return Ok(());
                 }
                 Err(e) => {
@@ -2864,10 +2965,10 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                     // witness-JOIN uniqueness obligation): fall back to
                     // the scan, but never silently under --diagnostics=info.
                     note_info(
-                        NOT_PUSHED,
+                        quarb::diagnostic::STATEMENT_NOT_PUSHED,
                         "query",
                         format!(
-                            "pushdown: plan not executed ({e}); scanning — the plan: {}",
+                            "the plan was not executed ({e}); scanning — the plan: {}",
                             plan.sql
                         ),
                     );
@@ -2883,9 +2984,9 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                     Ok(()) => a,
                     Err(e) => {
                         note_info(
-                            NOT_PUSHED,
+                            quarb::diagnostic::STATEMENT_NOT_PUSHED,
                             "prefilter",
-                            format!("partial pushdown: prefilter rejected ({e}); scanning"),
+                            format!("the prefilter was rejected ({e}); scanning"),
                         );
                         PostgresAdapter::connect(s).context("connecting to PostgreSQL")?
                     }
@@ -2893,6 +2994,12 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
             }
             None => PostgresAdapter::connect(s).context("connecting to PostgreSQL")?,
         };
+        // the mount's `crosslinks=`, written in the URL's query
+        // string: the references of these labels held in memory
+        let mut adapter = adapter;
+        adapter
+            .hold_crosslinks(&ctx.crosslinks())
+            .map_err(|e| anyhow::anyhow!("the database: {e}"))?;
         return run_relational(
             adapter,
             cli.no_graft,
@@ -2910,17 +3017,22 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("duckdb") || e.eq_ignore_ascii_case("ddb"))
     {
-        if let Some(plan) = pushdown_plan(cli, query, None) {
+        if let Some(plan) = pushdown_plan(cli, query, None, Door::KEYED).filter(|plan| {
+            keyed_column_holds(cli, plan, || {
+                let tables: Vec<&str> = plan.tables.iter().map(String::as_str).collect();
+                Ok(quarb_duckdb::column_catalog(p, &tables)?)
+            })
+        }) {
             match quarb_duckdb::raw_query(
                 p,
                 &plan.sql,
-                plan.order_table.as_deref(),
+                &plan_order(&plan),
                 plan.join_left
                     .as_ref()
                     .map(|(t, c)| (t.as_str(), c.as_slice())),
             ) {
                 Ok((cols, rows)) => {
-                    print_raw(&cols, rows, oc)?;
+                    print_raw(&cols, rows, plan.record, plan.properties, oc)?;
                     return Ok(());
                 }
                 Err(e) => {
@@ -2928,10 +3040,10 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                     // witness-JOIN uniqueness obligation): fall back to
                     // the scan, but never silently under --diagnostics=info.
                     note_info(
-                        NOT_PUSHED,
+                        quarb::diagnostic::STATEMENT_NOT_PUSHED,
                         "query",
                         format!(
-                            "pushdown: plan not executed ({e}); scanning — the plan: {}",
+                            "the plan was not executed ({e}); scanning — the plan: {}",
                             plan.sql
                         ),
                     );
@@ -2960,24 +3072,32 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
         && is_sqlite(p)
     {
         if let Some(plan) =
-            pushdown_plan(cli, query, Some(quarb_sql::Dialect::Sqlite)).filter(|plan| {
-                column_types_hold(cli, "pushdown", &plan.column_types, || {
-                    let tables: Vec<&str> = plan.tables.iter().map(String::as_str).collect();
-                    Ok(quarb_sqlite::column_catalog(p, &tables)?)
-                })
-            })
+            pushdown_plan(cli, query, Some(quarb_sql::Dialect::Sqlite), Door::CHECKED).filter(
+                |plan| {
+                    column_types_hold(
+                        cli,
+                        "query",
+                        &plan.column_types,
+                        plan.keyed_by.as_ref(),
+                        || {
+                            let tables: Vec<&str> =
+                                plan.tables.iter().map(String::as_str).collect();
+                            Ok(quarb_sqlite::column_catalog(p, &tables)?)
+                        },
+                    )
+                },
+            )
         {
             match quarb_sqlite::raw_query(
                 p,
                 &plan.sql,
-                plan.order_table.as_deref(),
+                &plan_order(&plan),
                 plan.join_left
                     .as_ref()
                     .map(|(t, c)| (t.as_str(), c.as_slice())),
-                plan.order_then.as_deref(),
             ) {
                 Ok((cols, rows)) => {
-                    print_raw(&cols, rows, oc)?;
+                    print_raw(&cols, rows, plan.record, plan.properties, oc)?;
                     return Ok(());
                 }
                 Err(e) => {
@@ -2985,10 +3105,10 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                     // witness-JOIN uniqueness obligation): fall back to
                     // the scan, but never silently under --diagnostics=info.
                     note_info(
-                        NOT_PUSHED,
+                        quarb::diagnostic::STATEMENT_NOT_PUSHED,
                         "query",
                         format!(
-                            "pushdown: plan not executed ({e}); scanning — the plan: {}",
+                            "the plan was not executed ({e}); scanning — the plan: {}",
                             plan.sql
                         ),
                     );
@@ -2998,7 +3118,7 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
         let refs = relational_refs(&cli.refs)?;
         let adapter = match partial_plan_with(cli, query, Some(quarb_sql::Dialect::Sqlite), true)
             .filter(|pl| {
-                column_types_hold(cli, "partial pushdown", &pl.column_types, || {
+                column_types_hold(cli, "prefilter", &pl.column_types, None, || {
                     Ok(quarb_sqlite::column_catalog(p, &[pl.table.as_str()])?)
                 })
             }) {
@@ -3009,9 +3129,9 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                     Ok(()) => a,
                     Err(e) => {
                         note_info(
-                            NOT_PUSHED,
+                            quarb::diagnostic::STATEMENT_NOT_PUSHED,
                             "prefilter",
-                            format!("partial pushdown: prefilter rejected ({e}); scanning"),
+                            format!("the prefilter was rejected ({e}); scanning"),
                         );
                         SqliteAdapter::open_with_refs(p, &refs)
                             .context("opening SQLite database")?
@@ -3246,16 +3366,32 @@ fn pushdown_applies(cli: &Cli) -> bool {
     // A model enriches the arbor (derived containers, references,
     // edges, weights) and is checked at load; the SQL plan sees the
     // bare source, so a modelled run goes through the engine.
-    !cli.no_pushdown
-        && cli.model.is_none()
-        && !cli.plan
-        && cli.budget.is_none()
-        && !cli.kaiv
-        && !cli.expand
-        && !cli.expand_1
-        && cli.save.is_none()
-        && !cli.resident
-        && !cli.resident_serve
+    pushdown_off(cli).is_none()
+}
+
+/// What keeps the run from pushing anything to its source, as the
+/// user wrote it: the option a refusal names (`OPTION_NOT_PUSHED`).
+/// `None` where pushdown applies.
+fn pushdown_off(cli: &Cli) -> Option<&'static str> {
+    if cli.no_pushdown {
+        Some("--no-pushdown")
+    } else if cli.model.is_some() {
+        Some("--model")
+    } else if cli.plan {
+        Some("--plan")
+    } else if cli.budget.is_some() {
+        Some("--budget")
+    } else if cli.kaiv {
+        Some("--kaiv")
+    } else if cli.expand || cli.expand_1 {
+        Some("--expand")
+    } else if cli.save.is_some() {
+        Some("--save")
+    } else if cli.resident || cli.resident_serve {
+        Some("--resident")
+    } else {
+        None
+    }
 }
 
 /// The partial-pushdown plan (a WHERE for one table's fetch), with
@@ -3279,8 +3415,9 @@ fn partial_plan(
 #[cfg(feature = "adapters")]
 fn column_types_hold(
     _cli: &Cli,
-    what: &str,
+    site: &str,
     types: &quarb_sql::ColumnTypes,
+    keyed_by: Option<&(quarb_sql::Refusal, String)>,
     catalog: impl FnOnce() -> anyhow::Result<Vec<(String, bool, bool)>>,
 ) -> bool {
     if types.is_empty() {
@@ -3297,16 +3434,73 @@ fn column_types_hold(
             .collect(),
     };
     if !unmet.is_empty() {
-        note_info(
-            NOT_PUSHED,
-            what,
-            format!(
-                "{what}: not used (the comparison or reducer on {} would follow the column's type where the scan follows the value); scanning",
-                unmet.join(", ")
+        // a prefilter the types decline is not used: the note that
+        // told of it is taken back, so the account says one thing
+        if site == "prefilter" {
+            NOTES.with(|n| {
+                let mut n = n.borrow_mut();
+                if n.last()
+                    .is_some_and(|d| d.code == PUSHED && d.site == "prefilter")
+                {
+                    n.pop();
+                }
+            });
+        }
+        // A sort, a fold or a distinct count by a column that is not
+        // numeric is told under its own word: the database would run
+        // it, by its collation or its own grouping of the texts.
+        match keyed_by.filter(|(_, column)| unmet.contains(column)) {
+            Some((word, column)) => {
+                let reason = match word {
+                    quarb_sql::Refusal::Sort => "ORDER BY collations differ per engine".to_string(),
+                    quarb_sql::Refusal::Fold => format!(
+                        "a fold by {column}, which is no numeric column: two texts that read \
+                         as one number are one key to the engine and two to GROUP BY"
+                    ),
+                    _ => format!(
+                        "a count of the distinct values of {column}, which is no numeric \
+                         column: two texts that read as one number are one value to the \
+                         engine and two to DISTINCT"
+                    ),
+                };
+                if let Some(code) = word.code() {
+                    note_info(code, site, format!("{reason}; scanning"));
+                }
+            }
+            None => note_info(
+                quarb::diagnostic::TYPE_NOT_PUSHED,
+                site,
+                format!(
+                    "the comparison or reducer on {} would follow the column's type where \
+                     the scan follows the value; scanning",
+                    unmet.join(", ")
+                ),
             ),
-        );
+        }
     }
     unmet.is_empty()
+}
+
+/// The catalog's word on the one column a plan sorts, folds or
+/// counts distinct by, for a strictly typed database: such a
+/// database refuses a mixed comparison itself, but it would run a
+/// sort or a GROUP BY over a text column by its own collation and
+/// grouping, so that column alone is held against the catalog. A
+/// plan with no such column needs no look.
+#[cfg(feature = "adapters")]
+fn keyed_column_holds(
+    cli: &Cli,
+    plan: &quarb_sql::Pushdown,
+    catalog: impl FnOnce() -> anyhow::Result<Vec<(String, bool, bool)>>,
+) -> bool {
+    let Some((_, column)) = &plan.keyed_by else {
+        return true;
+    };
+    let types = quarb_sql::ColumnTypes {
+        numeric: vec![column.clone()],
+        ..Default::default()
+    };
+    column_types_hold(cli, "query", &types, plan.keyed_by.as_ref(), catalog)
 }
 
 /// [`partial_plan`]; `keyed_hops` for an adapter that reads steps by
@@ -3339,13 +3533,44 @@ fn partial_plan_with(
             Some(p)
         }
         Err(e) => {
-            note_info(
-                NOT_PUSHED,
-                "prefilter",
-                format!("partial pushdown refused: {e}; scanning"),
-            );
+            note_not_pushed("prefilter", &e);
             None
         }
+    }
+}
+
+/// The planner's account of a part it did not hand to the source:
+/// the reason under its word's code (`SORT_NOT_PUSHED`; ruling
+/// 2026-11-17, one word per reason). Three refusals tell nothing: a
+/// partial plan with no leading condition (nothing was there to
+/// push), a partial plan refused for the reason the whole plan was
+/// just told under, and a query the planner could not parse (it
+/// reads with the engine's own parser, and the engine's error says
+/// it once).
+#[cfg(feature = "adapters")]
+fn note_not_pushed(site: &str, e: &quarb_sql::SqlError) {
+    match e.not_pushed() {
+        Some((word, reason)) => {
+            if let Some(code) = word.code() {
+                let message = format!("{reason}; scanning");
+                // the partial plan refused for the whole plan's own
+                // reason says nothing new
+                let said = NOTES.with(|n| {
+                    n.borrow()
+                        .last()
+                        .is_some_and(|d| d.code == code && d.message == message)
+                });
+                if !said {
+                    note_info(code, site, message);
+                }
+            }
+        }
+        None if matches!(e, quarb_sql::SqlError::Syntax(_)) => {}
+        None => note_info(
+            quarb::diagnostic::OPERATOR_NOT_PUSHED,
+            site,
+            format!("{e}; scanning"),
+        ),
     }
 }
 
@@ -3370,6 +3595,54 @@ fn target_grafts_json2(cli: &Cli) -> bool {
         })
 }
 
+/// What a database's door does with a plan beyond running its
+/// statement.
+#[cfg(feature = "adapters")]
+#[derive(Clone, Copy)]
+struct Door {
+    /// The driver composes the plan's whole order (a join's second
+    /// key, a sort, a reverse, a fold's groups, a LIMIT).
+    orders: bool,
+    /// The plan's column types are held against the catalog before
+    /// it runs.
+    catalog: bool,
+}
+
+#[cfg(feature = "adapters")]
+impl Door {
+    /// SQLite and MySQL: the order composed, the types checked.
+    const CHECKED: Door = Door {
+        orders: true,
+        catalog: true,
+    };
+    /// DuckDB and PostgreSQL: the order composed, and the catalog
+    /// asked of the one column a sort, a fold or a distinct count goes
+    /// by ([`keyed_column_holds`]); a mixed comparison is the
+    /// database's own to refuse, as before.
+    const KEYED: Door = Door {
+        orders: true,
+        catalog: true,
+    };
+    /// The other drivers: the FROM table's key alone.
+    const PLAIN: Door = Door {
+        orders: false,
+        catalog: false,
+    };
+}
+
+/// The order a plan owes, as its driver takes it.
+#[cfg(feature = "adapters")]
+fn plan_order(plan: &quarb_sql::Pushdown) -> quarb_relational::PlanOrder<'_> {
+    quarb_relational::PlanOrder {
+        table: plan.order_table.as_deref(),
+        then: plan.order_then.as_deref(),
+        first: plan.order_first.as_deref(),
+        desc: plan.order_desc,
+        groups: plan.order_groups,
+        limit: plan.limit,
+    }
+}
+
 /// The pushdown plan for a database input, with --diagnostics=info
 /// commentary on stderr either way.
 #[cfg(feature = "adapters")]
@@ -3377,9 +3650,14 @@ fn pushdown_plan(
     cli: &Cli,
     query: &str,
     dialect: Option<quarb_sql::Dialect>,
+    door: Door,
 ) -> Option<quarb_sql::Pushdown> {
-    if !pushdown_applies(cli) {
-        note_info(NOT_PUSHED, "query", "pushdown: disabled; scanning");
+    if let Some(option) = pushdown_off(cli) {
+        note_info(
+            quarb::diagnostic::OPTION_NOT_PUSHED,
+            "query",
+            format!("nothing is pushed under {option}; scanning"),
+        );
         return None;
     }
     match quarb_sql::pushdown_explained(query, dialect) {
@@ -3397,28 +3675,70 @@ fn pushdown_plan(
             // scan and stays.)
             if plan.column_types.json_children && target_grafts_json2(cli) {
                 note_info(
-                    NOT_PUSHED,
+                    quarb::diagnostic::GRAFT_NOT_PUSHED,
                     "query",
                     format!(
-                        "pushdown: not used (the plan reads a JSON value as a child node of \
-                         its column, and under ?graft=json2 a scalar is a property: write \
-                         /col::key); scanning — the plan: {}",
+                        "the plan reads a JSON value as a child node of its column, and under \
+                         ?graft=json2 a scalar is a property: write /col::key; scanning — the \
+                         plan: {}",
                         plan.sql
                     ),
                 );
                 return None;
             }
-            // An every-witness JOIN (`<=>*`) owes the joined table's
-            // order within each driver's rows: the SQLite driver
-            // keeps it; a driver that orders by one key only would
-            // answer the rows in the backend's order, so it scans.
-            if plan.order_then.is_some() && !matches!(dialect, Some(quarb_sql::Dialect::Sqlite)) {
+            // A plan owes its rows in the scan's order. Beyond the
+            // FROM table's key, which every driver appends, that is
+            // the driver's to compose (`quarb_relational::
+            // order_clause`): an every-witness JOIN's second key, a
+            // sort's own terms, the keys turned for a reverse, the
+            // least key of each group of a fold, a LIMIT after them.
+            // A driver that appends the one key alone scans.
+            if !door.orders {
+                let owed = if plan.order_then.is_some() {
+                    Some((
+                        quarb::diagnostic::JOIN_NOT_PUSHED,
+                        "an every-witness JOIN ('<=>*')",
+                    ))
+                } else if plan.order_first.is_some() || plan.order_desc {
+                    Some((quarb::diagnostic::SORT_NOT_PUSHED, "a sort or a reverse"))
+                } else if plan.order_groups {
+                    Some((quarb::diagnostic::FOLD_NOT_PUSHED, "a fold"))
+                } else if plan.limit.is_some() {
+                    Some((quarb::diagnostic::TAKE_NOT_PUSHED, "a positional selection"))
+                } else {
+                    None
+                };
+                if let Some((code, what)) = owed {
+                    note_info(
+                        code,
+                        "query",
+                        format!(
+                            "{what} is pushed where the driver keeps the plan's order \
+                             (SQLite, DuckDB, PostgreSQL, MySQL), and this one does not; \
+                             scanning — the plan: {}",
+                            plan.sql
+                        ),
+                    );
+                    return None;
+                }
+            }
+            // A sort, a fold or a distinct count reads a numeric
+            // column, and over a text one the database would run the
+            // plan and answer another order or other groups: the
+            // catalog must confirm the type first, and a source whose
+            // catalog is not asked scans.
+            if plan.keyed_by.is_some() && !door.catalog {
                 note_info(
-                    NOT_PUSHED,
+                    quarb::diagnostic::TYPE_NOT_PUSHED,
                     "query",
                     format!(
-                        "pushdown: an every-witness JOIN ('<=>*') pushes on SQLite only (the \
-                         joined rows' order is kept there); scanning — the plan: {}",
+                        "a sort, a fold or a distinct count by {} is pushed where the column \
+                         is numeric, and this source's column types are not checked before a \
+                         plan runs (SQLite's, MySQL's, PostgreSQL's and DuckDB's are); \
+                         scanning — the plan: {}",
+                        plan.keyed_by
+                            .as_ref()
+                            .map_or("a column", |(_, c)| c.as_str()),
                         plan.sql
                     ),
                 );
@@ -3427,21 +3747,27 @@ fn pushdown_plan(
             Some(plan)
         }
         Err(e) => {
-            note_info(
-                NOT_PUSHED,
-                "query",
-                format!("pushdown refused: {e}; scanning"),
-            );
+            note_not_pushed("query", &e);
             None
         }
     }
 }
 
-/// Print a pushed-down result the way the engine would: bare
-/// values for one column, records for several. Buffered: one
-/// flush at the end, not a syscall per line.
+/// Print a pushed-down result the way the engine would: the bare
+/// value of a one-column projection, a record where the query built
+/// records (`record`: `| %(::title)` is a record of one field, which
+/// was printed as the bare value) or the row has several columns;
+/// under `properties` (`| %`) a row's record holds its cells that
+/// are not NULL, as the node's own record does.
+/// Buffered: one flush at the end, not a syscall per line.
 #[cfg(feature = "adapters")]
-fn print_raw(cols: &[String], rows: Vec<Vec<Value>>, oc: &OutputCtx) -> anyhow::Result<()> {
+fn print_raw(
+    cols: &[String],
+    rows: Vec<Vec<Value>>,
+    record: bool,
+    properties: bool,
+    oc: &OutputCtx,
+) -> anyhow::Result<()> {
     // Under --diagnostics=info: the statement the driver executed, verbatim,
     // ORDER BY and all. Recorded at execution because the key is
     // a per-adapter catalog lookup.
@@ -3453,10 +3779,18 @@ fn print_raw(cols: &[String], rows: Vec<Vec<Value>>, oc: &OutputCtx) -> anyhow::
     let values: Vec<Value> = rows
         .into_iter()
         .flat_map(|row| {
-            if cols.len() <= 1 {
+            if cols.len() <= 1 && !record {
                 row
             } else {
-                vec![Value::Record(cols.iter().cloned().zip(row).collect())]
+                // `| %` is the record of a row's properties, and a
+                // NULL cell is no property of its row
+                vec![Value::Record(
+                    cols.iter()
+                        .cloned()
+                        .zip(row)
+                        .filter(|(_, v)| !(properties && matches!(v, Value::Null)))
+                        .collect(),
+                )]
             }
         })
         .collect();
@@ -3557,7 +3891,7 @@ fn copy_to_clipboard(text: &str, rendering: &str) -> anyhow::Result<()> {
     };
     let d = quarb::Diagnostic::new(
         severity,
-        "COPIED",
+        quarb::diagnostic::COPIED,
         "copy",
         format!(
             "copied {} as {rendering} to {route}{hint}",
@@ -3744,27 +4078,30 @@ fn run_web_store<S: quarb_web::db::SqlStore + 'static>(
 ) -> anyhow::Result<()> {
     use quarb_web::plan::{Plan, Rung};
     let model = oc.model.is_some();
-    let plan = if pushdown_applies(cli) {
-        quarb_web::plan::plan(query, store.dialect(), model)
-    } else {
-        Plan {
+    let plan = match pushdown_off(cli) {
+        None => quarb_web::plan::plan(query, store.dialect(), model),
+        Some(option) => Plan {
             rung: Rung::Scan,
+            code: Some(quarb::diagnostic::OPTION_NOT_PUSHED),
             where_sql: String::new(),
             params: Vec::new(),
-            reason: "disabled".into(),
+            reason: format!("nothing is pushed under {option}"),
             unverified: Vec::new(),
             limit: None,
-        }
-    };
-    note_info(
-        if plan.rung == Rung::Scan {
-            NOT_PUSHED
-        } else {
-            PUSHED
         },
-        "web",
-        format!("web: {} — {}", web_rung_name(&plan.rung), plan.reason),
-    );
+    };
+    // A scan is told under the word of what stopped the push; one
+    // with nothing refused (no predicate to push, a query that does
+    // not parse: the engine's error says that) tells nothing.
+    match (plan.rung == Rung::Scan, plan.code) {
+        (true, Some(code)) => note_info(code, "web", format!("{}; scanning", plan.reason)),
+        (true, None) => {}
+        (false, _) => note_info(
+            PUSHED,
+            "web",
+            format!("web: {} — {}", web_rung_name(&plan.rung), plan.reason),
+        ),
+    }
     if plan.rung != Rung::Scan {
         note_info(PUSHED, "web", format!("web: WHERE {}", plan.where_sql));
         note_debug(PLAN, "web", || {

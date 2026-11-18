@@ -124,21 +124,7 @@ pub fn head(bytes: &[u8]) -> Result<HeadMeta, DocxError> {
 
 /// [`head`] under a mount's source-boundary rule.
 pub fn head_with_decoding(bytes: &[u8], decoding: &SourceDecoding) -> Result<HeadMeta, DocxError> {
-    let mut h = HeadMeta {
-        // the plain names this reader answered under until 0.63
-        renamed: vec![
-            ("title", "dc:title"),
-            ("author", "dc:creator"),
-            ("description", "dc:description"),
-            ("subject", "dc:subject"),
-            ("category", "cp:category"),
-            ("keywords", "cp:keywords"),
-            ("lang", "dc:language"),
-            ("created", "dcterms:created"),
-            ("modified", "dcterms:modified"),
-        ],
-        ..HeadMeta::default()
-    };
+    let mut h = HeadMeta::default();
     let mut zip = Members::new(zip::ZipArchive::new(std::io::Cursor::new(bytes))?, decoding);
     let Some(xml) = zip.get("docProps/core.xml")? else {
         return Ok(h);

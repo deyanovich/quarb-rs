@@ -735,12 +735,13 @@ pub(crate) fn arrived_edge(
             row: None,
         },
         Axis::OutLink => {
-            let (label, row) = select_links(step, &links_of(adapter, from), |l, _| {
-                adapter.link_consumed(from, l)
-            })
-            .into_iter()
-            .find(|(_, t, _)| *t == succ)
-            .map(|(l, _, r)| (l, r))?;
+            let (label, row) =
+                select_links(step, &links_of(adapter, from, named_label(step)), |l, _| {
+                    adapter.link_consumed(from, l)
+                })
+                .into_iter()
+                .find(|(_, t, _)| *t == succ)
+                .map(|(l, _, r)| (l, r))?;
             EdgeCtx {
                 source: from,
                 label,
@@ -749,9 +750,11 @@ pub(crate) fn arrived_edge(
             }
         }
         Axis::InLink => {
-            let (label, row) = select_links(step, &backlinks_of(adapter, from), |l, s| {
-                adapter.link_consumed(s, l)
-            })
+            let (label, row) = select_links(
+                step,
+                &backlinks_of(adapter, from, named_label(step)),
+                |l, s| adapter.link_consumed(s, l),
+            )
             .into_iter()
             .find(|(_, s, _)| *s == succ)
             .map(|(l, _, r)| (l, r))?;
@@ -766,12 +769,13 @@ pub(crate) fn arrived_edge(
         // edge's true direction — the walk just declined to assert
         // it. Outgoing is tried first.
         Axis::BothLink => {
-            if let Some((label, row)) = select_links(step, &links_of(adapter, from), |l, _| {
-                adapter.link_consumed(from, l)
-            })
-            .into_iter()
-            .find(|(_, t, _)| *t == succ)
-            .map(|(l, _, r)| (l, r))
+            if let Some((label, row)) =
+                select_links(step, &links_of(adapter, from, named_label(step)), |l, _| {
+                    adapter.link_consumed(from, l)
+                })
+                .into_iter()
+                .find(|(_, t, _)| *t == succ)
+                .map(|(l, _, r)| (l, r))
             {
                 EdgeCtx {
                     source: from,
@@ -780,9 +784,11 @@ pub(crate) fn arrived_edge(
                     row,
                 }
             } else {
-                let (label, row) = select_links(step, &backlinks_of(adapter, from), |l, s| {
-                    adapter.link_consumed(s, l)
-                })
+                let (label, row) = select_links(
+                    step,
+                    &backlinks_of(adapter, from, named_label(step)),
+                    |l, s| adapter.link_consumed(s, l),
+                )
                 .into_iter()
                 .find(|(_, s, _)| *s == succ)
                 .map(|(l, _, r)| (l, r))?;
@@ -813,7 +819,7 @@ pub(crate) fn arrived_edge(
                     row: None,
                 });
             }
-            let (label, s, row) = backlinks_of(adapter, succ).first().cloned()?;
+            let (label, s, row) = backlinks_of(adapter, succ, None).first().cloned()?;
             EdgeCtx {
                 source: s,
                 label,
@@ -2704,9 +2710,11 @@ pub(crate) fn incident_edges(
             },
         ));
     }
-    for (label, t, row) in select_links(step, &links_of(adapter, node), |l, _| {
-        adapter.link_consumed(node, l)
-    }) {
+    for (label, t, row) in
+        select_links(step, &links_of(adapter, node, named_label(step)), |l, _| {
+            adapter.link_consumed(node, l)
+        })
+    {
         if tests_ok(adapter, t, step) {
             out.push((
                 t,
@@ -2725,9 +2733,11 @@ pub(crate) fn incident_edges(
     if backward_refused(adapter, node, "~", named_label(step)) {
         return Vec::new();
     }
-    for (label, s, row) in select_links(step, &backlinks_of(adapter, node), |l, s| {
-        adapter.link_consumed(s, l)
-    }) {
+    for (label, s, row) in select_links(
+        step,
+        &backlinks_of(adapter, node, named_label(step)),
+        |l, s| adapter.link_consumed(s, l),
+    ) {
         if tests_ok(adapter, s, step) {
             out.push((
                 s,
@@ -2932,7 +2942,7 @@ pub(crate) fn link_edges(
     let mut matched: Vec<(String, NodeId, bool, Option<NodeId>)> = Vec::new();
     if outgoing {
         matched.extend(
-            select_links(step, &links_of(adapter, node), |l, _| {
+            select_links(step, &links_of(adapter, node, named_label(step)), |l, _| {
                 adapter.link_consumed(node, l)
             })
             .into_iter()
@@ -2941,9 +2951,11 @@ pub(crate) fn link_edges(
     }
     if incoming {
         matched.extend(
-            select_links(step, &backlinks_of(adapter, node), |l, s| {
-                adapter.link_consumed(s, l)
-            })
+            select_links(
+                step,
+                &backlinks_of(adapter, node, named_label(step)),
+                |l, s| adapter.link_consumed(s, l),
+            )
             .into_iter()
             .map(|(label, source, row)| (label, source, false, row)),
         );
@@ -3589,8 +3601,8 @@ pub(crate) fn prefetch_hint(
         // A resolution with no label follows the declared keys —
         // the outgoing crosslinks — so the same hint serves it.
         Axis::Resolve { label: None, .. } => &[crate::graph::adapter::LinkDir::Out],
-        // A backward resolution with no scope follows the declared
-        // keys backward — the incoming crosslinks — so the hint
+        // A reverse resolution with no scope follows the declared
+        // keys the other way, the incoming crosslinks, so the hint
         // serves it too: a sweep of `<--` reads its referrers for the
         // whole context together, as `<-label` does. Unhinted, a
         // store was asked a row at a time: 64 statements a table,
@@ -3603,8 +3615,27 @@ pub(crate) fn prefetch_hint(
     if nodes.len() < 2 {
         return;
     }
+    // What the step names of the links it follows: a link step's
+    // one label, a resolution's property. The store then reads that
+    // reference alone, not every reference of the context's nodes.
+    let by = match &step.axis {
+        Axis::Resolve {
+            property: Some(p), ..
+        } => Some(crate::graph::adapter::LinkBy::Property(p)),
+        Axis::ReverseResolve {
+            property: crate::syntax::ast::RefProp::Named(p),
+            ..
+        } => Some(crate::graph::adapter::LinkBy::Property(p)),
+        Axis::OutLink | Axis::InLink | Axis::BothLink | Axis::Any => {
+            named_label(step).map(crate::graph::adapter::LinkBy::Label)
+        }
+        _ => None,
+    };
     for d in dirs {
-        adapter.prefetch_links(&nodes, *d);
+        match by {
+            Some(by) => adapter.prefetch_links_by(&nodes, *d, by),
+            None => adapter.prefetch_links(&nodes, *d),
+        }
     }
 }
 

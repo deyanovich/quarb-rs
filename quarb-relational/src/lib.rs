@@ -32,7 +32,7 @@
 //! in-memory loads and tests).
 
 use quarb::{AstAdapter, NodeId, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Parse a declared-references document — the client-side rung of
 /// the reference-provenance ladder, for substrates whose catalog
@@ -217,9 +217,9 @@ pub type IndexProbe = Box<dyn Fn(&TableSpec, usize) -> Option<bool>>;
 
 /// The code of the info a step raises when it reads a table by a
 /// column that no index leads (the user's word of 2026-11-17 on
-/// the backward step): the answer is the one asked for, and each
+/// the reverse resolution): the answer is the one asked for, and each
 /// statement behind it scanned the table.
-pub const UNINDEXED: &str = "UNINDEXED";
+pub const UNINDEXED: &str = quarb::diagnostic::UNINDEXED;
 
 /// A driver's row source with an optional WHERE and an optional
 /// row limit: the one function from which
@@ -453,6 +453,98 @@ pub fn quote_double(name: &str) -> String {
 /// Cypher): the backtick doubled inside.
 pub fn quote_backtick(name: &str) -> String {
     format!("`{}`", name.replace('`', "``"))
+}
+
+/// The order a pushed plan owes, for the driver that runs it. A plan
+/// answers what the scan answers, row for row, so the order of its
+/// rows is part of it, and the keys that decide the order are a
+/// catalog's to name: the driver looks them up and appends the
+/// clause ([`order_clause`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PlanOrder<'a> {
+    /// The table whose key orders the rows: the FROM table. `None`
+    /// for an aggregate, which is one row.
+    pub table: Option<&'a str>,
+    /// An every-witness join's second table: the rows of one driver
+    /// stand in this table's order.
+    pub then: Option<&'a str>,
+    /// The plan's own sort, in SQL, before the keys: `(n IS NULL),
+    /// n` for `sort_by(::n)`. The keys after it keep the ties in the
+    /// tables' order, as the engine's stable sort does.
+    pub first: Option<&'a str>,
+    /// The keys descending: the context reversed.
+    pub desc: bool,
+    /// A fold: one row a group, in the order each group first
+    /// appears, which is the least key among its rows.
+    pub groups: bool,
+    /// The first rows alone.
+    pub limit: Option<u64>,
+}
+
+impl PlanOrder<'_> {
+    /// Whether the plan needs more than the FROM table's key after
+    /// its statement: a driver that appends that one key and nothing
+    /// else cannot run it.
+    pub fn is_plain(&self) -> bool {
+        self.then.is_none()
+            && self.first.is_none()
+            && !self.desc
+            && !self.groups
+            && self.limit.is_none()
+    }
+}
+
+/// The ORDER BY, and the LIMIT, a driver appends to a plan's
+/// statement. `key_of` names the key a table's whole read is ordered
+/// by (its primary key; SQLite's rowid where it has none), and
+/// `column` writes a table's column in the driver's dialect
+/// (`"t"."k"`). A plan whose order needs a key the table lacks is
+/// declined: the reason comes back, and the caller scans. A plan
+/// with nothing beyond the FROM table's key takes that key where
+/// there is one and no clause where there is none, as before.
+pub fn order_clause(
+    order: &PlanOrder<'_>,
+    key_of: &dyn Fn(&str) -> Option<String>,
+    column: &dyn Fn(&str, &str) -> String,
+) -> Result<String, String> {
+    let Some(table) = order.table else {
+        return Ok(String::new());
+    };
+    let dir = if order.desc { " DESC" } else { "" };
+    let no_key = |t: &str| {
+        format!("the plan keeps the scan's order by the primary key of {t}, and {t} has none")
+    };
+    let mut terms: Vec<String> = Vec::new();
+    if let Some(first) = order.first {
+        terms.push(first.to_string());
+    }
+    match key_of(table) {
+        Some(k) => {
+            let k = column(table, &k);
+            terms.push(if order.groups {
+                format!("MIN({k}){dir}")
+            } else {
+                format!("{k}{dir}")
+            });
+        }
+        None if order.is_plain() => {}
+        None => return Err(no_key(table)),
+    }
+    if let Some(then) = order.then {
+        match key_of(then) {
+            Some(k) => terms.push(format!("{}{dir}", column(then, &k))),
+            None => return Err(no_key(then)),
+        }
+    }
+    let mut clause = String::new();
+    if !terms.is_empty() {
+        clause.push_str(" ORDER BY ");
+        clause.push_str(&terms.join(", "));
+    }
+    if let Some(n) = order.limit {
+        clause.push_str(&format!(" LIMIT {n}"));
+    }
+    Ok(clause)
 }
 
 fn row_of(spec: &TableSpec, r: RowSpec) -> Row {
@@ -907,13 +999,22 @@ impl RelationalModel {
         let mut wanted: Vec<(String, Value)> = Vec::new();
         {
             let d = self.tables[t].data.borrow();
+            // The values met so far, as a set. A sweep hands over
+            // one value a thread, the same keys again and again (a
+            // million items over 50,000 orders), and a scan of
+            // `wanted` for each made the read quadratic: 146 s where
+            // a thread at a time took 6.
+            let mut met: HashSet<String> = HashSet::new();
             for v in values {
                 if matches!(v, Value::Null) {
                     continue;
                 }
                 let text = v.to_string();
+                if met.contains(&text) {
+                    continue;
+                }
+                met.insert(text.clone());
                 if d.fetched.contains(&(col, text.clone()))
-                    || wanted.iter().any(|(w, _)| *w == text)
                     // a row already here by its key is the row
                     || (col == KEY && d.by_key.contains_key(&text))
                 {
@@ -1641,83 +1742,30 @@ impl AstAdapter for RelationalModel {
     /// crosslink, labeled by the column name without its `_id`
     /// suffix ([`TableSpec::fk_labels`]).
     fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
-        let Some((t, Some(r))) = self.entry(node) else {
-            return Vec::new();
-        };
-        let Some(row) = self.row_at(t, r) else {
-            return Vec::new();
-        };
-        let spec = &self.tables[t].spec;
-        let labels = spec.fk_labels();
-        let mut out = Vec::new();
-        for (i, (col, target, to)) in spec.fks.iter().enumerate() {
-            let value = &row.values[*col];
-            if matches!(value, Value::Null) {
-                continue;
-            }
-            if let Some(n) = self.find_target(target, to, value) {
-                out.push((labels[i].clone(), n));
-            }
-        }
-        out.sort_by(|a, b| a.0.cmp(&b.0));
-        out
+        self.links_under(node, None)
+    }
+
+    /// The links a step by one label takes: the row that label's key
+    /// points at, read by key. The other keys of the row are not
+    /// followed, so their tables are not read.
+    fn link_rows_by(&self, node: NodeId, label: &str) -> Vec<(String, NodeId, Option<NodeId>)> {
+        self.links_under(node, Some(label))
+            .into_iter()
+            .map(|(l, t)| (l, t, None))
+            .collect()
     }
 
     /// The links a step is about to follow from `nodes`, read in one
     /// statement per key: the rows the outgoing keys point at, or
     /// the rows pointing here.
     fn prefetch_links(&self, nodes: &[NodeId], dir: quarb::LinkDir) {
-        let mut by_table: HashMap<usize, Vec<std::rc::Rc<Row>>> = HashMap::new();
-        for &n in nodes {
-            if let Some((t, Some(r))) = self.entry(n)
-                && let Some(row) = self.row_at(t, r)
-            {
-                by_table.entry(t).or_default().push(row);
-            }
-        }
-        for (t, rows) in by_table {
-            match dir {
-                quarb::LinkDir::Out => {
-                    for (col, target, to) in &self.tables[t].spec.fks {
-                        let Some(tt) = self.table_index(target) else {
-                            continue;
-                        };
-                        if !self.keyed(tt) {
-                            continue;
-                        }
-                        let to_col = if to.is_empty() {
-                            KEY
-                        } else {
-                            match self.tables[tt].spec.columns.iter().position(|c| c == to) {
-                                Some(i) => i,
-                                None => continue,
-                            }
-                        };
-                        let values: Vec<Value> =
-                            rows.iter().map(|r| r.values[*col].clone()).collect();
-                        self.fetch_keyed(tt, to_col, &values);
-                    }
-                }
-                quarb::LinkDir::In => {
-                    let name = &self.tables[t].spec.name;
-                    for s in 0..self.tables.len() {
-                        if !self.keyed(s) {
-                            continue;
-                        }
-                        for (col, target, to) in &self.tables[s].spec.fks {
-                            if target != name {
-                                continue;
-                            }
-                            let values: Vec<Value> = rows
-                                .iter()
-                                .filter_map(|r| self.referred_value(t, r, to))
-                                .collect();
-                            self.fetch_keyed(s, *col, &values);
-                        }
-                    }
-                }
-            }
-        }
+        self.prefetch_under(nodes, dir, None)
+    }
+
+    /// The same for a step that names what it follows: the one key
+    /// under the label, or the one column a resolution reads.
+    fn prefetch_links_by(&self, nodes: &[NodeId], dir: quarb::LinkDir, by: quarb::LinkBy<'_>) {
+        self.prefetch_under(nodes, dir, Some(by))
     }
 
     /// The reverse of `-->` through the declared keys: every row of
@@ -1753,8 +1801,8 @@ impl AstAdapter for RelationalModel {
         // through two of its columns counts once. The property
         // names the column, not the edge's label.
         let mut out: Vec<NodeId> = Vec::new();
-        for (t, col, n) in self.referrers(node) {
-            if property.is_none_or(|p| self.tables[t].spec.columns[col] == p) && !out.contains(&n) {
+        for (_, _, n) in self.referrers_under(node, property.map(quarb::LinkBy::Property)) {
+            if !out.contains(&n) {
                 out.push(n);
             }
         }
@@ -1906,8 +1954,30 @@ impl AstAdapter for RelationalModel {
     /// The backlinks, labeled as the forward crosslinks are
     /// ([`TableSpec::fk_labels`]).
     fn backlinks(&self, node: NodeId) -> Vec<(String, NodeId)> {
+        self.backlinks_under(node, None)
+    }
+
+    /// The backlinks a step by one label takes: the rows that refer
+    /// here through the key that carries the label. The tables that
+    /// refer here under another label are not read.
+    fn backlink_rows_by(&self, node: NodeId, label: &str) -> Vec<(String, NodeId, Option<NodeId>)> {
+        self.backlinks_under(node, Some(quarb::LinkBy::Label(label)))
+            .into_iter()
+            .map(|(l, s)| (l, s, None))
+            .collect()
+    }
+}
+
+impl RelationalModel {
+    /// The rows that refer to this one, each under its key's label:
+    /// through every key, or through the one a step names.
+    fn backlinks_under(
+        &self,
+        node: NodeId,
+        by: Option<quarb::LinkBy<'_>>,
+    ) -> Vec<(String, NodeId)> {
         let mut labels: HashMap<usize, Vec<String>> = HashMap::new();
-        self.referrers(node)
+        self.referrers_under(node, by)
             .into_iter()
             .map(|(t, col, n)| {
                 let labels = labels
@@ -1931,10 +2001,30 @@ impl AstAdapter for RelationalModel {
 }
 
 impl RelationalModel {
+    /// Whether key `i` of table `t` is the one a step names: the
+    /// key under its label, or the key on its column; every key
+    /// where the step names none.
+    fn key_named(&self, t: usize, i: usize, by: Option<quarb::LinkBy<'_>>) -> bool {
+        let spec = &self.tables[t].spec;
+        match by {
+            None => true,
+            Some(quarb::LinkBy::Property(p)) => spec.columns[spec.fks[i].0] == p,
+            Some(quarb::LinkBy::Label(l)) => spec.fk_labels().get(i).is_some_and(|x| x == l),
+        }
+    }
+
     /// Every row with a declared key into this row: its table, the
-    /// key column's index, and the row — the backlinks before
-    /// their labeling.
-    fn referrers(&self, node: NodeId) -> Vec<(usize, usize, NodeId)> {
+    /// key column's index, and the row — the backlinks before their
+    /// labeling. Under `by`, the rows that refer here through the
+    /// key a step names and no other: a step by one label reads one
+    /// referring table by one column (it read every table with a key
+    /// into this one, and a notice of a column with no index named
+    /// each of them).
+    fn referrers_under(
+        &self,
+        node: NodeId,
+        by: Option<quarb::LinkBy<'_>>,
+    ) -> Vec<(usize, usize, NodeId)> {
         let Some((tt, Some(tr))) = self.entry(node) else {
             return Vec::new();
         };
@@ -1944,8 +2034,8 @@ impl RelationalModel {
         let target_name = self.tables[tt].spec.name.clone();
         let mut out = Vec::new();
         for t in 0..self.tables.len() {
-            for (col, target, to) in &self.tables[t].spec.fks {
-                if *target != target_name {
+            for (i, (col, target, to)) in self.tables[t].spec.fks.iter().enumerate() {
+                if *target != target_name || !self.key_named(t, i, by) {
                     continue;
                 }
                 let Some(value) = self.referred_value(tt, &row, to) else {
@@ -1958,11 +2048,168 @@ impl RelationalModel {
         }
         out
     }
+
+    /// The rows this one's keys point at, each under its key's label:
+    /// every key, or the one under `label`.
+    fn links_under(&self, node: NodeId, label: Option<&str>) -> Vec<(String, NodeId)> {
+        let Some((t, Some(r))) = self.entry(node) else {
+            return Vec::new();
+        };
+        let Some(row) = self.row_at(t, r) else {
+            return Vec::new();
+        };
+        let spec = &self.tables[t].spec;
+        let labels = spec.fk_labels();
+        let mut out = Vec::new();
+        for (i, (col, target, to)) in spec.fks.iter().enumerate() {
+            if label.is_some_and(|l| labels[i] != l) {
+                continue;
+            }
+            let value = &row.values[*col];
+            if matches!(value, Value::Null) {
+                continue;
+            }
+            if let Some(n) = self.find_target(target, to, value) {
+                out.push((labels[i].clone(), n));
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    /// The batching hint: the rows the keys of `nodes` point at, or
+    /// the rows that point at them, read in statements of many keys;
+    /// under `by`, through the one key a step names.
+    fn prefetch_under(&self, nodes: &[NodeId], dir: quarb::LinkDir, by: Option<quarb::LinkBy<'_>>) {
+        let mut by_table: HashMap<usize, Vec<std::rc::Rc<Row>>> = HashMap::new();
+        for &n in nodes {
+            if let Some((t, Some(r))) = self.entry(n)
+                && let Some(row) = self.row_at(t, r)
+            {
+                by_table.entry(t).or_default().push(row);
+            }
+        }
+        for (t, rows) in by_table {
+            match dir {
+                quarb::LinkDir::Out => {
+                    for (i, (col, target, to)) in self.tables[t].spec.fks.iter().enumerate() {
+                        if !self.key_named(t, i, by) {
+                            continue;
+                        }
+                        let Some(tt) = self.table_index(target) else {
+                            continue;
+                        };
+                        if !self.keyed(tt) {
+                            continue;
+                        }
+                        let to_col = if to.is_empty() {
+                            KEY
+                        } else {
+                            match self.tables[tt].spec.columns.iter().position(|c| c == to) {
+                                Some(i) => i,
+                                None => continue,
+                            }
+                        };
+                        let values: Vec<Value> =
+                            rows.iter().map(|r| r.values[*col].clone()).collect();
+                        self.fetch_keyed(tt, to_col, &values);
+                    }
+                }
+                quarb::LinkDir::In => {
+                    let name = &self.tables[t].spec.name;
+                    for s in 0..self.tables.len() {
+                        if !self.keyed(s) {
+                            continue;
+                        }
+                        for (i, (col, target, to)) in self.tables[s].spec.fks.iter().enumerate() {
+                            if target != name || !self.key_named(s, i, by) {
+                                continue;
+                            }
+                            let values: Vec<Value> = rows
+                                .iter()
+                                .filter_map(|r| self.referred_value(t, r, to))
+                                .collect();
+                            self.fetch_keyed(s, *col, &values);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_plans_order_is_composed_from_its_parts() {
+        let keys = |t: &str| match t {
+            "t" => Some("id".to_string()),
+            "j" => Some("jid".to_string()),
+            _ => None,
+        };
+        let col = |t: &str, c: &str| format!("\"{t}\".\"{c}\"");
+        let clause = |o: PlanOrder<'_>| order_clause(&o, &keys, &col);
+        let t = PlanOrder {
+            table: Some("t"),
+            ..PlanOrder::default()
+        };
+        // an aggregate: no clause; a plain plan: the FROM table's key
+        assert_eq!(clause(PlanOrder::default()).unwrap(), "");
+        assert_eq!(clause(t).unwrap(), " ORDER BY \"t\".\"id\"");
+        // an every-witness join: both keys
+        assert_eq!(
+            clause(PlanOrder {
+                then: Some("j"),
+                ..t
+            })
+            .unwrap(),
+            " ORDER BY \"t\".\"id\", \"j\".\"jid\""
+        );
+        // the plan's own sort before the key, the first rows after
+        assert_eq!(
+            clause(PlanOrder {
+                first: Some("(n IS NULL), n DESC"),
+                limit: Some(3),
+                ..t
+            })
+            .unwrap(),
+            " ORDER BY (n IS NULL), n DESC, \"t\".\"id\" LIMIT 3"
+        );
+        // the context reversed; the groups by their first row
+        assert_eq!(
+            clause(PlanOrder { desc: true, ..t }).unwrap(),
+            " ORDER BY \"t\".\"id\" DESC"
+        );
+        assert_eq!(
+            clause(PlanOrder { groups: true, ..t }).unwrap(),
+            " ORDER BY MIN(\"t\".\"id\")"
+        );
+        // a table with no key: a plain plan runs unordered as before,
+        // any other is declined
+        let loose = PlanOrder {
+            table: Some("loose"),
+            ..PlanOrder::default()
+        };
+        assert_eq!(clause(loose).unwrap(), "");
+        assert!(
+            clause(PlanOrder {
+                limit: Some(2),
+                ..loose
+            })
+            .unwrap_err()
+            .contains("loose has none")
+        );
+        assert!(
+            clause(PlanOrder {
+                then: Some("loose"),
+                ..t
+            })
+            .unwrap_err()
+            .contains("loose has none")
+        );
+    }
 
     #[test]
     fn identifiers_quote_with_their_quote_doubled() {

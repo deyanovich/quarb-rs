@@ -217,21 +217,7 @@ impl Doc {
 /// `uof:元数据`.
 fn read_head(xml: &str) -> Result<HeadMeta, UofError> {
     let mut reader = Reader::from_str(xml);
-    let mut h = HeadMeta {
-        // the plain names this reader answered under until 0.63
-        renamed: vec![
-            ("title", "标题"),
-            ("creator", "创建者"),
-            ("subject", "主题"),
-            ("description", "摘要"),
-            ("keyword", "关键字"),
-            ("created", "创建日期"),
-            ("modified", "编辑时间"),
-            ("last-author", "最后作者"),
-            ("language", "语言"),
-        ],
-        ..HeadMeta::default()
-    };
+    let mut h = HeadMeta::default();
     let mut in_meta = false;
     let mut open: Option<String> = None;
     loop {

@@ -678,6 +678,32 @@ impl AstAdapter for MountAdapter {
         }
     }
 
+    // A step that names one label: the mounted source reads the one
+    // reference.
+    fn link_rows_by(&self, node: NodeId, label: &str) -> Vec<(String, NodeId, Option<NodeId>)> {
+        match self.decode(node) {
+            None => Vec::new(),
+            Some((m, inner)) => self
+                .adapter(m)
+                .link_rows_by(inner, label)
+                .into_iter()
+                .map(|(l, t, row)| (l, self.encode(m, t), row.map(|r| self.encode(m, r))))
+                .collect(),
+        }
+    }
+
+    fn backlink_rows_by(&self, node: NodeId, label: &str) -> Vec<(String, NodeId, Option<NodeId>)> {
+        match self.decode(node) {
+            None => Vec::new(),
+            Some((m, inner)) => self
+                .adapter(m)
+                .backlink_rows_by(inner, label)
+                .into_iter()
+                .map(|(l, s, row)| (l, self.encode(m, s), row.map(|r| self.encode(m, r))))
+                .collect(),
+        }
+    }
+
     fn edge_rows(&self, node: NodeId) -> Vec<(String, NodeId, Option<NodeId>)> {
         match self.decode(node) {
             None => Vec::new(),
@@ -1008,6 +1034,20 @@ impl AstAdapter for MountAdapter {
         for (m, inner) in by_mount.into_iter().enumerate() {
             if !inner.is_empty() {
                 self.adapter(m).prefetch_links(&inner, dir);
+            }
+        }
+    }
+
+    fn prefetch_links_by(&self, nodes: &[NodeId], dir: quarb::LinkDir, by: quarb::LinkBy<'_>) {
+        let mut by_mount: Vec<Vec<NodeId>> = vec![Vec::new(); self.mounts.len()];
+        for &n in nodes {
+            if let Some((m, inner)) = self.decode(n) {
+                by_mount[m].push(inner);
+            }
+        }
+        for (m, inner) in by_mount.into_iter().enumerate() {
+            if !inner.is_empty() {
+                self.adapter(m).prefetch_links_by(&inner, dir, by);
             }
         }
     }

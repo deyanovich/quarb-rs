@@ -975,6 +975,9 @@ fn take_copy(query: &str) -> Option<(String, String)> {
 
 #[pymodule]
 fn _quarb(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // The manual is a cell of a notebook here (`man CODE`, as
+    // `%docs CODE` is): a diagnostic's tail names it so.
+    quarb::diagnostic::set_manual_door("man");
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("TABLE_CSS", quarb::TABLE_CSS)?;
     m.add_function(wrap_pyfunction!(rich_css, m)?)?;

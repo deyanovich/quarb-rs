@@ -44,7 +44,7 @@ pub enum MssqlError {
     Mssql(#[from] tiberius::error::Error),
     #[error("mssql target: {0} (expected mssql://USER:PASS@HOST[:PORT]/DATABASE)")]
     Target(String),
-    #[error("pushdown plan: {0}")]
+    #[error("{0}")]
     Plan(String),
     #[error("mssql runtime: {0}")]
     Runtime(#[from] std::io::Error),
@@ -184,6 +184,13 @@ pub struct MssqlAdapter {
 }
 
 impl MssqlAdapter {
+    /// Hold the crosslinks of these labels in memory (the mount's
+    /// `crosslinks=order,customer`, written in the URL's query
+    /// string): see [`RelationalModel::hold_crosslinks`].
+    pub fn hold_crosslinks(&mut self, labels: &[String]) -> Result<(), String> {
+        self.model.hold_crosslinks(labels)
+    }
+
     /// Connect and introspect the `dbo` schema. Rows load
     /// lazily, per table on first touch.
     pub fn connect(target: &str) -> Result<Self, MssqlError> {

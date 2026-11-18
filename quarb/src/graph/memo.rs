@@ -41,44 +41,60 @@ thread_local! {
         std::cell::RefCell::new(HashMap::new());
 }
 
-/// A node's link list as last asked: `(adapter, node)` and the
-/// list. A step asks for a node's links to walk them, and then
+/// A node's link list as last asked: `(adapter, node, label)` and
+/// the list. A step asks for a node's links to walk them, and then
 /// once more per successor to recover the label of the edge it
 /// arrived by; on a store adapter each ask is a remote query, so
 /// the second and later asks answer from here.
 pub(crate) type LastLinks = Option<(
-    (usize, NodeId),
+    (usize, NodeId, Option<String>),
     std::rc::Rc<Vec<(String, NodeId, Option<NodeId>)>>,
 )>;
 
+/// The outgoing links of `node`: all of them, or under `label`, the
+/// one label a step names (`->customer`), what a step by that label
+/// can take ([`AstAdapter::link_rows_by`]: a source that reads its
+/// links when asked reads the one reference, not every reference of
+/// the node).
 pub(crate) fn links_of(
     adapter: &impl AstAdapter,
     node: NodeId,
+    label: Option<&str>,
 ) -> std::rc::Rc<Vec<(String, NodeId, Option<NodeId>)>> {
-    let key = (std::ptr::from_ref(adapter).cast::<u8>() as usize, node);
+    let at = (std::ptr::from_ref(adapter).cast::<u8>() as usize, node);
     if let Some(hit) = with_graph_run(|s| match &s.last_out {
-        Some((k, v)) if *k == key => Some(v.clone()),
+        Some(((a, n, l), v)) if (*a, *n) == at && l.as_deref() == label => Some(v.clone()),
         _ => None,
     }) {
         return hit;
     }
-    let v = std::rc::Rc::new(adapter.link_rows(node));
+    let v = std::rc::Rc::new(match label {
+        Some(l) => adapter.link_rows_by(node, l),
+        None => adapter.link_rows(node),
+    });
+    let key = (at.0, at.1, label.map(str::to_string));
     with_graph_run(|s| s.last_out = Some((key, v.clone())));
     v
 }
 
+/// The incoming links of `node`, as [`links_of`].
 pub(crate) fn backlinks_of(
     adapter: &impl AstAdapter,
     node: NodeId,
+    label: Option<&str>,
 ) -> std::rc::Rc<Vec<(String, NodeId, Option<NodeId>)>> {
-    let key = (std::ptr::from_ref(adapter).cast::<u8>() as usize, node);
+    let at = (std::ptr::from_ref(adapter).cast::<u8>() as usize, node);
     if let Some(hit) = with_graph_run(|s| match &s.last_in {
-        Some((k, v)) if *k == key => Some(v.clone()),
+        Some(((a, n, l), v)) if (*a, *n) == at && l.as_deref() == label => Some(v.clone()),
         _ => None,
     }) {
         return hit;
     }
-    let v = std::rc::Rc::new(adapter.backlink_rows(node));
+    let v = std::rc::Rc::new(match label {
+        Some(l) => adapter.backlink_rows_by(node, l),
+        None => adapter.backlink_rows(node),
+    });
+    let key = (at.0, at.1, label.map(str::to_string));
     with_graph_run(|s| s.last_in = Some((key, v.clone())));
     v
 }

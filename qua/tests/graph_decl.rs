@@ -90,7 +90,7 @@ fn a_declared_graph_is_reported_and_decides_nothing() {
     assert!(ok, "{err}");
     assert_eq!(out, "false\ntrue\nfalse\nfalse");
     assert!(
-        err.contains("info NOT_PUSHED (graph): the source has no answer for the declared artpoints(--stage) on /stations/*; computed over 4 nodes"),
+        err.contains("info GRAPH_NOT_PUSHED (graph): the source has no answer for the declared artpoints(--stage) on /stations/*; computed over 4 nodes"),
         "{err}"
     );
     // a narrower context is not the scope
@@ -102,14 +102,14 @@ fn a_declared_graph_is_reported_and_decides_nothing() {
     assert!(ok, "{err}");
     assert_eq!(out, "false\nfalse\nfalse");
     assert!(
-        err.contains("info NOT_PUSHED (graph): the context is 3 of the 4 nodes of /stations/*, computed over 3 nodes"),
+        err.contains("info GRAPH_NOT_PUSHED (graph): the context is 3 of the 4 nodes of /stations/*, computed over 3 nodes"),
         "{err}"
     );
     // another step is another graph
     let (_, err, ok) = qua(&dir, &["/stations/* @| graph:artpoints(->stage)"]);
     assert!(ok, "{err}");
     assert!(
-        err.contains("info NOT_PUSHED (graph): the step or the options differ from the declared artpoints(--stage) on /stations/*"),
+        err.contains("info GRAPH_NOT_PUSHED (graph): the step or the options differ from the declared artpoints(--stage) on /stations/*"),
         "{err}"
     );
     // a measure the model does not declare says nothing of graphs
@@ -177,7 +177,7 @@ fn a_hop_takes_a_predicate_and_a_reference_reads_its_node() {
     assert!(ok, "{err}");
     assert_eq!(out, "1\n2\n2\n2");
     assert!(
-        err.contains("info NOT_PUSHED (graph): the source has no answer for the declared conncomp(--stage[$-::parasangs > 50]) on /stations/*; computed over 4 nodes"),
+        err.contains("info GRAPH_NOT_PUSHED (graph): the source has no answer for the declared conncomp(--stage[$-::parasangs > 50]) on /stations/*; computed over 4 nodes"),
         "{err}"
     );
 }

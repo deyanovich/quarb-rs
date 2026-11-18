@@ -67,7 +67,10 @@ fn the_planner_reports_as_infos() {
         &["--diagnostics=info", "/books/* | ::title @| max", "lib.db"],
     );
     assert!(
-        err.contains("info NOT_PUSHED (pushdown): pushdown: not used"),
+        err.contains(
+            "info TYPE_NOT_PUSHED (query): the comparison or reducer on title would follow \
+             the column's type where the scan follows the value; scanning"
+        ),
         "{err}"
     );
     // the debug level names the plan the source was handed, and the

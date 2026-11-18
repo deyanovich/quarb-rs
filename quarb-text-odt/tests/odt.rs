@@ -266,18 +266,6 @@ fn head_from_meta() {
         )]
     );
     assert_eq!(values(&m, "::lang"), ["en-GB"]);
-    // the plain names of 0.63 are told where they went
-    let head = m.head_meta();
-    assert_eq!(head.retired("title").as_deref(), Some(r#""dc:title""#));
-    assert_eq!(
-        head.retired("author").as_deref(),
-        Some(r#""meta:initial-creator""#)
-    );
-    assert_eq!(
-        head.retired("keywords").as_deref(),
-        Some(r#""meta:keyword""#)
-    );
-    assert_eq!(head.retired("created"), None);
 }
 
 /// An OpenOffice.org 1.0 document (`.sxw`): the same reading under

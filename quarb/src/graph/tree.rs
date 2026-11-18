@@ -484,7 +484,7 @@ impl<A: AstAdapter> Drawer<'_, A> {
             // its children
             let deeper = format!("{prefix}    ");
             for (l2, t2) in self.listed_links(target) {
-                let onward = if links_of(self.adapter, t2)
+                let onward = if links_of(self.adapter, t2, None)
                     .iter()
                     .any(|(_, t, _)| self.context.contains(t))
                 {
@@ -587,7 +587,7 @@ impl<A: AstAdapter> Drawer<'_, A> {
         if self.inline_link(node).is_some() {
             return Vec::new();
         }
-        links_of(self.adapter, node)
+        links_of(self.adapter, node, None)
             .iter()
             .filter(|(_, t, _)| self.context.contains(t))
             .map(|(l, t, _)| (l.clone(), *t))
@@ -597,7 +597,7 @@ impl<A: AstAdapter> Drawer<'_, A> {
     /// The one link drawn inline (`name -> path`): a node whose only
     /// outgoing link is its symlink target.
     fn inline_link(&self, node: NodeId) -> Option<NodeId> {
-        match links_of(self.adapter, node).as_slice() {
+        match links_of(self.adapter, node, None).as_slice() {
             [(label, target, _)] if label == INLINE_LINK => Some(*target),
             _ => None,
         }

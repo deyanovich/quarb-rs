@@ -41,7 +41,7 @@ pub enum OracleError {
     Oracle(#[from] oracle::Error),
     #[error("oracle target: {0} (expected oracle://USER:PASS@HOST[:PORT]/SERVICE)")]
     Target(String),
-    #[error("pushdown plan: {0}")]
+    #[error("{0}")]
     Plan(String),
 }
 
@@ -160,6 +160,13 @@ pub struct OracleAdapter {
 }
 
 impl OracleAdapter {
+    /// Hold the crosslinks of these labels in memory (the mount's
+    /// `crosslinks=order,customer`, written in the URL's query
+    /// string): see [`RelationalModel::hold_crosslinks`].
+    pub fn hold_crosslinks(&mut self, labels: &[String]) -> Result<(), String> {
+        self.model.hold_crosslinks(labels)
+    }
+
     /// Connect and introspect the connected user's tables. Rows
     /// load lazily, per table on first touch.
     pub fn connect(target: &str) -> Result<Self, OracleError> {

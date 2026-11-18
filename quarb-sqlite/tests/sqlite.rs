@@ -7,6 +7,18 @@ use quarb::AstAdapter as _;
 use quarb_sqlite::SqliteAdapter;
 use rusqlite::Connection;
 
+/// The order a plan owes, as its driver takes it.
+fn order_of(plan: &quarb_sql::Pushdown) -> quarb_relational::PlanOrder<'_> {
+    quarb_relational::PlanOrder {
+        table: plan.order_table.as_deref(),
+        then: plan.order_then.as_deref(),
+        first: plan.order_first.as_deref(),
+        desc: plan.order_desc,
+        groups: plan.order_groups,
+        limit: plan.limit,
+    }
+}
+
 fn adapter() -> SqliteAdapter {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(
@@ -281,11 +293,10 @@ fn pushdown_matches_scan() {
         let (cols, rows) = quarb_sqlite::raw_query(
             &path,
             &plan.sql,
-            plan.order_table.as_deref(),
+            &order_of(&plan),
             plan.join_left
                 .as_ref()
                 .map(|(t, c)| (t.as_str(), c.as_slice())),
-            plan.order_then.as_deref(),
         )
         .unwrap();
         let pushed: Vec<String> = rows
@@ -367,11 +378,10 @@ fn raw_query_orders_an_every_witness_join_by_both_keys() {
     let (_, rows) = quarb_sqlite::raw_query(
         &path,
         &plan.sql,
-        plan.order_table.as_deref(),
+        &order_of(&plan),
         plan.join_left
             .as_ref()
             .map(|(t, c)| (t.as_str(), c.as_slice())),
-        plan.order_then.as_deref(),
     )
     .expect("an every-witness join runs without a unique key");
     let pushed: Vec<String> = rows
@@ -429,18 +439,22 @@ fn raw_query_join_uniqueness_gate() {
     let ok = quarb_sqlite::raw_query(
         &path,
         sql,
-        Some("b"),
+        &quarb_relational::PlanOrder {
+            table: Some("b"),
+            ..Default::default()
+        },
         Some(("a", &["id".to_string()][..])),
-        None,
     );
     assert_eq!(ok.expect("PK-bound join executes").1.len(), 3);
 
     let refused = quarb_sqlite::raw_query(
         &path,
         "SELECT b.id FROM b JOIN a ON a.a_id = b.a_id",
-        Some("a"),
+        &quarb_relational::PlanOrder {
+            table: Some("a"),
+            ..Default::default()
+        },
         Some(("b", &["a_id".to_string()][..])),
-        None,
     );
     assert!(
         refused.is_err(),
@@ -753,4 +767,92 @@ fn a_loaded_database_declares_its_json_columns() {
     assert_eq!(declared(&from_bytes), (Some("json".to_string()), None));
     let opened = SqliteAdapter::open(&path).unwrap();
     assert_eq!(declared(&opened), (Some("json".to_string()), None));
+}
+
+/// The order a plan owes, written by the driver, against the engine's
+/// own evaluation: a sort by a numeric column (a null key last, the
+/// ties in the table's order), descending, reversed, the first rows,
+/// the groups of a fold as they first appear, each over rows stored
+/// out of key order with NULLs and ties. The rows the plan answers
+/// are the scan's, in its order (0.69: these were refused before).
+#[test]
+fn a_plans_own_order_is_the_scans() {
+    let path = std::env::temp_dir().join(format!("quarb-sqlite-order-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, pages INTEGER, year INTEGER);
+        INSERT INTO books VALUES
+          (7, 'Emma', 320, 1815), (2, 'Iliad', NULL, -750), (5, 'Persuasion', 250, 1817),
+          (1, 'Odyssey', 320, -725), (9, 'Aeneid', 250, -19), (4, 'Tom Sawyer', NULL, 1876),
+          (3, 'Histories', 700, -430), (8, 'Decline and Fall', 3000, 1776);
+        CREATE TABLE loose (n INTEGER, t TEXT);
+        INSERT INTO loose VALUES (3, 'c'), (1, 'a'), (2, 'b'), (1, 'd');
+        "#,
+    )
+    .unwrap();
+    drop(conn);
+    let cases = [
+        "/books/* @| sort_by(::pages) | ::id",
+        "/books/* @| sort_by(::pages; --desc) | ::id",
+        "/books/* @| sort_by(::pages) @| reverse | ::id",
+        "/books/* @| sort_by(::pages; --desc) @| reverse | ::id",
+        "/books/* @| sort_by(::pages) @| [..3] | ::id",
+        "/books/* @| sort_by(::pages; --desc) @| [..2] | %(::id; ::title)",
+        "/books/* @| sort_by(::pages) @| reverse @| [..3] | ::id",
+        "/books/*[::year > 0] @| sort_by(::pages) | ::id",
+        "/books/*[::year > 0] @| sort_by(::year; --desc) @| [..2] | ::title",
+        "/books/* @| [..3] | ::id",
+        "/books/*[::pages != null] @| [..2] | ::title",
+        "/books/* @| reverse | ::id",
+        "/books/* @| reverse @| [..2] | ::id",
+        "/books/* @| sort_by(::pages) @| count",
+        "/books/* | .p(::pages) @|{.p} count | .n | %.",
+        "/books/* | ::year | .p(::pages) @|{.p} max | .latest | %.",
+        "/books/*[::year < 1900] | .p(::pages) @|{.p} count | .n | [$_ > 1] | %.",
+        "/books/* | .p(::pages) @|{.p} count",
+        // top and bottom: the rows whose key is not null
+        "/books/* @| top(3; ::pages) | ::id",
+        "/books/* @| bottom(3; ::pages) | %(::id; ::pages)",
+        "/books/* @| top(50; ::pages) | ::id",
+        "/books/*[::year > 0] @| bottom(2; ::year) | ::title",
+        // a table with no primary key is read by its rowid
+        "/loose/* @| sort_by(::n) | ::t",
+        "/loose/* @| top(2; ::n) | ::t",
+        "/loose/* @| [..2] | ::t",
+        "/loose/* | .k(::n) @|{.k} count | .c | %.",
+    ];
+    for q in cases {
+        let plan = quarb_sql::pushdown(q, Some(quarb_sql::Dialect::Sqlite))
+            .unwrap_or_else(|| panic!("expected pushdown for {q}"));
+        let (_, rows) = quarb_sqlite::raw_query(&path, &plan.sql, &order_of(&plan), None).unwrap();
+        let pushed: Vec<String> = rows
+            .iter()
+            .map(|r| {
+                r.iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join("|")
+            })
+            .collect();
+        let adapter = SqliteAdapter::open(&path).unwrap();
+        let scanned: Vec<String> = match quarb::run(q, &adapter).unwrap() {
+            quarb::QueryResult::Values(vs) => vs
+                .iter()
+                .map(|v| match v {
+                    quarb::Value::Record(fields) => fields
+                        .iter()
+                        .map(|(_, v)| v.to_string())
+                        .collect::<Vec<_>>()
+                        .join("|"),
+                    other => other.to_string(),
+                })
+                .collect(),
+            quarb::QueryResult::Nodes(ns) => ns.iter().map(|&n| adapter.locator(n)).collect(),
+        };
+        assert!(!scanned.is_empty(), "{q}");
+        assert_eq!(pushed, scanned, "{q}");
+    }
+    let _ = std::fs::remove_file(path);
 }

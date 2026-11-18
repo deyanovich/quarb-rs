@@ -446,24 +446,6 @@ fn document_property(
             _ => Value::Str(text),
         });
     }
-    if let Some((key, _)) = identity.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)) {
-        let field = if key
-            .chars()
-            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-'))
-        {
-            key.clone()
-        } else {
-            format!("\"{key}\"")
-        };
-        quarb::record_warning(
-            quarb::diagnostic::RETIRED_KEY,
-            &format!("::{name}"),
-            format!(
-                "'::{name}' no longer reads what the document declares: the declarations \
-                 are the record '::head', and this one is '::head:{field}'"
-            ),
-        );
-    }
     None
 }
 

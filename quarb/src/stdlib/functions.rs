@@ -5209,7 +5209,7 @@ fn correlate(call: &FnCall, topic: Value) -> Result<Value, String> {
         ));
     }
     crate::value::ambient::record_diagnostic(crate::Diagnostic::info(
-        "CORRELATE",
+        crate::diagnostic::CORRELATE,
         site.clone(),
         msg,
     ));

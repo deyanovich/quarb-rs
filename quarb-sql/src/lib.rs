@@ -8,40 +8,51 @@
 //! approximated.
 //!
 //! - `SELECT cols FROM t` → `/t/* | %(::col; …)`; `SELECT *` →
-//!   the row nodes; `SELECT DISTINCT col` → `/t/*::col @| unique`.
-//! - `WHERE` → a predicate: comparisons, `AND`/`OR`/`NOT`,
-//!   `IS [NOT] NULL` → `= null` / `!= null` (exact: Quarb's
-//!   `value_eq` treats NULL as an ordinary value), `IN (…)` → an
-//!   `or`-chain, `LIKE` → anchored `=~` regexes.
-//! - Aggregates (`COUNT(*)`, `COUNT(col)`, `SUM`/`AVG`/`MIN`/`MAX`)
-//!   → `@|` reductions; `GROUP BY k` → `| .k(::k) @|{.k}` with the
+//!   the row nodes; `SELECT DISTINCT col` → `/t/*::col @| unique`,
+//!   and over several columns the records, `| %(…) @| unique`.
+//! - `WHERE` → a predicate that holds exactly where SQL finds the
+//!   condition TRUE. SQL's logic has a third value for a comparison
+//!   with a NULL, so `<>` is guarded (`::x != null && ::x != "GB"`)
+//!   and a `NOT` is carried inward to the comparisons; `IS [NOT]
+//!   NULL` → `= null` / `!= null`; `[NOT] IN (…)` → a chain of
+//!   equalities; `[NOT] LIKE` → a regex, `%` a run of characters and
+//!   `_` one.
+//! - Aggregates (`COUNT(*)`, `SUM`/`AVG`/`MIN`/`MAX`) → `@|`
+//!   reductions over the piped column, `COUNT(col)` →
+//!   `count(--values)`; `GROUP BY k` → `| .k(::k) @|{.k}` with the
 //!   aggregate folding by the pushed key and `HAVING` a filter
 //!   after it.
-//! - `JOIN t2 ON t2.b = t1.a` → correlation (driver-first): `/t1/*
-//!   <=> /t2/*[::b = $$0::a]` — the FROM table drives, the ON rides
-//!   the joined expression — with the joined side's select columns
-//!   projected through the witness (`$$1::col`).
-//! - `ORDER BY` → `@| sort_by(…)` (`DESC` via `@| reverse`, or a
-//!   numeric `-` key when mixed); `LIMIT n` → `@| [..n]`.
+//! - `JOIN t2 ON …` → the every-witness correlation, one thread for
+//!   every pair as SQL has one row: `/t1/* <=>* /t2/*[::b =
+//!   $$0::a]`, the FROM table driving, the ON in the joined
+//!   expression's bracket, the joined side's columns read through
+//!   the witness (`$$1::col`). `LEFT JOIN` → `<=>*?`, which keeps a
+//!   driver with no pair, its WHERE a filter after the join; `RIGHT
+//!   JOIN` is `LEFT` with the tables' places exchanged; `CROSS JOIN`
+//!   is every pair. The ON is any condition.
+//! - `UNION ALL` of single columns of different tables → a branch
+//!   union, `/t/*::a || /u/*::b`; `UNION` the same and `@| unique`.
+//! - `ORDER BY` → `@| sort_by(…)` (`DESC` via `@| reverse`);
+//!   `LIMIT n` → `@| [..n]`.
 //!
-//! Refused: subqueries, `UNION`, window functions, `CASE`,
-//! outer and `CROSS` joins (Quarb's `<=>` correlation is
-//! inner/existential), multi-join chains (one `JOIN` translates),
-//! `HAVING` without `GROUP BY`, aggregate arithmetic
+//! Refused: subqueries, window functions, `CASE`, a `FULL` join,
+//! multi-join chains (one `JOIN` translates), `SELECT *` over a
+//! join, `UNION ALL` over one table twice (a branch union keeps one
+//! thread for a node two branches reach), a comparison with a NULL
+//! literal, `HAVING` without `GROUP BY`, aggregate arithmetic
 //! (`SUM(a) + 1`), and any non-`SELECT` statement.
 //!
-//! Known semantic divergences are reported as
-//! [`Translation::notes`] rather than errors:
+//! Each translation is held against SQLite's own answer over one
+//! database (the differential rig of `tests/sql.rs`). What differs
+//! between SQL engines themselves is reported as a
+//! [`Translation::notes`] line rather than refused:
 //!
-//! - Quarb's `count` counts all rows (SQL `COUNT(col)` skips NULLs;
-//!   the translation adds the `[::col != null]` filter, and says
-//!   so).
 //! - Quarb streams records (JSONL), not a result table.
 //! - `LIKE` translates to a case-insensitive regex (matching
 //!   MySQL's and SQLite's default folding; PostgreSQL's `LIKE`
 //!   is case-sensitive).
-//! - SQL keeps a NULL-key group under `GROUP BY`; Quarb's `group`
-//!   drops null keys.
+//! - `ORDER BY` puts a NULL key last, first under `DESC`, as
+//!   PostgreSQL does; SQLite and MySQL put it first.
 
 mod export;
 pub use export::{
@@ -49,6 +60,7 @@ pub use export::{
     partial_pushdown_keyed, pushdown, pushdown_explained,
 };
 
+use quarb::diagnostic as d;
 use std::fmt::Write as _;
 
 /// An error translating a SQL statement.
@@ -58,11 +70,139 @@ pub enum SqlError {
     Syntax(String),
     #[error("unsupported SQL construct: {0}")]
     Unsupported(String),
+    /// A construct of SQL with no Quarb translation: the diagnostic
+    /// code of the reason (`JOIN_NOT_TRANSLATED`; ruling 2026-11-17,
+    /// one word per reason) and the reason.
+    #[error("unsupported SQL construct: {1}")]
+    NotTranslated(&'static str, String),
     /// SQL can spell the construct, but with provably different
     /// semantics (NULL propagation, collation, coercion) — the
     /// refusal names the divergence, not a missing feature.
     #[error("semantic mismatch: {0}")]
     Semantics(String),
+    /// A part of a Quarb query the exporter leaves to the engine:
+    /// the word a planner's refusal is told under, whether SQL
+    /// could spell the part with other semantics (`mismatch`) or
+    /// has no form for it, and the reason.
+    #[error("{}: {reason}", class(*.mismatch))]
+    NotPushed {
+        word: Refusal,
+        mismatch: bool,
+        reason: String,
+    },
+}
+
+/// The class an exporter's refusal prints before its reason.
+fn class(mismatch: bool) -> &'static str {
+    if mismatch {
+        "semantic mismatch"
+    } else {
+        "unsupported SQL construct"
+    }
+}
+
+impl SqlError {
+    /// The word and the reason of an exporter's refusal; `None` for
+    /// a syntax error and for an importer's error.
+    pub fn not_pushed(&self) -> Option<(Refusal, &str)> {
+        match self {
+            SqlError::NotPushed { word, reason, .. } => Some((*word, reason)),
+            _ => None,
+        }
+    }
+
+    /// The code and the reason of an importer's refusal, and
+    /// whether `--lenient` translates what was refused: never, the
+    /// SQL bridge has no lenient form.
+    pub fn not_translated(&self) -> Option<(&'static str, &str, bool)> {
+        match self {
+            SqlError::NotTranslated(code, reason) => Some((code, reason, false)),
+            _ => None,
+        }
+    }
+}
+
+/// Why the exporter leaves a part of a Quarb query to the engine:
+/// the first word of the diagnostic code a planner's refusal is told
+/// under (`Sort` is `SORT_NOT_PUSHED`; ruling 2026-11-17, one word
+/// per reason where `NOT_PUSHED` was the one kind). The word names
+/// what the user wrote; the inventory (`langspec/diagnostics.tsv`)
+/// files each under its remedy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Refusal {
+    /// A sort (`sort_by`, `top`, `reverse`): a database orders text
+    /// by its own collation.
+    Sort,
+    /// A fold, a command over its groups, a HAVING.
+    Fold,
+    /// `unique`: DISTINCT returns rows in no stated order.
+    Unique,
+    /// A selection by position.
+    Take,
+    /// A negation: SQL drops the rows whose column is empty.
+    Negation,
+    /// A regular expression, a substring test, a LIKE.
+    Pattern,
+    /// A condition that follows a reference or navigates.
+    Resolution,
+    /// Navigation beyond a table's rows.
+    Walk,
+    /// A read of the query's own state: a register, the topic, a
+    /// capture, a mark, a pushed value.
+    State,
+    /// A correlation in a form with no JOIN.
+    Join,
+    /// A reducer over row nodes, or one SQL has no aggregate for.
+    Reducer,
+    /// A comparison that would follow the column's declared type
+    /// where the engine follows each value.
+    Type,
+    /// A union of branches.
+    Union,
+    /// An operator, a command or a projection with no SQL form.
+    Operator,
+    /// A name or a literal with no spelling every dialect reads, or
+    /// an empty query.
+    Name,
+    /// A leading condition a partial plan could not send ahead:
+    /// what follows would see the difference.
+    Condition,
+    /// A partial plan with no leading condition to send ahead:
+    /// nothing was refused, there was nothing to push, and no
+    /// diagnostic tells of it.
+    Nothing,
+    /// A whole plan for a query that ends on row nodes: their
+    /// locators are the scan's to write. Nothing the reader wrote
+    /// is refused (the conditions go ahead through the partial
+    /// plan), and no diagnostic tells of it.
+    Nodes,
+}
+
+impl Refusal {
+    /// The diagnostic code; `None` for [`Refusal::Nothing`] and
+    /// [`Refusal::Nodes`].
+    pub fn code(self) -> Option<&'static str> {
+        use quarb::diagnostic as d;
+        Some(match self {
+            Refusal::Sort => d::SORT_NOT_PUSHED,
+            Refusal::Fold => d::FOLD_NOT_PUSHED,
+            Refusal::Unique => d::UNIQUE_NOT_PUSHED,
+            Refusal::Take => d::TAKE_NOT_PUSHED,
+            Refusal::Negation => d::NEGATION_NOT_PUSHED,
+            Refusal::Pattern => d::PATTERN_NOT_PUSHED,
+            Refusal::Resolution => d::RESOLUTION_NOT_PUSHED,
+            Refusal::Walk => d::WALK_NOT_PUSHED,
+            Refusal::State => d::STATE_NOT_PUSHED,
+            Refusal::Join => d::JOIN_NOT_PUSHED,
+            Refusal::Reducer => d::REDUCER_NOT_PUSHED,
+            Refusal::Type => d::TYPE_NOT_PUSHED,
+            Refusal::Union => d::UNION_NOT_PUSHED,
+            Refusal::Operator => d::OPERATOR_NOT_PUSHED,
+            Refusal::Name => d::NAME_NOT_PUSHED,
+            Refusal::Condition => d::CONDITION_NOT_PUSHED,
+            Refusal::Nothing | Refusal::Nodes => return None,
+        })
+    }
 }
 
 /// A successful translation: the Quarb query, plus notes on known
@@ -447,11 +587,21 @@ impl Parser {
             self.expect_kw("NULL")?;
             return Ok(Cond::IsNull(col, !not));
         }
+        // `col NOT LIKE …`, `col NOT IN (…)`: the form, negated
+        let word_is = |t: Option<&Tok>, words: &[&str]| matches!(t, Some(Tok::Word(w)) if words.iter().any(|x| w.eq_ignore_ascii_case(x)));
+        let negated =
+            word_is(self.peek(), &["NOT"]) && word_is(self.toks.get(self.pos + 1), &["LIKE", "IN"]);
+        if negated {
+            self.pos += 1;
+        }
+        let said = |c: Cond| {
+            if negated { Cond::Not(Box::new(c)) } else { c }
+        };
         if self.kw("LIKE") {
             match self.peek().cloned() {
                 Some(Tok::Str(p)) => {
                     self.pos += 1;
-                    return Ok(Cond::Like(col, p));
+                    return Ok(said(Cond::Like(col, p)));
                 }
                 _ => return Err(SqlError::Syntax("LIKE takes a string pattern".into())),
             }
@@ -470,7 +620,7 @@ impl Parser {
             if !self.sym(')') {
                 return Err(SqlError::Syntax("expected ')' after IN list".into()));
             }
-            return Ok(Cond::In(col, items));
+            return Ok(said(Cond::In(col, items)));
         }
         let op = self.cmp_op()?;
         let rhs = self.scalar()?;
@@ -481,6 +631,20 @@ impl Parser {
 // ---------------------------------------------------------------
 // Emission
 // ---------------------------------------------------------------
+
+/// How a JOIN treats a row with no pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JoinKind {
+    /// Every pair that satisfies the ON.
+    Inner,
+    /// The same, and the driver's rows that have no pair.
+    Left,
+    /// LEFT with the tables' places exchanged; resolved to `Left`
+    /// before anything is emitted.
+    Right,
+    /// Every pair.
+    Cross,
+}
 
 /// The tables in scope: (name, alias). The first is the FROM table
 /// — the driver under driver-first correlation; the second the
@@ -501,10 +665,10 @@ impl Scope {
     fn is_left(&self, col: &ColRef) -> Result<bool, SqlError> {
         let Some(q) = &col.table else {
             if self.join.is_some() {
-                return Err(SqlError::Unsupported(format!(
-                    "unqualified column '{}' in a JOIN (qualify it)",
-                    col.column
-                )));
+                return Err(SqlError::NotTranslated(
+                    d::JOIN_NOT_TRANSLATED,
+                    format!("unqualified column '{}' in a JOIN (qualify it)", col.column),
+                ));
             }
             return Ok(true);
         };
@@ -534,6 +698,27 @@ impl Scope {
             (true, true) if self.is_left(col)? => format!("$$0::{key}"),
             (true, true) => format!("::{key}"),
         })
+    }
+
+    /// Whether an operand, inside the ON bracket, reads the driver
+    /// (`$$0::col`): a comparison with it is a key comparison of the
+    /// join, which the engine leaves unknown for a null on either
+    /// side.
+    fn keyed(&self, operand: &str) -> bool {
+        self.on_clause && operand.starts_with("$$")
+    }
+
+    /// Whether `c` tests a column of the FROM table for NULL: the one
+    /// condition a join's bracket cannot hold.
+    fn tests_driver_null(&self, c: &Cond) -> bool {
+        match c {
+            Cond::IsNull(col, _) => self.is_left(col).unwrap_or(false),
+            Cond::And(a, b) | Cond::Or(a, b) => {
+                self.tests_driver_null(a) || self.tests_driver_null(b)
+            }
+            Cond::Not(a) => self.tests_driver_null(a),
+            _ => false,
+        }
     }
 
     /// This scope, switched to ON-bracket emission.
@@ -578,9 +763,10 @@ fn quarb_key(name: &str) -> Result<String, SqlError> {
         return Ok(name.to_string());
     }
     if name.contains('\'') {
-        return Err(SqlError::Unsupported(format!(
-            "the identifier {name:?} (a quote inside a quoted identifier)"
-        )));
+        return Err(SqlError::NotTranslated(
+            d::NAME_NOT_TRANSLATED,
+            format!("the identifier {name:?} (a quote inside a quoted identifier)"),
+        ));
     }
     Ok(format!("'{name}'"))
 }
@@ -595,36 +781,113 @@ fn scalar_text(s: &Scalar, scope: &Scope) -> Result<String, SqlError> {
     })
 }
 
-fn emit_cond(c: &Cond, scope: &Scope, notes: &mut Vec<String>) -> Result<String, SqlError> {
+/// The operator that holds exactly where `op` fails, both sides
+/// present.
+fn complement(op: &str) -> &'static str {
+    match op {
+        "=" => "!=",
+        "!=" => "=",
+        "<" => ">=",
+        "<=" => ">",
+        ">" => "<=",
+        _ => "<",
+    }
+}
+
+/// A LIKE pattern as a regex literal. The simple forms keep their
+/// short spelling (`%x%` is a search, `x%` and `%x` anchor one end);
+/// any other pattern is anchored at both ends, `%` any run of
+/// characters and `_` any one, a line break among them.
+fn like_regex(pat: &str) -> String {
+    let inner = pat.trim_matches('%');
+    if !inner.contains('%') && !inner.contains('_') {
+        let esc = regex_escape(inner);
+        return match (pat.starts_with('%'), pat.ends_with('%')) {
+            (true, true) => format!("(/(?i){esc}/)"),
+            (false, true) => format!("(/(?i)^{esc}/)"),
+            (true, false) => format!("(/(?i){esc}$/)"),
+            (false, false) => format!("(/(?i)^{esc}$/)"),
+        };
+    }
+    let mut body = String::new();
+    for c in pat.chars() {
+        match c {
+            '%' => body.push_str(".*"),
+            '_' => body.push('.'),
+            c => body.push_str(&regex_escape(&c.to_string())),
+        }
+    }
+    format!("(/(?is)^{body}$/)")
+}
+
+/// A condition as a Quarb predicate that holds exactly where SQL
+/// finds it TRUE (`truth`), or exactly where SQL finds it FALSE.
+///
+/// SQL's logic has a third value, UNKNOWN, for a comparison with a
+/// NULL, and a row passes WHERE only on TRUE. Quarb's is two-valued:
+/// a NULL differs from 'GB' (`!=` holds), two NULLs are equal, and
+/// the negation of a comparison that failed holds. So a negation is
+/// carried inward to the comparisons (`NOT (a AND b)` is where `a`
+/// is FALSE or `b` is), and a comparison that would hold for a NULL
+/// is guarded: `x <> 'GB'` is `::x != null && ::x != "GB"`. The
+/// ordering comparisons need no guard: none holds for a NULL.
+///
+/// Inside a join's bracket the engine reads a comparison with the
+/// driver as SQL does, unknown for a null on either side (spec:
+/// Correlation), so such a comparison takes no guard there; and a
+/// test of the driver's column for NULL cannot stand there at all
+/// ([`Scope::keyed`]).
+fn emit_cond(
+    c: &Cond,
+    truth: bool,
+    scope: &Scope,
+    notes: &mut Vec<String>,
+) -> Result<String, SqlError> {
     Ok(match c {
         Cond::Cmp(col, op, rhs) => {
+            if matches!(rhs, Scalar::Null) {
+                return Err(SqlError::NotTranslated(
+                    d::NULL_NOT_TRANSLATED,
+                    format!(
+                        "a comparison with NULL ('{} {op} NULL' is never true in SQL: write IS \
+                     NULL or IS NOT NULL)",
+                        col.column
+                    ),
+                ));
+            }
+            let op = if truth { op.as_str() } else { complement(op) };
             let lhs = scope.operand(col)?;
-            format!("{lhs} {op} {}", scalar_text(rhs, scope)?)
+            let r = scalar_text(rhs, scope)?;
+            match (op, matches!(rhs, Scalar::Col(_))) {
+                // a key comparison of a join condition is unknown
+                // for a null on either side, as SQL's is
+                _ if scope.keyed(&lhs) || scope.keyed(&r) => format!("{lhs} {op} {r}"),
+                ("!=", false) => format!("{lhs} != null && {lhs} != {r}"),
+                ("!=", true) => format!("{lhs} != null && {r} != null && {lhs} != {r}"),
+                ("=", true) => format!("{lhs} != null && {lhs} = {r}"),
+                _ => format!("{lhs} {op} {r}"),
+            }
         }
         Cond::AggCmp(..) => {
-            return Err(SqlError::Unsupported(
+            return Err(SqlError::NotTranslated(
+                d::AGGREGATE_NOT_TRANSLATED,
                 "an aggregate in WHERE (SQL puts it in HAVING)".into(),
             ));
         }
         Cond::Like(col, pat) => {
             let lhs = scope.operand(col)?;
-            let inner = pat.trim_matches('%');
-            if inner.contains('%') || inner.contains('_') {
-                return Err(SqlError::Unsupported(format!(
-                    "LIKE pattern '{pat}' (only simple %x%, x%, %x forms translate)"
-                )));
+            let note = "LIKE: translated to a case-insensitive regex (SQL's default \
+                        ASCII case folding)";
+            if !notes.iter().any(|n| n == note) {
+                notes.push(note.to_string());
             }
-            notes.push(
-                "LIKE: translated to a case-insensitive regex (SQL's default \
-                 ASCII case folding)"
-                    .to_string(),
-            );
-            let esc = regex_escape(inner);
-            match (pat.starts_with('%'), pat.ends_with('%')) {
-                (true, true) => format!("{lhs} == (/(?i){esc}/)"),
-                (false, true) => format!("{lhs} == (/(?i)^{esc}/)"),
-                (true, false) => format!("{lhs} == (/(?i){esc}$/)"),
-                (false, false) => format!("{lhs} == (/(?i)^{esc}$/)"),
+            let regex = like_regex(pat);
+            if truth {
+                format!("{lhs} == {regex}")
+            } else if scope.keyed(&lhs) {
+                format!("{lhs} != {regex}")
+            } else {
+                format!("{lhs} != null && !({lhs} == {regex})")
             }
         }
         Cond::IsNull(col, is_null) => {
@@ -633,7 +896,17 @@ fn emit_cond(c: &Cond, scope: &Scope, notes: &mut Vec<String>) -> Result<String,
             // `IS [NOT] NULL` — truthiness (`not ::c`) would also
             // drop 0 and ''.
             let lhs = scope.operand(col)?;
-            if *is_null {
+            if scope.keyed(&lhs) {
+                return Err(SqlError::NotTranslated(
+                    d::JOIN_NOT_TRANSLATED,
+                    format!(
+                        "IS NULL on '{}', the driving table's column, inside ON (a join condition \
+                     leaves a null key unknown: state it in WHERE)",
+                        col.column
+                    ),
+                ));
+            }
+            if *is_null == truth {
                 format!("{lhs} = null")
             } else {
                 format!("{lhs} != null")
@@ -641,23 +914,69 @@ fn emit_cond(c: &Cond, scope: &Scope, notes: &mut Vec<String>) -> Result<String,
         }
         Cond::In(col, items) => {
             let lhs = scope.operand(col)?;
-            let parts: Vec<String> = items
+            let has_null = items.iter().any(|i| matches!(i, Scalar::Null));
+            let listed: Vec<&Scalar> = items
                 .iter()
-                .map(|s| Ok(format!("{lhs} = {}", scalar_text(s, scope)?)))
-                .collect::<Result<_, SqlError>>()?;
-            format!("({})", parts.join(" || "))
+                .filter(|i| !matches!(i, Scalar::Null))
+                .collect();
+            if truth {
+                // a NULL in the list matches nothing
+                if listed.is_empty() {
+                    return Err(SqlError::NotTranslated(
+                        d::NULL_NOT_TRANSLATED,
+                        "IN over a list of NULL alone (never true in SQL)".into(),
+                    ));
+                }
+                let parts: Vec<String> = listed
+                    .iter()
+                    .map(|s| {
+                        let r = scalar_text(s, scope)?;
+                        let guarded =
+                            matches!(s, Scalar::Col(_)) && !scope.keyed(&lhs) && !scope.keyed(&r);
+                        Ok(if guarded {
+                            format!("{lhs} != null && {lhs} = {r}")
+                        } else {
+                            format!("{lhs} = {r}")
+                        })
+                    })
+                    .collect::<Result<_, SqlError>>()?;
+                format!("({})", parts.join(" || "))
+            } else {
+                if has_null {
+                    return Err(SqlError::NotTranslated(
+                        d::NULL_NOT_TRANSLATED,
+                        "NOT IN over a list with NULL (never true in SQL)".into(),
+                    ));
+                }
+                let mut parts = Vec::new();
+                if !scope.keyed(&lhs) {
+                    parts.push(format!("{lhs} != null"));
+                }
+                for s in listed {
+                    let r = scalar_text(s, scope)?;
+                    if matches!(s, Scalar::Col(_)) && !scope.keyed(&lhs) && !scope.keyed(&r) {
+                        parts.push(format!("{r} != null"));
+                    }
+                    parts.push(format!("{lhs} != {r}"));
+                }
+                parts.join(" && ")
+            }
         }
-        Cond::And(a, b) => format!(
-            "{} && {}",
-            emit_cond(a, scope, notes)?,
-            emit_cond(b, scope, notes)?
-        ),
-        Cond::Or(a, b) => format!(
-            "({} or {})",
-            emit_cond(a, scope, notes)?,
-            emit_cond(b, scope, notes)?
-        ),
-        Cond::Not(a) => format!("!({})", emit_cond(a, scope, notes)?),
+        // AND is TRUE where both are, FALSE where either is; OR the
+        // other way round. `&&` binds tighter than `||`, and a
+        // disjunction carries its own parentheses.
+        Cond::And(a, b) | Cond::Or(a, b) => {
+            let (a, b) = (
+                emit_cond(a, truth, scope, notes)?,
+                emit_cond(b, truth, scope, notes)?,
+            );
+            if matches!(c, Cond::And(..)) == truth {
+                format!("{a} && {b}")
+            } else {
+                format!("({a} || {b})")
+            }
+        }
+        Cond::Not(a) => emit_cond(a, !truth, scope, notes)?,
     })
 }
 
@@ -673,9 +992,20 @@ fn regex_escape(s: &str) -> String {
         .collect()
 }
 
-fn agg_fn(a: &Agg) -> &'static str {
+/// The name an aggregate's field takes where the statement gives
+/// it no alias: the reducer's word.
+fn agg_word(a: &Agg) -> &'static str {
     match a {
         Agg::Count | Agg::CountCol => "count",
+        other => agg_fn(other),
+    }
+}
+
+/// The reducer an aggregate is, as the query writes it.
+fn agg_fn(a: &Agg) -> &'static str {
+    match a {
+        Agg::Count => "count",
+        Agg::CountCol => "count(--values)",
         Agg::Sum => "sum",
         Agg::Avg => "mean",
         Agg::Min => "min",
@@ -686,11 +1016,186 @@ fn agg_fn(a: &Agg) -> &'static str {
 /// Translate one SQL `SELECT` statement to a Quarb query.
 pub fn translate(sql: &str) -> Result<Translation, SqlError> {
     let toks = lex(sql.trim().trim_end_matches(';'))?;
+    // A UNION outside every parenthesis joins whole SELECTs.
+    let mut depth = 0usize;
+    let mut cuts = Vec::new();
+    for (i, t) in toks.iter().enumerate() {
+        match t {
+            Tok::Sym('(') => depth += 1,
+            Tok::Sym(')') => depth = depth.saturating_sub(1),
+            Tok::Word(w) if depth == 0 && w.eq_ignore_ascii_case("UNION") => cuts.push(i),
+            _ => {}
+        }
+    }
+    if !cuts.is_empty() {
+        return translate_union(&toks, &cuts);
+    }
+    translate_select(toks)
+}
+
+/// `SELECT col FROM t [WHERE …] UNION [ALL] SELECT col FROM u …`,
+/// with an ORDER BY and a LIMIT of the whole after the last: a
+/// branch union of the columns, `/t/*[…]::col || /u/*[…]::col`.
+///
+/// UNION removes duplicate values, and `@| unique` after the union
+/// does. UNION ALL keeps every row, and the branch union keeps one
+/// thread for a node two branches both reach: over two different
+/// tables no node is shared and the translation is exact; over one
+/// table twice a row both SELECTs take would answer once where SQL
+/// answers twice, so that form is refused.
+fn translate_union(toks: &[Tok], cuts: &[usize]) -> Result<Translation, SqlError> {
+    let mut notes = Vec::new();
+    let mut all = None;
+    let mut parts: Vec<&[Tok]> = Vec::new();
+    let mut from = 0;
+    for &cut in cuts {
+        parts.push(&toks[from..cut]);
+        let is_all =
+            matches!(toks.get(cut + 1), Some(Tok::Word(w)) if w.eq_ignore_ascii_case("ALL"));
+        if all.is_some_and(|a| a != is_all) {
+            return Err(SqlError::NotTranslated(
+                d::UNION_NOT_TRANSLATED,
+                "UNION and UNION ALL in one statement".into(),
+            ));
+        }
+        all = Some(is_all);
+        from = cut + 1 + usize::from(is_all);
+    }
+    parts.push(&toks[from..]);
+    let all = all.unwrap_or(false);
+
+    let mut branches = Vec::new();
+    let mut tables: Vec<String> = Vec::new();
+    let mut first_name = String::new();
+    let mut tail = String::new();
+    let last = parts.len() - 1;
+    for (i, part) in parts.iter().enumerate() {
+        let mut p = Parser {
+            toks: part.to_vec(),
+            pos: 0,
+        };
+        let shape = || {
+            SqlError::NotTranslated(
+                d::UNION_NOT_TRANSLATED,
+                "a UNION of anything but single columns ('SELECT col FROM t [WHERE …]' on \
+                 each side)"
+                    .into(),
+            )
+        };
+        p.expect_kw("SELECT").map_err(|_| shape())?;
+        if p.kw("DISTINCT") || p.sym('*') {
+            return Err(shape());
+        }
+        if matches!(p.peek(), Some(Tok::Word(w)) if agg_kw(w).is_some())
+            && matches!(p.toks.get(p.pos + 1), Some(Tok::Sym('(')))
+        {
+            return Err(shape());
+        }
+        let col = p.col_ref()?;
+        let alias = p.kw("AS").then(|| p.ident()).transpose()?;
+        if p.sym(',') {
+            return Err(shape());
+        }
+        p.expect_kw("FROM")?;
+        let table = p.ident()?;
+        let table_alias = if p.kw("AS") {
+            Some(p.ident()?)
+        } else {
+            match p.peek() {
+                Some(Tok::Word(w))
+                    if !["WHERE", "ORDER", "LIMIT"].contains(&w.to_ascii_uppercase().as_str()) =>
+                {
+                    Some(p.ident()?)
+                }
+                _ => None,
+            }
+        };
+        let scope = Scope {
+            from: (table.clone(), table_alias),
+            join: None,
+            on_clause: false,
+        };
+        let cond = p.kw("WHERE").then(|| p.cond()).transpose()?;
+        if i == 0 {
+            first_name = alias.unwrap_or_else(|| col.column.clone());
+        }
+        if i == last {
+            // the whole union's order and limit
+            if p.kw("ORDER") {
+                p.expect_kw("BY")?;
+                let named = match p.peek().cloned() {
+                    Some(Tok::Num(n)) => {
+                        p.pos += 1;
+                        n == "1"
+                    }
+                    _ => p.col_ref()?.column.eq_ignore_ascii_case(&first_name),
+                };
+                if !named {
+                    return Err(SqlError::NotTranslated(
+                        d::UNION_NOT_TRANSLATED,
+                        format!(
+                            "ORDER BY of a UNION by anything but its column ('{first_name}', or 1)"
+                        ),
+                    ));
+                }
+                let desc = p.kw("DESC");
+                if !desc {
+                    p.kw("ASC");
+                }
+                tail.push_str(" @| sort");
+                if desc {
+                    tail.push_str(" @| reverse");
+                }
+            }
+            if p.kw("LIMIT") {
+                match p.peek().cloned() {
+                    Some(Tok::Num(n)) => {
+                        p.pos += 1;
+                        write!(tail, " @| [..{n}]").unwrap();
+                    }
+                    _ => return Err(SqlError::Syntax("LIMIT takes a number".into())),
+                }
+            }
+        }
+        if p.peek().is_some() {
+            return Err(shape());
+        }
+        if all && tables.iter().any(|t| t.eq_ignore_ascii_case(&table)) {
+            return Err(SqlError::NotTranslated(
+                d::UNION_NOT_TRANSLATED,
+                format!(
+                    "UNION ALL over the table '{table}' twice (a row both SELECTs take would \
+                 answer once: a branch union keeps one thread for a node)"
+                ),
+            ));
+        }
+        tables.push(table.clone());
+        let mut branch = format!("/{}/*", quarb_key(&table)?);
+        if let Some(c) = &cond {
+            write!(branch, "[{}]", emit_cond(c, true, &scope, &mut notes)?).unwrap();
+        }
+        write!(branch, "{}", scope.operand(&col)?).unwrap();
+        branches.push(branch);
+    }
+    let mut q = branches.join(" || ");
+    if !all {
+        q.push_str(" @| unique");
+    }
+    q.push_str(&tail);
+    Ok(Translation { query: q, notes })
+}
+
+/// One `SELECT`, its tokens lexed.
+fn translate_select(toks: Vec<Tok>) -> Result<Translation, SqlError> {
     let mut p = Parser { toks, pos: 0 };
     let mut notes = Vec::new();
 
-    p.expect_kw("SELECT")
-        .map_err(|_| SqlError::Unsupported("only SELECT statements translate".into()))?;
+    p.expect_kw("SELECT").map_err(|_| {
+        SqlError::NotTranslated(
+            d::STATEMENT_NOT_TRANSLATED,
+            "only SELECT statements translate".into(),
+        )
+    })?;
     let distinct = p.kw("DISTINCT");
 
     // The select list.
@@ -738,47 +1243,83 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
         }
     };
 
-    // One optional inner JOIN ... ON a = b; the outer forms have
-    // no existential-correlation equivalent, so they refuse rather
-    // than silently translating as inner.
-    if p.kw("LEFT") || p.kw("RIGHT") || p.kw("FULL") {
-        return Err(SqlError::Unsupported(
-            "an outer JOIN (Quarb's '<=>' correlation is inner/existential)".into(),
+    // One optional JOIN. An inner join is every pair that satisfies
+    // its ON (`<=>*`); LEFT keeps the FROM table's rows that have no
+    // pair, the joined side null (`<=>*?`); RIGHT is LEFT with the
+    // tables' places exchanged; CROSS is every pair. FULL has no
+    // correlation that keeps the unmatched rows of both tables.
+    if p.kw("FULL") {
+        return Err(SqlError::NotTranslated(
+            d::JOIN_NOT_TRANSLATED,
+            "a FULL JOIN (no correlation keeps the unmatched rows of both tables)".into(),
         ));
     }
-    if p.kw("CROSS") {
-        return Err(SqlError::Unsupported("CROSS JOIN".into()));
+    let outer = if p.kw("LEFT") {
+        Some(JoinKind::Left)
+    } else if p.kw("RIGHT") {
+        Some(JoinKind::Right)
+    } else {
+        None
+    };
+    if outer.is_some() {
+        p.kw("OUTER");
     }
+    let cross = outer.is_none() && p.kw("CROSS");
     let mut join = None;
     let mut join_on = None;
-    if p.kw("INNER") || matches!(p.peek(), Some(Tok::Word(w)) if w.eq_ignore_ascii_case("JOIN")) {
+    let mut kind = JoinKind::Inner;
+    if outer.is_some()
+        || cross
+        || p.kw("INNER")
+        || matches!(p.peek(), Some(Tok::Word(w)) if w.eq_ignore_ascii_case("JOIN"))
+    {
         p.expect_kw("JOIN")?;
         let t = p.ident()?;
         let alias = if p.kw("AS") {
             Some(p.ident()?)
         } else {
             match p.peek() {
-                Some(Tok::Word(w)) if !w.eq_ignore_ascii_case("ON") => Some(p.ident()?),
+                Some(Tok::Word(w))
+                    if !CLAUSE_KEYWORDS.contains(&w.to_ascii_uppercase().as_str()) =>
+                {
+                    Some(p.ident()?)
+                }
                 _ => None,
             }
         };
-        p.expect_kw("ON")?;
-        let l = p.col_ref()?;
-        if !p.sym('=') {
-            return Err(SqlError::Unsupported("non-equi JOIN".into()));
+        if cross {
+            kind = JoinKind::Cross;
+            if matches!(p.peek(), Some(Tok::Word(w)) if w.eq_ignore_ascii_case("ON")) {
+                return Err(SqlError::NotTranslated(
+                    d::JOIN_NOT_TRANSLATED,
+                    "CROSS JOIN with an ON clause (a join with a condition is JOIN … ON)".into(),
+                ));
+            }
+        } else {
+            kind = outer.unwrap_or(JoinKind::Inner);
+            p.expect_kw("ON")?;
+            join_on = Some(p.cond()?);
         }
-        let r = p.col_ref()?;
         join = Some((t, alias));
-        join_on = Some((l, r));
         if matches!(p.peek(), Some(Tok::Word(w))
             if ["JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS"]
                 .contains(&w.to_ascii_uppercase().as_str()))
         {
-            return Err(SqlError::Unsupported(
+            return Err(SqlError::NotTranslated(
+                d::JOIN_NOT_TRANSLATED,
                 "more than one JOIN (chain resolutions with '-->' instead)".into(),
             ));
         }
     }
+    // RIGHT JOIN: the joined table drives, and the FROM table is the
+    // side that may be missing.
+    let (from_table, from_alias, join) = match (kind, join) {
+        (JoinKind::Right, Some((t, alias))) => {
+            kind = JoinKind::Left;
+            (t, alias, Some((from_table, from_alias)))
+        }
+        (_, join) => (from_table, from_alias, join),
+    };
 
     let scope = Scope {
         from: (from_table.clone(), from_alias),
@@ -818,12 +1359,21 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
         })
         .transpose()?;
     if let Some(t) = p.peek() {
-        return Err(SqlError::Unsupported(format!(
-            "trailing SQL after the query ({t:?})"
-        )));
+        return Err(SqlError::NotTranslated(
+            d::CONSTRUCT_NOT_TRANSLATED,
+            format!("trailing SQL after the query ({t:?})"),
+        ));
+    }
+    if order_by.is_some() {
+        notes.push(
+            "ORDER BY: a NULL key sorts last, first under DESC (as PostgreSQL orders it; \
+             SQLite and MySQL put it first)"
+                .to_string(),
+        );
     }
     if group_by.is_none() && having.is_some() {
-        return Err(SqlError::Unsupported(
+        return Err(SqlError::NotTranslated(
+            d::HAVING_NOT_TRANSLATED,
             "HAVING without GROUP BY (a whole-table group)".into(),
         ));
     }
@@ -831,39 +1381,66 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
     // ---- emit ----
     let mut q = String::new();
     if let Some((jt, _)) = &join {
-        let (l, r) = join_on.as_ref().expect("join has ON");
-        // The left/FROM table becomes the correlation context; the
-        // joined table the result context.
-        let (left_col, right_col) = if scope.is_left(l)? { (l, r) } else { (r, l) };
+        // `SELECT *` over a join is the columns of both tables; the
+        // row nodes would be the driver's alone.
+        if items.iter().any(|i| matches!(i, SelectItem::Star)) {
+            return Err(SqlError::NotTranslated(
+                d::JOIN_NOT_TRANSLATED,
+                "SELECT * over a JOIN (name the columns: a row node is one table's row)".into(),
+            ));
+        }
+        // The driver is the correlation context; the joined table
+        // the result context, its ON in the bracket, where the
+        // driver is `$$0`. Every pair is a thread (`<=>*`), as every
+        // pair is a row; `<=>*?` keeps a driver with no pair.
+        let arrow = if kind == JoinKind::Left {
+            "<=>*?"
+        } else {
+            "<=>*"
+        };
         write!(
             q,
-            "/{}/* <=> /{}/*[::{} = $$0::{}",
+            "/{}/* {arrow} /{}/*",
             quarb_key(&from_table)?,
-            quarb_key(jt)?,
-            quarb_key(&right_col.column)?,
-            quarb_key(&left_col.column)?
+            quarb_key(jt)?
         )
         .unwrap();
-        if let Some(w) = &where_cond {
-            write!(q, " && {}", emit_cond(w, &scope.on(), &mut notes)?).unwrap();
+        let mut inside: Vec<String> = Vec::new();
+        if let Some(on) = &join_on {
+            inside.push(emit_cond(on, true, &scope.on(), &mut notes)?);
         }
-        q.push(']');
-        notes.push(
-            "JOIN: existential semantics — one result row per FROM-table row, \
-             the joined table bound to its first witness"
-                .to_string(),
-        );
+        // WHERE reads the joined rows. For an inner join that is the
+        // ON's own filter, and it rides the bracket (where a source
+        // takes the whole as one JOIN); after an outer join it must
+        // see the rows the join kept with no pair, and a test of the
+        // driver's column for NULL cannot stand in a bracket: there
+        // it follows the join as a filter.
+        let after = where_cond
+            .as_ref()
+            .filter(|w| kind == JoinKind::Left || scope.tests_driver_null(w));
+        if after.is_none()
+            && let Some(w) = &where_cond
+        {
+            inside.push(emit_cond(w, true, &scope.on(), &mut notes)?);
+        }
+        if !inside.is_empty() {
+            write!(q, "[{}]", inside.join(" && ")).unwrap();
+        }
+        if let Some(w) = after {
+            write!(q, " | [{}]", emit_cond(w, true, &scope, &mut notes)?).unwrap();
+        }
     } else {
         write!(q, "/{}/*", quarb_key(&from_table)?).unwrap();
         if let Some(w) = &where_cond {
-            write!(q, "[{}]", emit_cond(w, &scope, &mut notes)?).unwrap();
+            write!(q, "[{}]", emit_cond(w, true, &scope, &mut notes)?).unwrap();
         }
     }
 
     // GROUP BY: the aggregate rides the plain pipe.
     if let Some(k) = &group_by {
         if distinct {
-            return Err(SqlError::Unsupported(
+            return Err(SqlError::NotTranslated(
+                d::DISTINCT_NOT_TRANSLATED,
                 "SELECT DISTINCT with GROUP BY".into(),
             ));
         }
@@ -872,7 +1449,8 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
             .filter(|i| matches!(i, SelectItem::Agg(..)))
             .collect();
         if aggs.len() != 1 {
-            return Err(SqlError::Unsupported(
+            return Err(SqlError::NotTranslated(
+                d::GROUP_NOT_TRANSLATED,
                 "GROUP BY translates with exactly one aggregate in the select list".into(),
             ));
         }
@@ -888,13 +1466,19 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
                     key_alias = ka.clone();
                 }
                 SelectItem::Col(c, _) => {
-                    return Err(SqlError::Unsupported(format!(
-                        "the non-aggregate column '{}' is not the GROUP BY key",
-                        c.column
-                    )));
+                    return Err(SqlError::NotTranslated(
+                        d::GROUP_NOT_TRANSLATED,
+                        format!(
+                            "the non-aggregate column '{}' is not the GROUP BY key",
+                            c.column
+                        ),
+                    ));
                 }
                 SelectItem::Star => {
-                    return Err(SqlError::Unsupported("SELECT * with GROUP BY".into()));
+                    return Err(SqlError::NotTranslated(
+                        d::GROUP_NOT_TRANSLATED,
+                        "SELECT * with GROUP BY".into(),
+                    ));
                 }
                 SelectItem::Agg(..) => {}
             }
@@ -904,30 +1488,23 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
         // sum`. SQL's NULL-key group is the fold's null partition.
         let key_name = key_alias.clone().unwrap_or_else(|| k.column.clone());
         if !plain_register(&key_name) {
-            return Err(SqlError::Unsupported(format!(
-                "the GROUP BY key {key_name:?} (not a plain register name)"
-            )));
+            return Err(SqlError::NotTranslated(
+                d::NAME_NOT_TRANSLATED,
+                format!("the GROUP BY key {key_name:?} (not a plain register name)"),
+            ));
         }
         write!(q, " | .{key_name}({})", scope.operand(k)?).unwrap();
+        // The column an aggregate reads is piped to it; COUNT(col)
+        // counts its values other than NULL, `count(--values)`.
         if let Some(c) = col {
-            let op = scope.operand(c)?;
-            if matches!(a, Agg::CountCol) {
-                notes.push(format!(
-                    "COUNT({}): Quarb count counts all; the [{op} != null] filter \
-                     restores SQL's NULL-skipping",
-                    c.column
-                ));
-                write!(q, "[{op} != null]").unwrap();
-            }
-            if !matches!(a, Agg::Count | Agg::CountCol) {
-                write!(q, " | {op}").unwrap();
-            }
+            write!(q, " | {}", scope.operand(c)?).unwrap();
         }
-        let name = alias.clone().unwrap_or_else(|| agg_fn(a).to_string());
+        let name = alias.clone().unwrap_or_else(|| agg_word(a).to_string());
         if !plain_register(&name) {
-            return Err(SqlError::Unsupported(format!(
-                "the aggregate alias {name:?} (not a plain register name)"
-            )));
+            return Err(SqlError::NotTranslated(
+                d::NAME_NOT_TRANSLATED,
+                format!("the aggregate alias {name:?} (not a plain register name)"),
+            ));
         }
         write!(q, " @|{{.{key_name}}} {} | .{name}", agg_fn(a)).unwrap();
         if let Some(h) = &having {
@@ -946,10 +1523,13 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
             } else if c.column.eq_ignore_ascii_case(&name) {
                 name.clone()
             } else {
-                return Err(SqlError::Unsupported(format!(
-                    "ORDER BY '{}': neither the GROUP BY key nor the aggregate",
-                    c.column
-                )));
+                return Err(SqlError::NotTranslated(
+                    d::SORT_NOT_TRANSLATED,
+                    format!(
+                        "ORDER BY '{}': neither the GROUP BY key nor the aggregate",
+                        c.column
+                    ),
+                ));
             };
             write!(q, " @| sort_by(:{field})").unwrap();
             if *desc {
@@ -963,31 +1543,24 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
     } else if items.iter().any(|i| matches!(i, SelectItem::Agg(..))) {
         // Bare aggregates over the whole table.
         if items.len() != 1 {
-            return Err(SqlError::Unsupported(
+            return Err(SqlError::NotTranslated(
+                d::GROUP_NOT_TRANSLATED,
                 "mixing aggregates and columns without GROUP BY".into(),
             ));
         }
         if distinct {
-            return Err(SqlError::Unsupported(
+            return Err(SqlError::NotTranslated(
+                d::DISTINCT_NOT_TRANSLATED,
                 "SELECT DISTINCT with an aggregate".into(),
             ));
         }
         let SelectItem::Agg(a, col, _) = &items[0] else {
             unreachable!()
         };
+        // The column an aggregate reads is piped to it; COUNT(col)
+        // counts its values other than NULL, `count(--values)`.
         if let Some(c) = col {
-            let op = scope.operand(c)?;
-            if matches!(a, Agg::CountCol) {
-                notes.push(format!(
-                    "COUNT({}): Quarb count counts all; the [{op} != null] filter \
-                     restores SQL's NULL-skipping",
-                    c.column
-                ));
-                write!(q, "[{op} != null]").unwrap();
-            }
-            if !matches!(a, Agg::Count | Agg::CountCol) {
-                write!(q, " | {op}").unwrap();
-            }
+            write!(q, " | {}", scope.operand(c)?).unwrap();
         }
         write!(q, " @| {}", agg_fn(a)).unwrap();
     } else {
@@ -1001,15 +1574,25 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
             }
         }
         if distinct {
-            if items.len() != 1 {
-                return Err(SqlError::Unsupported(
-                    "SELECT DISTINCT translates for a single column".into(),
-                ));
+            match items.as_slice() {
+                [SelectItem::Star] => {
+                    return Err(SqlError::NotTranslated(
+                        d::DISTINCT_NOT_TRANSLATED,
+                        "SELECT DISTINCT *".into(),
+                    ));
+                }
+                [SelectItem::Col(c, _)] => {
+                    write!(q, " | {} @| unique", scope.operand(c)?).unwrap();
+                }
+                // several columns: the rows as records, of which
+                // `unique` keeps the first of each (two NULLs are
+                // one value there, as they are under DISTINCT)
+                _ => {
+                    let fields = record_fields(&items, &scope)?;
+                    write!(q, " | %({}) @| unique", fields.join("; ")).unwrap();
+                    notes.push("the result streams as records (JSONL), not a table".to_string());
+                }
             }
-            let SelectItem::Col(c, _) = &items[0] else {
-                return Err(SqlError::Unsupported("SELECT DISTINCT *".into()));
-            };
-            write!(q, " | {} @| unique", scope.operand(c)?).unwrap();
             if let Some(n) = &limit {
                 write!(q, " @| [..{n}]").unwrap();
             }
@@ -1022,34 +1605,7 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
             // row nodes as-is
             notes.push("SELECT *: the result is the row nodes (their locators print)".to_string());
         } else {
-            let mut fields = Vec::new();
-            for item in &items {
-                match item {
-                    SelectItem::Star => {
-                        return Err(SqlError::Unsupported("mixing * with named columns".into()));
-                    }
-                    SelectItem::Col(c, alias) => {
-                        let op = scope.operand(c)?;
-                        match alias {
-                            Some(a) => fields.push(format!("{} = {op}", quarb_str(a))),
-                            // The witness side names its field with
-                            // the SQL qualifier, so two-sided select
-                            // lists keep distinct keys.
-                            None if op.starts_with("$$")
-                                && op[2..].starts_with(|c: char| c.is_ascii_digit()) =>
-                            {
-                                let name = match &c.table {
-                                    Some(t) => format!("{t}.{}", c.column),
-                                    None => c.column.clone(),
-                                };
-                                fields.push(format!("{} = {op}", quarb_str(&name)));
-                            }
-                            None => fields.push(op),
-                        }
-                    }
-                    SelectItem::Agg(..) => unreachable!("handled above"),
-                }
-            }
+            let fields = record_fields(&items, &scope)?;
             write!(q, " | %({})", fields.join("; ")).unwrap();
             notes.push("the result streams as records (JSONL), not a table".to_string());
         }
@@ -1067,6 +1623,47 @@ pub fn translate(sql: &str) -> Result<Translation, SqlError> {
         write!(q, " @| [..{n}]").unwrap();
     }
     Ok(Translation { query: q, notes })
+}
+
+/// The fields of the record a select list of columns projects: a
+/// column under its own name, an aliased one under its alias, and a
+/// joined table's column under its SQL qualifier, so that the two
+/// sides of a join keep distinct keys.
+fn record_fields(items: &[SelectItem], scope: &Scope) -> Result<Vec<String>, SqlError> {
+    let mut fields = Vec::new();
+    for item in items {
+        match item {
+            SelectItem::Star => {
+                return Err(SqlError::NotTranslated(
+                    d::CONSTRUCT_NOT_TRANSLATED,
+                    "mixing * with named columns".into(),
+                ));
+            }
+            SelectItem::Col(c, alias) => {
+                let op = scope.operand(c)?;
+                match alias {
+                    Some(a) => fields.push(format!("{} = {op}", quarb_str(a))),
+                    None if op.starts_with("$$")
+                        && op[2..].starts_with(|c: char| c.is_ascii_digit()) =>
+                    {
+                        let name = match &c.table {
+                            Some(t) => format!("{t}.{}", c.column),
+                            None => c.column.clone(),
+                        };
+                        fields.push(format!("{} = {op}", quarb_str(&name)));
+                    }
+                    None => fields.push(op),
+                }
+            }
+            SelectItem::Agg(..) => {
+                return Err(SqlError::NotTranslated(
+                    d::GROUP_NOT_TRANSLATED,
+                    "an aggregate beside plain columns in this position".into(),
+                ));
+            }
+        }
+    }
+    Ok(fields)
 }
 
 /// A name usable as a bare Quarb register (`.name` / `$.name`).
@@ -1093,7 +1690,8 @@ fn emit_having(
 ) -> Result<String, SqlError> {
     let rhs_text = |rhs: &Scalar| -> Result<String, SqlError> {
         match rhs {
-            Scalar::Col(_) => Err(SqlError::Unsupported(
+            Scalar::Col(_) => Err(SqlError::NotTranslated(
+                d::HAVING_NOT_TRANSLATED,
                 "HAVING compares against a literal".into(),
             )),
             Scalar::Str(v) => Ok(quarb_str(v)),
@@ -1109,7 +1707,8 @@ fn emit_having(
                 _ => false,
             };
             if a != agg || !same_col {
-                return Err(SqlError::Unsupported(
+                return Err(SqlError::NotTranslated(
+                    d::HAVING_NOT_TRANSLATED,
                     "HAVING refers to an aggregate not in the select list".into(),
                 ));
             }
@@ -1120,20 +1719,27 @@ fn emit_having(
                 "$_".to_string()
             } else if col.column.eq_ignore_ascii_case(key) {
                 if !plain_register(key_field) {
-                    return Err(SqlError::Unsupported(format!(
-                        "the group key {key_field:?} in HAVING (not a plain register name)"
-                    )));
+                    return Err(SqlError::NotTranslated(
+                        d::NAME_NOT_TRANSLATED,
+                        format!(
+                            "the group key {key_field:?} in HAVING (not a plain register name)"
+                        ),
+                    ));
                 }
                 format!("$.{key_field}")
             } else {
-                return Err(SqlError::Unsupported(format!(
-                    "the HAVING column '{}' (name the aggregate or the group key)",
-                    col.column
-                )));
+                return Err(SqlError::NotTranslated(
+                    d::HAVING_NOT_TRANSLATED,
+                    format!(
+                        "the HAVING column '{}' (name the aggregate or the group key)",
+                        col.column
+                    ),
+                ));
             };
             Ok(format!("{lhs} {op} {}", rhs_text(rhs)?))
         }
-        _ => Err(SqlError::Unsupported(
+        _ => Err(SqlError::NotTranslated(
+            d::HAVING_NOT_TRANSLATED,
             "HAVING translates for a single comparison".into(),
         )),
     }

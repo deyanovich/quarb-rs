@@ -36,7 +36,7 @@ use quarb_relational::{RelationalModel, RowSpec, TableSpec};
 pub enum AthenaError {
     #[error("athena: {0}")]
     Api(String),
-    #[error("pushdown plan: {0}")]
+    #[error("{0}")]
     Plan(String),
     #[error("athena target: {0} (expected athena://DATABASE[?region=R&workgroup=W&output=s3://…])")]
     Target(String),
@@ -326,6 +326,13 @@ pub struct AthenaAdapter {
 }
 
 impl AthenaAdapter {
+    /// Hold the crosslinks of these labels in memory (the mount's
+    /// `crosslinks=order,customer`, written in the URL's query
+    /// string): see [`RelationalModel::hold_crosslinks`].
+    pub fn hold_crosslinks(&mut self, labels: &[String]) -> Result<(), String> {
+        self.model.hold_crosslinks(labels)
+    }
+
     /// Connect and introspect `athena://DATABASE`; rows load
     /// lazily, per table on first touch (each fetch is one billed
     /// scan of only that table's columns).

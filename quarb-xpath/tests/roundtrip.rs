@@ -255,17 +255,38 @@ fn lenient_reads_a_relative_path_and_node() {
     assert_eq!(tr.query, "/EXAMPLE/head/*");
     assert_eq!(tr.warnings.len(), 2);
 
-    // strictly: refused, naming the flag
-    let refused = |x: &str| quarb_xpath::translate(x).unwrap_err().to_string();
+    // strictly: refused under the word of the reason, and marked as
+    // a form the lenient translator takes (the line's tail names
+    // the flag)
+    let refused = |x: &str| {
+        let e = quarb_xpath::translate(x).unwrap_err();
+        let (code, reason, lenient) = e.not_translated().expect("a worded refusal");
+        (code, reason.to_string(), lenient)
+    };
     assert_eq!(
         refused("EXAMPLE/chapter"),
-        "unsupported XPath construct: relative paths (Quarb queries are root-anchored; start \
-         with / or //); --lenient reads one from the document root, with a warning"
+        (
+            quarb::diagnostic::PATH_NOT_TRANSLATED,
+            "relative paths (Quarb queries are root-anchored; start with / or //)".to_string(),
+            true
+        )
     );
     assert_eq!(
         refused("/EXAMPLE/node()"),
-        "unsupported XPath construct: node() (Quarb navigates elements only); --lenient \
-         selects the elements, with a warning"
+        (
+            quarb::diagnostic::NODE_TEST_NOT_TRANSLATED,
+            "node() (Quarb navigates elements only)".to_string(),
+            true
+        )
+    );
+    // a refusal the flag does not lift
+    assert_eq!(
+        refused("/EXAMPLE/following::p"),
+        (
+            quarb::diagnostic::AXIS_NOT_TRANSLATED,
+            "the following:: axis (no Quarb equivalent)".to_string(),
+            false
+        )
     );
     // no leniency needed: the strict translation, no warning
     let tr = lenient("//chapter[@id = 'chapter2']/title");

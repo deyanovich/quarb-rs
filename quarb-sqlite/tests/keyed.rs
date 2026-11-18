@@ -190,13 +190,13 @@ fn a_column_with_no_key_resolves_only_under_a_label() {
     let _ = std::fs::remove_file(path);
 }
 
-/// A sweep of the backward resolution is read as a sweep of the
+/// A sweep of the reverse resolution is read as a sweep of the
 /// incoming link step is: the referrers of the whole context in
 /// statements of some hundred keys. A row at a time, a table's
 /// keyed statements were spent after 64 rows and the table was then
 /// read whole.
 #[test]
-fn a_backward_sweep_reads_its_referrers_together() {
+fn a_sweep_of_the_reverse_resolution_reads_its_referrers_together() {
     let path = std::env::temp_dir().join(format!("quarb-keyed-{}-sweep.db", std::process::id()));
     let _ = std::fs::remove_file(&path);
     {
@@ -237,9 +237,62 @@ fn a_backward_sweep_reads_its_referrers_together() {
     let _ = std::fs::remove_file(path);
 }
 
+/// A sweep over many rows that refer to many keys is read in time
+/// linear in the rows. The adapter is handed one value a thread and
+/// drops the repeats; it scanned its list of wanted keys for each
+/// value, so a step glued to a path, `/items/*::order_id-->`, took
+/// 146 s over 1,000,000 items of 50,000 orders where the piped
+/// spelling, a thread at a time, took 6 (lang's finding of
+/// 2026-11-17). Four times the rows and the keys must cost well
+/// under the sixteen times a scan would; the faster of two runs
+/// each, so a loaded machine does not fail it.
+#[test]
+fn a_sweep_over_many_keys_is_linear_in_its_rows() {
+    let path = std::env::temp_dir().join(format!("quarb-keyed-{}-linear.db", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE cantos (id INTEGER PRIMARY KEY, title TEXT);
+             CREATE TABLE lines (id INTEGER PRIMARY KEY,
+                 canto_id INTEGER REFERENCES cantos(id), text TEXT);
+             CREATE TABLE verses (id INTEGER PRIMARY KEY,
+                 canto_id INTEGER REFERENCES cantos(id), text TEXT);
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 40000)
+                 INSERT INTO cantos SELECT i, 'canto ' || i FROM n;
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000)
+                 INSERT INTO lines SELECT i, 1 + (i * 7919) % 10000, 'a line' FROM n;
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 80000)
+                 INSERT INTO verses SELECT i, 1 + (i * 7919) % 40000, 'a verse' FROM n;",
+        )
+        .unwrap();
+    }
+    let sweep = |table: &str, rows: &str| {
+        (0..2)
+            .map(|_| {
+                let a = SqliteAdapter::open(&path).unwrap();
+                let asked = std::time::Instant::now();
+                assert_eq!(
+                    show(&a, &format!("/{table}/*::canto_id--> @| count")),
+                    [rows]
+                );
+                asked.elapsed()
+            })
+            .min()
+            .unwrap()
+    };
+    let small = sweep("lines", "20000");
+    let large = sweep("verses", "80000");
+    assert!(
+        large < small * 9,
+        "20,000 rows over 10,000 keys took {small:?}, 80,000 over 40,000 took {large:?}"
+    );
+    let _ = std::fs::remove_file(path);
+}
+
 /// A step that reads a table by a column no index leads says so,
 /// once a run, as an info beside the answer (the user's word of
-/// 2026-11-17 on the backward step); with an index on the column,
+/// 2026-11-17 on the reverse resolution); with an index on the column,
 /// or where the column is a key, it says nothing.
 #[test]
 fn a_step_over_a_column_without_an_index_says_so() {
@@ -276,7 +329,7 @@ fn a_step_over_a_column_without_an_index_says_so() {
                         index, so each statement of the step scans the table; CREATE INDEX \
                         lines_canto_id ON lines(canto_id) lets the database answer by key, or \
                         mount with ?crosslinks=canto to hold the reference in memory";
-    // the backward resolution and the incoming link step, each
+    // the reverse resolution and the incoming link step, each
     // once for the whole sweep
     let (values, infos) = said("/cantos/*<--(::canto_id) @| count");
     assert_eq!(values, ["4"]);
@@ -294,6 +347,116 @@ fn a_step_over_a_column_without_an_index_says_so() {
     let (values, infos) = said("/cantos/*<--(::canto_id) @| count");
     assert_eq!(values, ["4"]);
     assert!(infos.is_empty(), "{infos:?}");
+    let _ = std::fs::remove_file(path);
+}
+
+/// A step by one label reads the one reference the label names
+/// (the user's choice of 2026-11-17, on lang's finding). Two tables
+/// refer to `poets`: the cantos by `poet_id`, the letters by
+/// `sender_id`. `<-poet` read both, and so did `<--(::poet_id)`:
+/// the referrers under every key into the table, with a notice of a
+/// column without an index for each. It reads the cantos, and the
+/// letters are not touched; forward, `->poet` reads the row that key
+/// points at and not the patron's.
+#[test]
+fn a_step_by_one_label_reads_its_own_reference() {
+    let path = std::env::temp_dir().join(format!("quarb-keyed-{}-onelabel.db", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE poets (id INTEGER PRIMARY KEY, name TEXT);
+             CREATE TABLE cantos (id INTEGER PRIMARY KEY, title TEXT,
+                 poet_id INTEGER REFERENCES poets(id),
+                 patron_id INTEGER REFERENCES poets(id));
+             CREATE TABLE letters (id INTEGER PRIMARY KEY, body TEXT,
+                 sender_id INTEGER REFERENCES poets(id));
+             INSERT INTO poets VALUES (1, 'Homer'), (2, 'Virgil'), (3, 'Dante'), (4, 'Horace');
+             INSERT INTO cantos VALUES (1, 'Inferno I', 3, 2), (2, 'Inferno II', 3, 2),
+                 (3, 'Aeneid I', 2, 4), (4, 'Iliad I', 1, NULL);
+             INSERT INTO letters VALUES (1, 'to Maecenas', 4), (2, 'to Augustus', 4),
+                 (3, 'to Cangrande', 3);",
+        )
+        .unwrap();
+    }
+    // the answer, the rows read of each table, and the columns a
+    // notice of a missing index names
+    let read = "| %(n = $_; poets = (^/poets:::\"n-loaded\"); cantos = (^/cantos:::\"n-loaded\"); \
+                letters = (^/letters:::\"n-loaded\"))";
+    let said = |q: &str| -> (Vec<String>, Vec<String>) {
+        let a = SqliteAdapter::open(&path).unwrap();
+        let out = quarb::Query::parse(&format!("{q} {read}"), &a)
+            .unwrap()
+            .run(&a, &quarb::Run::ambient())
+            .unwrap();
+        let values = match out.result {
+            QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect(),
+            QueryResult::Nodes(ns) => ns.into_iter().map(|n| a.locator(n)).collect(),
+        };
+        let unindexed = out
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "UNINDEXED")
+            .map(|d| d.site.clone())
+            .collect();
+        (values, unindexed)
+    };
+    // one node, by the incoming link step and by the reverse
+    // resolution: Dante's cantos, and no letter read
+    for q in ["/poets/3<-poet @| count", "/poets/3<--(::poet_id) @| count"] {
+        let (values, unindexed) = said(q);
+        assert_eq!(
+            values,
+            ["%(n = 2; poets = 1; cantos = 2; letters = 0)"],
+            "{q}"
+        );
+        assert_eq!(unindexed, ["cantos.poet_id"], "{q}");
+    }
+    // the other reference of the same table, by its own label
+    let (values, unindexed) = said("/poets/2<-patron @| count");
+    assert_eq!(values, ["%(n = 2; poets = 1; cantos = 2; letters = 0)"]);
+    assert_eq!(unindexed, ["cantos.patron_id"]);
+    let (values, unindexed) = said("/poets/4<-sender @| count");
+    assert_eq!(values, ["%(n = 2; poets = 1; cantos = 0; letters = 2)"]);
+    assert_eq!(unindexed, ["letters.sender_id"]);
+    // a step that names no label follows every reference, as before
+    let (values, unindexed) = said("/poets/3<-* @| count");
+    assert_eq!(values, ["%(n = 3; poets = 1; cantos = 2; letters = 1)"]);
+    assert_eq!(
+        unindexed,
+        ["cantos.patron_id", "cantos.poet_id", "letters.sender_id"]
+    );
+    // a sweep, by the label and by the property
+    for q in ["/poets/*<-poet @| count", "/poets/*<--(::poet_id) @| count"] {
+        let (values, unindexed) = said(q);
+        assert_eq!(
+            values,
+            ["%(n = 4; poets = 4; cantos = 4; letters = 0)"],
+            "{q}"
+        );
+        assert_eq!(unindexed, ["cantos.poet_id"], "{q}");
+    }
+    // forward: the poet's row is read by its key, the patron's is not
+    let (values, _) = said("/cantos/3->poet @| count");
+    assert_eq!(values, ["%(n = 1; poets = 1; cantos = 1; letters = 0)"]);
+    let (values, _) = said("/cantos/3->* @| count");
+    assert_eq!(values, ["%(n = 2; poets = 2; cantos = 1; letters = 0)"]);
+    // a forward sweep by one label, and by the property: the two
+    // cantos' one poet, and their patron not read (the listing reads
+    // the cantos whole)
+    for q in [
+        "/cantos/*[::id < 3]->poet @| count",
+        "/cantos/*[::id < 3]::poet_id--> @| count",
+    ] {
+        let (values, _) = said(q);
+        assert_eq!(
+            values,
+            ["%(n = 2; poets = 1; cantos = 4; letters = 0)"],
+            "{q}"
+        );
+    }
+    let (values, _) = said("/cantos/*[::id < 3]->* @| count");
+    assert_eq!(values, ["%(n = 4; poets = 2; cantos = 4; letters = 0)"]);
     let _ = std::fs::remove_file(path);
 }
 

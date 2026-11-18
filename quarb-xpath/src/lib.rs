@@ -44,6 +44,7 @@
 mod export;
 pub use export::export;
 
+use quarb::diagnostic as d;
 use std::fmt::Write as _;
 
 /// An error translating an XPath expression.
@@ -53,6 +54,27 @@ pub enum XPathError {
     Syntax(usize, String),
     #[error("unsupported XPath construct: {0}")]
     Unsupported(String),
+    /// A construct of XPath with no Quarb translation: the
+    /// diagnostic code of the reason (`AXIS_NOT_TRANSLATED`; ruling
+    /// 2026-11-17, one word per reason) and the reason.
+    #[error("unsupported XPath construct: {1}")]
+    NotTranslated(&'static str, String),
+    /// The same, for a construct the strict translator refuses and
+    /// the lenient one takes: the refusal's tail may name the flag.
+    #[error("unsupported XPath construct: {1}")]
+    Lenient(&'static str, String),
+}
+
+impl XPathError {
+    /// The code and the reason of a refusal that has a word, and
+    /// whether `--lenient` translates what was refused.
+    pub fn not_translated(&self) -> Option<(&'static str, &str, bool)> {
+        match self {
+            XPathError::NotTranslated(code, reason) => Some((code, reason, false)),
+            XPathError::Lenient(code, reason) => Some((code, reason, true)),
+            _ => None,
+        }
+    }
 }
 
 /// A successful translation: the Quarb query, plus notes on known
@@ -492,15 +514,13 @@ impl Parser {
                 );
                 "/"
             }
+            // the strict translator's refusal; the tail names the
+            // flag, under which a relative path is read from the root
             _ => {
-                let flag = if self.lenient {
-                    ""
-                } else {
-                    "; --lenient reads one from the document root, with a warning"
-                };
-                return Err(XPathError::Unsupported(format!(
-                    "relative paths (Quarb queries are root-anchored; start with / or //){flag}"
-                )));
+                return Err(XPathError::Lenient(
+                    d::PATH_NOT_TRANSLATED,
+                    "relative paths (Quarb queries are root-anchored; start with / or //)".into(),
+                ));
             }
         };
 
@@ -514,7 +534,8 @@ impl Parser {
 
         loop {
             if projection.is_some() {
-                return Err(XPathError::Unsupported(
+                return Err(XPathError::NotTranslated(
+                    d::PATH_NOT_TRANSLATED,
                     "steps after an attribute or text() step".into(),
                 ));
             }
@@ -560,9 +581,10 @@ impl Parser {
                     "following-sibling" => ("following-sibling", sep),
                     "preceding-sibling" => ("preceding-sibling", sep),
                     other => {
-                        return Err(XPathError::Unsupported(format!(
-                            "the {other}:: axis (no Quarb equivalent)"
-                        )));
+                        return Err(XPathError::NotTranslated(
+                            d::AXIS_NOT_TRANSLATED,
+                            format!("the {other}:: axis (no Quarb equivalent)"),
+                        ));
                     }
                 }
             }
@@ -578,7 +600,8 @@ impl Parser {
                 let name = match self.bump() {
                     Some(Tok::Name(n, false)) => n,
                     Some(Tok::Star) => {
-                        return Err(XPathError::Unsupported(
+                        return Err(XPathError::NotTranslated(
+                            d::ATTRIBUTE_NOT_TRANSLATED,
                             "@* (Quarb projects one named property at a time)".into(),
                         ));
                     }
@@ -663,14 +686,16 @@ impl Parser {
                 );
             }
             Some(Tok::Name(n, true)) if n == "node" => {
-                return Err(XPathError::Unsupported(
-                    "node() (Quarb navigates elements only); --lenient selects the elements, \
-                     with a warning"
-                        .into(),
+                return Err(XPathError::Lenient(
+                    d::NODE_TEST_NOT_TRANSLATED,
+                    "node() (Quarb navigates elements only)".into(),
                 ));
             }
             Some(Tok::Name(n, true)) => {
-                return Err(XPathError::Unsupported(format!("the {n}() node test")));
+                return Err(XPathError::NotTranslated(
+                    d::FUNCTION_NOT_TRANSLATED,
+                    format!("the {n}() node test"),
+                ));
             }
             other => {
                 return Err(XPathError::Syntax(
@@ -706,9 +731,10 @@ impl Parser {
             (Some(Tok::Number(n)), Some(Tok::RBracket)) => {
                 let n = n.clone();
                 if n.contains('.') {
-                    return Err(XPathError::Unsupported(format!(
-                        "the non-integer position [{n}]"
-                    )));
+                    return Err(XPathError::NotTranslated(
+                        d::POSITION_NOT_TRANSLATED,
+                        format!("the non-integer position [{n}]"),
+                    ));
                 }
                 if abbreviated_descendant {
                     self.notes.push(ABBREV_INDEX_NOTE.into());
@@ -726,7 +752,10 @@ impl Parser {
                     self.pos += 1;
                     match self.bump() {
                         Some(Tok::Number(k)) => k.parse().map_err(|_| {
-                            XPathError::Unsupported(format!("last() - {k} (non-integer)"))
+                            XPathError::NotTranslated(
+                                d::POSITION_NOT_TRANSLATED,
+                                format!("last() - {k} (non-integer)"),
+                            )
                         })?,
                         _ => {
                             return Err(XPathError::Syntax(
@@ -760,7 +789,10 @@ impl Parser {
                 };
                 let n: u64 = match self.bump() {
                     Some(Tok::Number(n)) => n.parse().map_err(|_| {
-                        XPathError::Unsupported(format!("position() {op} {n} (non-integer)"))
+                        XPathError::NotTranslated(
+                            d::POSITION_NOT_TRANSLATED,
+                            format!("position() {op} {n} (non-integer)"),
+                        )
                     })?,
                     _ => {
                         return Err(XPathError::Syntax(
@@ -779,7 +811,10 @@ impl Parser {
                     "<" => write!(out, "[..{}]", n.saturating_sub(1)).unwrap(),
                     "<=" => write!(out, "[..{n}]").unwrap(),
                     other => {
-                        return Err(XPathError::Unsupported(format!("position() {other} {n}")));
+                        return Err(XPathError::NotTranslated(
+                            d::POSITION_NOT_TRANSLATED,
+                            format!("position() {other} {n}"),
+                        ));
                     }
                 }
                 return Ok(());
@@ -876,13 +911,15 @@ impl Parser {
                 };
                 self.expect(Tok::Comma, "',' between starts-with arguments")?;
                 let Some(Tok::Literal(prefix)) = self.bump() else {
-                    return Err(XPathError::Unsupported(
+                    return Err(XPathError::NotTranslated(
+                        d::FUNCTION_NOT_TRANSLATED,
                         "starts-with with a non-literal prefix".into(),
                     ));
                 };
                 self.expect(Tok::RParen, "')' to close starts-with")?;
                 if prefix.contains(['(', ')']) {
-                    return Err(XPathError::Unsupported(
+                    return Err(XPathError::NotTranslated(
+                        d::LITERAL_NOT_TRANSLATED,
                         "starts-with prefix containing parentheses".into(),
                     ));
                 }
@@ -894,9 +931,10 @@ impl Parser {
                 ))
             }
             Some(Tok::Name(f, true)) if f == "text" => self.pred_path(),
-            Some(Tok::Name(f, true)) => Err(XPathError::Unsupported(format!(
-                "the {f}() function in a predicate"
-            ))),
+            Some(Tok::Name(f, true)) => Err(XPathError::NotTranslated(
+                d::FUNCTION_NOT_TRANSLATED,
+                format!("the {f}() function in a predicate"),
+            )),
             Some(Tok::Literal(s)) => {
                 let s = s.clone();
                 self.pos += 1;
@@ -932,7 +970,8 @@ impl Parser {
                 _ => return Ok(("::".into(), false)),
             }
         } else if self.peek() == Some(&Tok::SlashSlash) || self.peek() == Some(&Tok::Slash) {
-            return Err(XPathError::Unsupported(
+            return Err(XPathError::NotTranslated(
+                d::PATH_NOT_TRANSLATED,
                 "absolute paths inside predicates (Quarb predicate paths are \
                  relative to the candidate node)"
                     .into(),
@@ -969,7 +1008,8 @@ impl Parser {
                     write!(out, "{sep}*").unwrap();
                 }
                 Some(Tok::DotDot) | Some(Tok::Axis(_)) => {
-                    return Err(XPathError::Unsupported(
+                    return Err(XPathError::NotTranslated(
+                        d::PATH_NOT_TRANSLATED,
                         "upward navigation inside predicates (Quarb predicate \
                          paths descend from the candidate node)"
                             .into(),
@@ -997,7 +1037,8 @@ impl Parser {
 
     fn expect_nothing_weird(&self, literal: &str) -> Result<(), XPathError> {
         if literal.contains(['\'', '"']) {
-            return Err(XPathError::Unsupported(
+            return Err(XPathError::NotTranslated(
+                d::LITERAL_NOT_TRANSLATED,
                 "a literal containing quote characters".into(),
             ));
         }
@@ -1037,7 +1078,8 @@ fn quarb_literal(s: &str) -> Result<String, XPathError> {
     } else if !s.contains('\'') {
         Ok(format!("'{s}'"))
     } else {
-        Err(XPathError::Unsupported(
+        Err(XPathError::NotTranslated(
+            d::LITERAL_NOT_TRANSLATED,
             "a literal containing both quote characters".into(),
         ))
     }
@@ -1065,7 +1107,7 @@ mod tests {
 
     fn unsupported(xpath: &str) -> String {
         match translate(xpath) {
-            Err(XPathError::Unsupported(msg)) => msg,
+            Err(XPathError::NotTranslated(_, msg) | XPathError::Lenient(_, msg)) => msg,
             other => panic!("expected Unsupported, got {other:?}"),
         }
     }

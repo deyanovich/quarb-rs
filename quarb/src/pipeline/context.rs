@@ -547,7 +547,7 @@ pub(crate) fn graph_library_command<H: Host>(
         crate::pipeline::run::run_option(|o| o.graph_bound).unwrap_or_else(|| host.graph_bound());
     if cost > bound {
         crate::value::ambient::record_refusal_coded(
-            "GRAPH_BOUND",
+            crate::diagnostic::GRAPH_BOUND,
             format!("graph:{name}"),
             format!(
                 "graph:{name} would compute over {n} nodes and {e} edges, {cost} cost units{} past \
@@ -834,7 +834,7 @@ fn declared_measure<H: Host>(
             return match host.graph_measure(&d.scope, &d.hop, m, starts) {
                 Some(values) => {
                     record_diagnostic(Diagnostic::info(
-                        "PUSHED",
+                        crate::diagnostic::PUSHED,
                         "graph",
                         format!("{shown} from the declared graph on {}", d.scope),
                     ));
@@ -845,7 +845,7 @@ fn declared_measure<H: Host>(
                 }
                 None => {
                     record_diagnostic(Diagnostic::info(
-                        "NOT_PUSHED",
+                        crate::diagnostic::GRAPH_NOT_PUSHED,
                         "graph",
                         format!(
                             "the source has no answer for the declared {shown} on {}; computed over {} nodes",
@@ -862,7 +862,11 @@ fn declared_measure<H: Host>(
         }
     }
     if let Some(r) = reason {
-        record_diagnostic(Diagnostic::info("NOT_PUSHED", "graph", r));
+        record_diagnostic(Diagnostic::info(
+            crate::diagnostic::GRAPH_NOT_PUSHED,
+            "graph",
+            r,
+        ));
     }
     Declared::default()
 }

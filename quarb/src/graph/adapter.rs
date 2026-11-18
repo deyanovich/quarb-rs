@@ -247,6 +247,16 @@ pub enum LinkDir {
     In,
 }
 
+/// What a step names of the crosslinks it follows, for an adapter
+/// that reads its links when asked: a link step's one label
+/// (`<-manager`), or the property a resolution reads
+/// (`::order_id-->`, `<--(::order_id)`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LinkBy<'a> {
+    Label(&'a str),
+    Property(&'a str),
+}
+
 /// A reference to a document outside the arbor, as an adapter read
 /// it from its own reference syntax: which document, and where in
 /// it. The engine treats both as opaque.
@@ -1335,6 +1345,29 @@ pub trait AstAdapter {
             .collect()
     }
 
+    /// `link_rows` for a step that names one label (`->customer`):
+    /// the rows a step by `label` can take, and any others the
+    /// adapter cares to add (the engine selects by the label either
+    /// way). An adapter that reads its links when asked reads the
+    /// one reference the label names: a relational source the row
+    /// one foreign key points at, not the row behind every key of
+    /// the table. The default is every row.
+    fn link_rows_by(&self, node: NodeId, _label: &str) -> Vec<(String, NodeId, Option<NodeId>)> {
+        self.link_rows(node)
+    }
+
+    /// `backlink_rows` for a step that names one label
+    /// (`<-manager`), as `link_rows_by`: a relational source reads
+    /// the referrers under the one key that carries the label, not
+    /// every table with a key into this one.
+    fn backlink_rows_by(
+        &self,
+        node: NodeId,
+        _label: &str,
+    ) -> Vec<(String, NodeId, Option<NodeId>)> {
+        self.backlink_rows(node)
+    }
+
     /// Whether the links into `node` are ones this source cannot walk
     /// back (spec: The adapter contract): it answers `links` and
     /// provides no `backlinks`, as a document store whose references
@@ -1592,6 +1625,13 @@ pub trait AstAdapter {
     /// a store may fetch them in one statement; semantics are
     /// unchanged either way.
     fn prefetch_links(&self, _nodes: &[NodeId], _dir: LinkDir) {}
+    /// `prefetch_links` for a step that names what it follows: the
+    /// one label of a link step, or the property a resolution reads.
+    /// A store fetches that reference alone. The default is the
+    /// whole hint.
+    fn prefetch_links_by(&self, nodes: &[NodeId], dir: LinkDir, _by: LinkBy<'_>) {
+        self.prefetch_links(nodes, dir)
+    }
     /// Drop any pushed-down listing filter: from here on every
     /// table's listing is the whole table. A model's fabric indexes
     /// a ref's target container by listing it, and a listing the
@@ -1881,13 +1921,14 @@ macro_rules! forward_ast_adapter {
             index_referrers non_tree_nodes child_host children_named
             answers_to has_trait default_value metadata
             metadata_keys metadata_catalogue
-            aliased_metadata links backlinks link_rows edge_rows backlink_rows backlinks_unsupported
+            aliased_metadata links backlinks link_rows edge_rows backlink_rows
+            link_rows_by backlink_rows_by backlinks_unsupported
             link_consumed resolve external_ref
             resolve_fragment ref_property ref_label link_property
             document_by_ref reverse_resolve descendants_named
             descendants_where may_hold_below select select_plan estimate count
             surface row_columns intrinsic row_text prefetch_properties
-            prefetch_links whole_listings refresh link_property_names edge_weights acyclic_link quantifier_bound frontier_bound
+            prefetch_links prefetch_links_by whole_listings refresh link_property_names edge_weights acyclic_link quantifier_bound frontier_bound
             property_withheld withheld_properties nodes_withheld
             graph_bound graph_declarations graph_measure store_graph_measure
             provenance has_node
@@ -1941,6 +1982,17 @@ macro_rules! forward_ast_adapter {
     (@unless [$i:tt] [graph_measure $($r:ident)*] graph_measure) => {};
     (@unless [$i:tt] [store_graph_measure $($r:ident)*] store_graph_measure) => {};
     (@unless [$i:tt] [backlink_rows $($r:ident)*] backlink_rows) => {};
+    (@unless [$i:tt] [link_rows_by $($r:ident)*] link_rows_by) => {};
+    (@unless [$i:tt] [backlink_rows_by $($r:ident)*] backlink_rows_by) => {};
+    (@unless [$i:tt] [prefetch_links_by $($r:ident)*] prefetch_links_by) => {};
+    // A wrapper that defines its own links defines what a step by
+    // one label takes too: the narrowed methods are not forwarded
+    // past it, and the trait's defaults read the wrapper's own.
+    (@unless [$i:tt] [links $($r:ident)*] link_rows_by) => {};
+    (@unless [$i:tt] [link_rows $($r:ident)*] link_rows_by) => {};
+    (@unless [$i:tt] [backlinks $($r:ident)*] backlink_rows_by) => {};
+    (@unless [$i:tt] [backlink_rows $($r:ident)*] backlink_rows_by) => {};
+    (@unless [$i:tt] [prefetch_links $($r:ident)*] prefetch_links_by) => {};
     (@unless [$i:tt] [backlinks_unsupported $($r:ident)*] backlinks_unsupported) => {};
     (@unless [$i:tt] [link_consumed $($r:ident)*] link_consumed) => {};
     (@unless [$i:tt] [resolve $($r:ident)*] resolve) => {};
@@ -2362,6 +2414,34 @@ macro_rules! forward_ast_adapter {
             $crate::forward_ast_adapter!(@target self $i).prefetch_links(nodes, dir)
         }
     };
+    (@fwd [$i:tt] prefetch_links_by) => {
+        fn prefetch_links_by(
+            &self,
+            nodes: &[$crate::NodeId],
+            dir: $crate::LinkDir,
+            by: $crate::LinkBy<'_>,
+        ) {
+            $crate::forward_ast_adapter!(@target self $i).prefetch_links_by(nodes, dir, by)
+        }
+    };
+    (@fwd [$i:tt] link_rows_by) => {
+        fn link_rows_by(
+            &self,
+            node: $crate::NodeId,
+            label: &str,
+        ) -> Vec<(String, $crate::NodeId, Option<$crate::NodeId>)> {
+            $crate::forward_ast_adapter!(@target self $i).link_rows_by(node, label)
+        }
+    };
+    (@fwd [$i:tt] backlink_rows_by) => {
+        fn backlink_rows_by(
+            &self,
+            node: $crate::NodeId,
+            label: &str,
+        ) -> Vec<(String, $crate::NodeId, Option<$crate::NodeId>)> {
+            $crate::forward_ast_adapter!(@target self $i).backlink_rows_by(node, label)
+        }
+    };
     (@fwd [$i:tt] whole_listings) => {
         fn whole_listings(&self) {
             $crate::forward_ast_adapter!(@target self $i).whole_listings()
@@ -2757,6 +2837,25 @@ mod forwarding {
         fn prefetch_links(&self, nodes: &[NodeId], dir: LinkDir) {
             PREFETCHED.with(|p| p.set(nodes.len() * 10 + matches!(dir, LinkDir::In) as usize));
         }
+        fn prefetch_links_by(&self, nodes: &[NodeId], dir: LinkDir, by: LinkBy<'_>) {
+            let named = match by {
+                LinkBy::Label(l) => l.len(),
+                LinkBy::Property(p) => 100 + p.len(),
+            };
+            PREFETCHED.with(|p| {
+                p.set(nodes.len() * 1000 + named * 2 + matches!(dir, LinkDir::In) as usize)
+            });
+        }
+        fn link_rows_by(&self, node: NodeId, label: &str) -> Vec<(String, NodeId, Option<NodeId>)> {
+            vec![(format!("out:{label}"), n(node.0 + 31), None)]
+        }
+        fn backlink_rows_by(
+            &self,
+            node: NodeId,
+            label: &str,
+        ) -> Vec<(String, NodeId, Option<NodeId>)> {
+            vec![(format!("in:{label}"), n(node.0 + 37), Some(n(3)))]
+        }
         fn quantifier_bound(&self) -> usize {
             77
         }
@@ -2875,6 +2974,23 @@ mod forwarding {
             w.prefetch_links(&[n(1), n(2)], LinkDir::In);
             assert_eq!(PREFETCHED.with(|c| c.get()), 21, "prefetch_links");
         }
+        if !except.contains(&"prefetch_links_by") {
+            PREFETCHED.with(|c| c.set(0));
+            w.prefetch_links_by(&[n(1), n(2)], LinkDir::In, LinkBy::Label("boss"));
+            assert_eq!(
+                PREFETCHED.with(|c| c.get()),
+                2009,
+                "prefetch_links_by a label"
+            );
+            w.prefetch_links_by(&[n(1)], LinkDir::Out, LinkBy::Property("id"));
+            assert_eq!(
+                PREFETCHED.with(|c| c.get()),
+                1204,
+                "prefetch_links_by a property"
+            );
+        }
+        same!(link_rows_by, n(2), "lbl");
+        same!(backlink_rows_by, n(2), "lbl");
         same!(quantifier_bound);
         same!(frontier_bound);
         same!(link_property_names, n(1), "e", n(2));

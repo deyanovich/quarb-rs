@@ -257,7 +257,8 @@ fn a_word_neither_table_has() {
     );
     let (missing, ok) = qua(&["man", "sort", "top"]);
     assert!(
-        !ok && missing.contains("man takes one name, one glyph, or the word syntax"),
+        !ok && missing
+            .contains("man takes one name, one glyph, a diagnostic code, or the word syntax"),
         "{missing}"
     );
     // the help names the door

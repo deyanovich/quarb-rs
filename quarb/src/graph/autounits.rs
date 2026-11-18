@@ -607,7 +607,11 @@ pub fn title_plan_with(
     if !skipped.is_empty() {
         msg.push_str(&format!("; skipped: {}", skipped.join(", ")));
     }
-    crate::value::ambient::record_diagnostic(Diagnostic::info("AUTOUNITS", site.to_string(), msg));
+    crate::value::ambient::record_diagnostic(Diagnostic::info(
+        crate::diagnostic::AUTOUNITS,
+        site.to_string(),
+        msg,
+    ));
     Ok(TitlePlan {
         header: names,
         declared,
@@ -926,7 +930,7 @@ impl<A: AstAdapter> AutoUnits<A> {
         let label = self.label();
         let refuse = |msg: String| {
             crate::value::ambient::record_refusal_coded(
-                "AUTOUNITS",
+                crate::diagnostic::AUTOUNITS,
                 self.target.clone(),
                 format!("{label} on {}: {msg}", self.target),
             );
@@ -1108,7 +1112,7 @@ impl<A: AstAdapter> AutoUnits<A> {
         }
         if self.told.borrow_mut().insert(msg.clone()) {
             crate::value::ambient::record_diagnostic(Diagnostic::info(
-                "AUTOUNITS",
+                crate::diagnostic::AUTOUNITS,
                 self.target.clone(),
                 msg,
             ));

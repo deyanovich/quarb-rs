@@ -221,23 +221,18 @@ fn a_field_of_the_head_ends_a_path() {
 fn three_colons_no_longer_read_a_declaration() {
     let dir = notes();
     let at = |f: &str| format!("text:{}", dir.join(f).display());
+    // a declared name asked for by three colons is null. For one
+    // release (0.64, ruling 2026-11-14) a warning said where the
+    // declaration went; the record `::head` is where it is read
     let (success, out, err) = run(&[":::year", &at("iliad.md")]);
     assert!(success);
-    assert_eq!(out, "null");
-    assert_eq!(
-        err,
-        "warning RETIRED_KEY (:::year): ':::year' no longer reads what the document \
-         declares: the declarations are the record '::head', and this one is '::head:year'"
-    );
-    // a name that needs quotes is shown quoted
+    assert_eq!((out.as_str(), err.as_str()), ("null", ""));
+    assert_eq!(ok(&["::head:year", &at("iliad.md")]).is_empty(), false);
     let (_, out, err) = run(&[r#":::"og:type""#, &at("page.html")]);
-    assert_eq!(out, "null");
-    assert!(err.contains(r#"this one is '::head:"og:type"'"#), "{err}");
-    // a flattened JSON-LD name of 0.63 is told the path into the block
+    assert_eq!((out.as_str(), err.as_str()), ("null", ""));
     let (_, out, err) = run(&[r#":::"schema:author.name""#, &at("page.html")]);
-    assert_eq!(out, "null");
-    assert!(err.contains("this one is '::head:ld:author:name'"), "{err}");
-    // a name the document does not declare: null, and nothing said
+    assert_eq!((out.as_str(), err.as_str()), ("null", ""));
+    // a name the document does not declare: the same
     let (_, out, err) = run(&[":::isbn", &at("iliad.md")]);
     assert_eq!((out.as_str(), err.as_str()), ("null", ""));
     // the reader's own keys are untouched

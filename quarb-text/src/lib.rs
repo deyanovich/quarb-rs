@@ -1247,11 +1247,6 @@ pub struct HeadMeta {
     /// `ru-RU`): the curated `::lang`, read by each reader from the
     /// name its format has for it (ruling 2026-11-14).
     pub lang: Option<String>,
-    /// The names a reader answered its declarations under until
-    /// 0.63, each with the name the file writes, which the record
-    /// carries now (`title` → `dc:title` in a Word file): what
-    /// `:::title` is told for one release (RETIRED_KEY).
-    pub renamed: Vec<(&'static str, &'static str)>,
     /// The one classification (a section of the site, a category).
     pub category: Option<String>,
     /// The tags, as written, first appearance wins.
@@ -1381,45 +1376,6 @@ impl HeadMeta {
             }
         }
         Some(Value::record(fields))
-    }
-
-    /// The field chain under `::head` that holds what `:::key` read
-    /// until 0.63, as it is written in a query, or none where the
-    /// document never declared it: the same name; the name the file
-    /// writes where the reader answered under a plain one
-    /// ([`HeadMeta::renamed`]); a flattened JSON-LD name
-    /// (`schema:author.name`) as the path into the block
-    /// (`ld:author:name`).
-    pub fn retired(&self, key: &str) -> Option<String> {
-        let spelled = |name: &str| {
-            if !name.is_empty()
-                && name
-                    .chars()
-                    .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-'))
-            {
-                name.to_string()
-            } else {
-                format!("\"{name}\"")
-            }
-        };
-        if self.declared_value(key).is_some() {
-            return Some(spelled(key));
-        }
-        if let Some((_, now)) = self
-            .renamed
-            .iter()
-            .find(|(was, now)| *was == key && self.declared_value(now).is_some())
-        {
-            return Some(spelled(now));
-        }
-        let path = key.strip_prefix("schema:")?;
-        self.declared_value("ld")?;
-        Some(
-            std::iter::once("ld".to_string())
-                .chain(path.split('.').map(spelled))
-                .collect::<Vec<_>>()
-                .join(":"),
-        )
     }
 
     /// When a declared date says: the instant of a full ISO date or
@@ -4795,22 +4751,7 @@ impl AstAdapter for TextModel {
         }
         let n = &self.nodes[node.0 as usize];
         // What the document declares is the record `::head` (ruling
-        // 2026-11-14); three colons are the adapter's own facts. A
-        // declared name asked for here read the declaration until
-        // 0.63: for one release it says where the declaration went.
-        if n.kind == Kind::Document
-            && let Some(field) = self.head.retired(key)
-        {
-            quarb::record_warning(
-                quarb::diagnostic::RETIRED_KEY,
-                &format!(":::{key}"),
-                format!(
-                    "':::{key}' no longer reads what the document declares: the \
-                     declarations are the record '::head', and this one is \
-                     '::head:{field}'"
-                ),
-            );
-        }
+        // 2026-11-14); three colons are the adapter's own facts.
         match key {
             "level" => n.level.map(|l| Value::Int(l as i64)),
             // A verbatim block's declared language; on the

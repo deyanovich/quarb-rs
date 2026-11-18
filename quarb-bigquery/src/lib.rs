@@ -34,7 +34,7 @@ use serde_json::json;
 pub enum BigqueryError {
     #[error("bigquery: {0}")]
     Http(#[from] Box<ureq::Error>),
-    #[error("pushdown plan: {0}")]
+    #[error("{0}")]
     Plan(String),
     #[error("bigquery auth: {0}")]
     Auth(String),
@@ -356,6 +356,13 @@ pub struct BigqueryAdapter {
 }
 
 impl BigqueryAdapter {
+    /// Hold the crosslinks of these labels in memory (the mount's
+    /// `crosslinks=order,customer`, written in the URL's query
+    /// string): see [`RelationalModel::hold_crosslinks`].
+    pub fn hold_crosslinks(&mut self, labels: &[String]) -> Result<(), String> {
+        self.model.hold_crosslinks(labels)
+    }
+
     /// Connect and introspect `bigquery://PROJECT/DATASET`; rows
     /// load lazily, per table on first touch (each fetch is one
     /// billed query over only that table's columns).

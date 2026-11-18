@@ -22,7 +22,7 @@ use rusqlite::types::ValueRef;
 pub enum SqliteError {
     #[error("sqlite: {0}")]
     Sqlite(#[from] rusqlite::Error),
-    #[error("pushdown plan: {0}")]
+    #[error("{0}")]
     Plan(String),
 }
 
@@ -676,9 +676,8 @@ fn numeric_affinity(declared: &str) -> bool {
 pub fn raw_query(
     path: &std::path::Path,
     sql: &str,
-    order_table: Option<&str>,
+    order: &quarb_relational::PlanOrder<'_>,
     join_left: Option<(&str, &[String])>,
-    order_then: Option<&str>,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>), SqliteError> {
     let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     // A witness-JOIN plan is only sound when the ON binds the left
@@ -693,22 +692,24 @@ pub fn raw_query(
              the SQL JOIN would multiply rows"
         )));
     }
-    let sql = match order_table {
-        Some(t) => {
+    // The plan's order: its own sort where it has one, then the keys
+    // the whole reads are ordered by (a table with no primary key is
+    // read by its rowid), so the plan's rows are the scan's.
+    let sql = match order.table {
+        Some(_) => {
             let catalog = specs(&conn, &[])?;
             let key_of = |t: &str| {
-                catalog
-                    .iter()
-                    .find(|s| s.name == t)
-                    .and_then(|s| s.pk.map(|i| s.columns[i].clone()))
-                    .unwrap_or_else(|| "rowid".to_string())
+                Some(
+                    catalog
+                        .iter()
+                        .find(|s| s.name == t)
+                        .and_then(|s| s.pk.map(|i| s.columns[i].clone()))
+                        .unwrap_or_else(|| "rowid".to_string()),
+                )
             };
-            // an every-witness JOIN (`<=>*`): the rows of one driver
-            // in the joined table's own order, after the driver's
-            match order_then {
-                Some(j) => format!("{sql} ORDER BY {t}.{}, {j}.{}", key_of(t), key_of(j)),
-                None => format!("{sql} ORDER BY {t}.{}", key_of(t)),
-            }
+            let clause = quarb_relational::order_clause(order, &key_of, &|t, k| format!("{t}.{k}"))
+                .map_err(SqliteError::Plan)?;
+            format!("{sql}{clause}")
         }
         None => sql.to_string(),
     };

@@ -195,7 +195,8 @@ fn a_witness_read_among_several_is_told() {
         [
             "warning SEVERAL_WITNESSES ($$1): '<=>' bound the first of several candidates for 2 \
           drivers, and the query reads the witness ($$1): the answer depends on the joined \
-          expression's order; '<=>*' binds every candidate"
+          expression's order; '<=>*' binds every candidate. A choice to make: qua man \
+          SEVERAL_WITNESSES"
         ]
     );
     // the outer form the same

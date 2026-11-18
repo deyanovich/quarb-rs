@@ -10,6 +10,7 @@ use std::io::Read;
 
 fn main() {
     // the translators' common switch: no lenient form here yet
+    let lenient = std::env::args().skip(1).any(|a| a == "--lenient");
     let input = match std::env::args().skip(1).find(|a| a != "--lenient") {
         Some(a) => a,
         None => {
@@ -25,8 +26,15 @@ fn main() {
             }
             println!("{}", t.query);
         }
+        // a worded refusal is the line `qua` prints for it
         Err(e) => {
-            eprintln!("error: {e}");
+            match e.not_translated() {
+                Some((code, reason, takes)) => eprintln!(
+                    "{}",
+                    quarb::diagnostic::translator_refusal("sql", code, reason, takes, lenient)
+                ),
+                None => eprintln!("error: {e}"),
+            }
             std::process::exit(1);
         }
     }

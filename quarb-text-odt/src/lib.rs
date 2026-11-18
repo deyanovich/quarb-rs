@@ -196,21 +196,7 @@ impl Parts {
     }
 
     fn head(&self) -> HeadMeta {
-        let mut h = HeadMeta {
-            // the plain names this reader answered under until 0.63
-            renamed: vec![
-                ("title", "dc:title"),
-                ("author", "dc:creator"),
-                ("author", "meta:initial-creator"),
-                ("description", "dc:description"),
-                ("subject", "dc:subject"),
-                ("keywords", "meta:keyword"),
-                ("lang", "dc:language"),
-                ("created", "meta:creation-date"),
-                ("modified", "dc:date"),
-            ],
-            ..HeadMeta::default()
-        };
+        let mut h = HeadMeta::default();
         let Some(xml) = &self.meta else {
             return h;
         };

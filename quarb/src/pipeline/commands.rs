@@ -934,7 +934,7 @@ pub(crate) fn apply_command_in<H: Host>(
             // context had no node to stand on.
             if caps.iter().any(|c| host.node_ref(&c.ext).is_none()) {
                 crate::value::ambient::record_diagnostic(crate::diagnostic::Diagnostic::warning(
-                    "NAVIGATION_RESTARTED",
+                    crate::diagnostic::NAVIGATION_RESTARTED,
                     "pipeline",
                     "navigation restarted from the root after the aggregation pipe: the \
                      context stood on no node",

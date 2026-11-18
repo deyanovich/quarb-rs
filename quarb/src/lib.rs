@@ -84,7 +84,7 @@ pub use diagnostic::{Diagnostic, Severity};
 pub use error::{Kind as ErrorKind, QuarbError, Result};
 pub use graph::adapter::{
     Ask, AstAdapter, Cap, Catalog, CatalogLookup, Cmp, Confidence, Conjunct, Estimate, ExternalRef,
-    InstantFrom, Latency, LinkDir, NodeId, PlanAxis, Provenance, ProvenanceList, Selection,
+    InstantFrom, Latency, LinkBy, LinkDir, NodeId, PlanAxis, Provenance, ProvenanceList, Selection,
     StepPlan, Surface, Unopened, item_index, item_name,
 };
 

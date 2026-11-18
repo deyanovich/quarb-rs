@@ -31,7 +31,7 @@ use tokio_postgres::{Client, NoTls, Row};
 pub enum PostgresError {
     #[error("postgres: {0}")]
     Postgres(#[from] tokio_postgres::Error),
-    #[error("pushdown plan: {0}")]
+    #[error("{0}")]
     Plan(String),
     #[error("postgres runtime: {0}")]
     Runtime(#[from] std::io::Error),
@@ -93,6 +93,13 @@ fn cell(row: &Row, i: usize) -> Result<Value, tokio_postgres::Error> {
 }
 
 impl PostgresAdapter {
+    /// Hold the crosslinks of these labels in memory (the mount's
+    /// `crosslinks=order,customer`, written in the URL's query
+    /// string): see [`RelationalModel::hold_crosslinks`].
+    pub fn hold_crosslinks(&mut self, labels: &[String]) -> Result<(), String> {
+        self.model.hold_crosslinks(labels)
+    }
+
     /// Connect and materialize the `public` schema. `config` is a
     /// `tokio-postgres` connection string — URL form
     /// (`postgres://user@host:port/db`) or keyword form
@@ -381,10 +388,50 @@ impl PostgresAdapter {
 /// Execute pushed-down SQL directly: the column names and rows,
 /// ordered by `order_table`'s key when one is given (the pushdown
 /// contract: row order must match the adapter's document order).
+/// The catalog for a plan's column types: every column of `tables`
+/// with whether its type is numeric, and whether it is JSON. A sort,
+/// a fold and a distinct count are the scan's only over a numeric
+/// column, and PostgreSQL would run them over a text one by its own
+/// collation and grouping: the caller asks here first.
+pub fn column_catalog(
+    config: &str,
+    tables: &[&str],
+) -> Result<Vec<(String, bool, bool)>, PostgresError> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async {
+        let (client, connection) = tokio_postgres::connect(config, NoTls).await?;
+        tokio::spawn(connection);
+        let mut catalog = Vec::new();
+        for table in tables {
+            let cols = client
+                .query(
+                    "SELECT column_name, data_type FROM information_schema.columns \
+                     WHERE table_schema = 'public' AND table_name = $1 \
+                     ORDER BY ordinal_position",
+                    &[table],
+                )
+                .await?;
+            for r in &cols {
+                let name: String = r.get(0);
+                let data_type: String = r.get(1);
+                let numeric = matches!(
+                    data_type.as_str(),
+                    "smallint" | "integer" | "bigint" | "numeric" | "real" | "double precision"
+                );
+                let json = matches!(data_type.as_str(), "json" | "jsonb");
+                catalog.push((name, numeric, json));
+            }
+        }
+        Ok(catalog)
+    })
+}
+
 pub fn raw_query(
     config: &str,
     sql: &str,
-    order_table: Option<&str>,
+    order: &quarb_relational::PlanOrder<'_>,
     join_left: Option<(&str, &[String])>,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>), PostgresError> {
     // Witness-JOIN plans carry a uniqueness obligation this
@@ -402,17 +449,24 @@ pub fn raw_query(
     rt.block_on(async {
         let (client, connection) = tokio_postgres::connect(config, NoTls).await?;
         tokio::spawn(connection);
-        let sql = match order_table {
-            Some(t) => {
+        // The plan's order: its own sort where it has one, then
+        // the primary keys the whole reads are ordered by. A plan
+        // that needs a key a table lacks could not keep the scan's
+        // order, and declines.
+        let sql = match order.table {
+            Some(_) => {
                 let (specs, _) = PostgresAdapter::introspect(&client).await?;
-                let key = specs
-                    .into_iter()
-                    .find(|s| s.name == t)
-                    .and_then(|s| s.pk.map(|i| s.columns[i].clone()));
-                match key {
-                    Some(k) => format!("{sql} ORDER BY \"{t}\".\"{k}\""),
-                    None => sql.to_string(),
-                }
+                let key_of = |name: &str| {
+                    specs
+                        .iter()
+                        .find(|s| s.name == name)
+                        .and_then(|s| s.pk.map(|i| s.columns[i].clone()))
+                };
+                let clause = quarb_relational::order_clause(order, &key_of, &|t, k| {
+                    format!("\"{t}\".\"{k}\"")
+                })
+                .map_err(PostgresError::Plan)?;
+                format!("{sql}{clause}")
             }
             None => sql.to_string(),
         };

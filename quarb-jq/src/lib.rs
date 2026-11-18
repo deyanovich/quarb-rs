@@ -39,6 +39,7 @@
 mod export;
 pub use export::export;
 
+use quarb::diagnostic as d;
 use std::fmt::Write as _;
 
 /// An error translating a jq filter.
@@ -48,6 +49,27 @@ pub enum JqError {
     Syntax(usize, String),
     #[error("unsupported jq construct: {0}")]
     Unsupported(String),
+    /// A construct of jq with no Quarb translation: the diagnostic
+    /// code of the reason (`SLICE_NOT_TRANSLATED`; ruling 2026-11-17,
+    /// one word per reason) and the reason.
+    #[error("unsupported jq construct: {1}")]
+    NotTranslated(&'static str, String),
+    /// The same, for a construct the strict translator refuses and
+    /// the lenient one takes: the refusal's tail may name the flag.
+    #[error("unsupported jq construct: {1}")]
+    Lenient(&'static str, String),
+}
+
+impl JqError {
+    /// The code and the reason of a refusal that has a word, and
+    /// whether `--lenient` translates what was refused.
+    pub fn not_translated(&self) -> Option<(&'static str, &str, bool)> {
+        match self {
+            JqError::NotTranslated(code, reason) => Some((code, reason, false)),
+            JqError::Lenient(code, reason) => Some((code, reason, true)),
+            _ => None,
+        }
+    }
 }
 
 /// A successful translation: the Quarb query, plus notes on known
@@ -218,7 +240,10 @@ fn lex(input: &str) -> Result<Vec<(Tok, usize)>, JqError> {
                 i += 1;
             }
             '{' => {
-                return Err(JqError::Unsupported("object construction {...}".into()));
+                return Err(JqError::NotTranslated(
+                    d::CONSTRUCT_NOT_TRANSLATED,
+                    "object construction {...}".into(),
+                ));
             }
             ':' => {
                 tokens.push((Tok::Colon, at));
@@ -241,7 +266,10 @@ fn lex(input: &str) -> Result<Vec<(Tok, usize)>, JqError> {
                     tokens.push((Tok::Cmp("=="), at));
                     i += 2;
                 } else {
-                    return Err(JqError::Unsupported("assignment (=)".into()));
+                    return Err(JqError::NotTranslated(
+                        d::CONSTRUCT_NOT_TRANSLATED,
+                        "assignment (=)".into(),
+                    ));
                 }
             }
             '!' => {
@@ -282,12 +310,16 @@ fn lex(input: &str) -> Result<Vec<(Tok, usize)>, JqError> {
                             Some('n') => text.push('\n'),
                             Some('t') => text.push('\t'),
                             Some('(') => {
-                                return Err(JqError::Unsupported("string interpolation".into()));
+                                return Err(JqError::NotTranslated(
+                                    d::CONSTRUCT_NOT_TRANSLATED,
+                                    "string interpolation".into(),
+                                ));
                             }
                             Some(other) => {
-                                return Err(JqError::Unsupported(format!(
-                                    "the string escape \\{other}"
-                                )));
+                                return Err(JqError::NotTranslated(
+                                    d::LITERAL_NOT_TRANSLATED,
+                                    format!("the string escape \\{other}"),
+                                ));
                             }
                             None => break,
                         }
@@ -341,7 +373,10 @@ fn lex(input: &str) -> Result<Vec<(Tok, usize)>, JqError> {
                     "not" => Tok::Not,
                     "reduce" | "foreach" | "as" | "if" | "then" | "elif" | "else" | "end"
                     | "def" | "try" | "catch" | "import" | "include" | "label" => {
-                        return Err(JqError::Unsupported(format!("the {text} construct")));
+                        return Err(JqError::NotTranslated(
+                            d::CONSTRUCT_NOT_TRANSLATED,
+                            format!("the {text} construct"),
+                        ));
                     }
                     _ => Tok::Ident(text, chars.get(i) == Some(&'(')),
                 };
@@ -461,9 +496,8 @@ fn by_key_refusal(f: &str, array: Option<&str>, key: Option<&str>, flag: bool) -
             "; --lenient translates group_by(KEY) | map(length), the size of each group, \
              with a warning where the answer differs from jq's"
         }
-        (true, _) => {
-            "; --lenient translates it so, with a warning where the answer differs from jq's"
-        }
+        // the refusal's tail names the flag
+        (true, _) => "",
     };
     format!("the {f} function (in a hand-written query: {way}{places}){lenient}")
 }
@@ -586,12 +620,14 @@ impl Parser {
             }
             Some(Tok::Dot) => {
                 if state == State::Elements {
-                    return Err(JqError::Unsupported(
+                    return Err(JqError::NotTranslated(
+                        d::SLICE_NOT_TRANSLATED,
                         "navigation on a sliced array (iterate the slice with [] first)".into(),
                     ));
                 }
                 if state != State::Nodes {
-                    return Err(JqError::Unsupported(
+                    return Err(JqError::NotTranslated(
+                        d::VALUES_NOT_TRANSLATED,
                         "navigation after a value-producing command".into(),
                     ));
                 }
@@ -602,19 +638,22 @@ impl Parser {
                     State::Nodes
                 })
             }
-            Some(Tok::DotDot) => Err(JqError::Unsupported(
+            Some(Tok::DotDot) => Err(JqError::NotTranslated(
+                d::DESCENT_NOT_TRANSLATED,
                 "recursive descent .. (use Quarb's // in a hand-written query)".into(),
             )),
             Some(Tok::Ident(f, true)) if f == "select" => {
                 if state == State::Elements {
-                    return Err(JqError::Unsupported(
+                    return Err(JqError::NotTranslated(
+                        d::SLICE_NOT_TRANSLATED,
                         "select on a sliced array (jq tests the whole array; iterate \
                          the slice with [] first)"
                             .into(),
                     ));
                 }
                 if state != State::Nodes {
-                    return Err(JqError::Unsupported(
+                    return Err(JqError::NotTranslated(
+                        d::VALUES_NOT_TRANSLATED,
                         "select after a value-producing command".into(),
                     ));
                 }
@@ -629,11 +668,17 @@ impl Parser {
                 self.pos += 1;
                 self.expect(Tok::LParen, "'(' after map")?;
                 if self.peek() != Some(&Tok::Dot) {
-                    return Err(JqError::Unsupported("map with a non-path body".into()));
+                    return Err(JqError::NotTranslated(
+                        d::MAP_NOT_TRANSLATED,
+                        "map with a non-path body".into(),
+                    ));
                 }
                 let mut path = String::new();
                 if self.nav_path(&mut path)? {
-                    return Err(JqError::Unsupported("a slice inside map".into()));
+                    return Err(JqError::NotTranslated(
+                        d::SLICE_NOT_TRANSLATED,
+                        "a slice inside map".into(),
+                    ));
                 }
                 self.expect(Tok::RParen, "')' to close map")?;
                 self.value_below(out, &path)?;
@@ -644,7 +689,8 @@ impl Parser {
             }
             Some(Tok::Ident(f, true)) if f == "map" => {
                 if !matches!(state, State::Nodes | State::Elements) {
-                    return Err(JqError::Unsupported(
+                    return Err(JqError::NotTranslated(
+                        d::VALUES_NOT_TRANSLATED,
                         "map after a value-producing command".into(),
                     ));
                 }
@@ -657,10 +703,16 @@ impl Parser {
                 }
                 if self.peek() == Some(&Tok::Dot) {
                     if self.nav_path(out)? {
-                        return Err(JqError::Unsupported("a slice inside map".into()));
+                        return Err(JqError::NotTranslated(
+                            d::SLICE_NOT_TRANSLATED,
+                            "a slice inside map".into(),
+                        ));
                     }
                 } else {
-                    return Err(JqError::Unsupported("map with a non-path body".into()));
+                    return Err(JqError::NotTranslated(
+                        d::MAP_NOT_TRANSLATED,
+                        "map with a non-path body".into(),
+                    ));
                 }
                 self.expect(Tok::RParen, "')' to close map")?;
                 self.notes.push(
@@ -689,14 +741,16 @@ impl Parser {
                         out.push_str(" @| count");
                         Ok(State::Values)
                     }
-                    State::Picked => Err(JqError::Unsupported(
+                    State::Picked => Err(JqError::NotTranslated(
+                        d::VALUES_NOT_TRANSLATED,
                         "length of an element picked after a by-key function".into(),
                     )),
                 }
             }
             Some(Tok::Ident(f, false)) if f == "keys" => {
                 if state != State::Nodes {
-                    return Err(JqError::Unsupported(
+                    return Err(JqError::NotTranslated(
+                        d::VALUES_NOT_TRANSLATED,
                         "keys after a value-producing command".into(),
                     ));
                 }
@@ -715,9 +769,10 @@ impl Parser {
                 let arg = if calls {
                     self.expect(Tok::LParen, "'('")?;
                     let Some(Tok::Str(s)) = self.bump() else {
-                        return Err(JqError::Unsupported(format!(
-                            "{f} with a non-literal argument"
-                        )));
+                        return Err(JqError::NotTranslated(
+                            d::FUNCTION_NOT_TRANSLATED,
+                            format!("{f} with a non-literal argument"),
+                        ));
                     };
                     self.expect(Tok::RParen, "')'")?;
                     Some(s)
@@ -746,10 +801,13 @@ impl Parser {
                         return Ok(State::Picked);
                     }
                     State::Ordered | State::Picked => {
-                        return Err(JqError::Unsupported(format!(
-                            "{f} after a by-key function (index the ordered array, slice it, \
+                        return Err(JqError::NotTranslated(
+                            d::FUNCTION_NOT_TRANSLATED,
+                            format!(
+                                "{f} after a by-key function (index the ordered array, slice it, \
                              iterate it with [] or take its length)"
-                        )));
+                            ),
+                        ));
                     }
                 }
                 Ok(State::Values)
@@ -764,16 +822,21 @@ impl Parser {
                 }
                 let key = self.plain_path_key();
                 let array = (state == State::Nodes).then(|| out.clone());
-                Err(JqError::Unsupported(by_key_refusal(
-                    &f,
-                    array.as_deref(),
-                    key.as_deref(),
-                    true,
-                )))
+                Err(JqError::Lenient(
+                    d::SORT_NOT_TRANSLATED,
+                    by_key_refusal(&f, array.as_deref(), key.as_deref(), true),
+                ))
             }
-            Some(Tok::Ident(f, _)) => Err(JqError::Unsupported(format!("the {f} function"))),
-            Some(Tok::Var(v)) => Err(JqError::Unsupported(format!("the variable ${v}"))),
-            Some(Tok::LBracket) => Err(JqError::Unsupported(
+            Some(Tok::Ident(f, _)) => Err(JqError::NotTranslated(
+                d::FUNCTION_NOT_TRANSLATED,
+                format!("the {f} function"),
+            )),
+            Some(Tok::Var(v)) => Err(JqError::NotTranslated(
+                d::CONSTRUCT_NOT_TRANSLATED,
+                format!("the variable ${v}"),
+            )),
+            Some(Tok::LBracket) => Err(JqError::NotTranslated(
+                d::CONSTRUCT_NOT_TRANSLATED,
                 "array construction inside a pipeline (only supported at the start)".into(),
             )),
             other => {
@@ -812,7 +875,8 @@ impl Parser {
                         continue;
                     }
                     Some(Tok::Ident(_, false) | Tok::Str(_) | Tok::LBracket | Tok::Dot) => {
-                        return Err(JqError::Unsupported(
+                        return Err(JqError::NotTranslated(
+                            d::SLICE_NOT_TRANSLATED,
                             "indexing into a slice (iterate it with [] first)".into(),
                         ));
                     }
@@ -909,7 +973,10 @@ impl Parser {
             Some(Tok::Number(n)) => {
                 let n = n.clone();
                 if n.contains('.') {
-                    return Err(JqError::Unsupported(format!("the non-integer index {n}")));
+                    return Err(JqError::NotTranslated(
+                        d::LITERAL_NOT_TRANSLATED,
+                        format!("the non-integer index {n}"),
+                    ));
                 }
                 self.pos += 1;
                 let v: i64 = n
@@ -982,18 +1049,25 @@ impl Parser {
                 self.pos += 1;
                 self.expect(Tok::LParen, "'(' after has")?;
                 let Some(Tok::Str(key)) = self.bump() else {
-                    return Err(JqError::Unsupported("has with a non-literal key".into()));
+                    return Err(JqError::NotTranslated(
+                        d::FUNCTION_NOT_TRANSLATED,
+                        "has with a non-literal key".into(),
+                    ));
                 };
                 self.expect(Tok::RParen, "')' to close has")?;
                 Ok((format!("/{}", quarb_name(&key)), false))
             }
-            Some(Tok::Ident(f, _)) => Err(JqError::Unsupported(format!(
-                "the {f} function in a condition"
-            ))),
+            Some(Tok::Ident(f, _)) => Err(JqError::NotTranslated(
+                d::FUNCTION_NOT_TRANSLATED,
+                format!("the {f} function in a condition"),
+            )),
             Some(Tok::Dot) => {
                 let mut path = String::new();
                 if self.nav_path(&mut path)? {
-                    return Err(JqError::Unsupported("a slice inside a condition".into()));
+                    return Err(JqError::NotTranslated(
+                        d::SLICE_NOT_TRANSLATED,
+                        "a slice inside a condition".into(),
+                    ));
                 }
                 if path.is_empty() {
                     // A bare `.` — the candidate's own value.
@@ -1048,24 +1122,20 @@ impl Parser {
             State::Elements | State::Ordered => "",
             _ => {
                 let key = self.plain_path_key();
-                return Err(JqError::Unsupported(by_key_refusal(
-                    f,
-                    None,
-                    key.as_deref(),
-                    false,
-                )));
+                return Err(JqError::NotTranslated(
+                    d::SORT_NOT_TRANSLATED,
+                    by_key_refusal(f, None, key.as_deref(), false),
+                ));
             }
         };
         let array = (state == State::Nodes).then(|| out.clone());
         let keys = match self.key_arguments() {
             Some(keys) if f == "sort_by" || keys.len() == 1 => keys,
             _ => {
-                return Err(JqError::Unsupported(by_key_refusal(
-                    f,
-                    array.as_deref(),
-                    None,
-                    false,
-                )));
+                return Err(JqError::NotTranslated(
+                    d::SORT_NOT_TRANSLATED,
+                    by_key_refusal(f, array.as_deref(), None, false),
+                ));
             }
         };
         let k = keys.join("; ");
@@ -1118,7 +1188,8 @@ impl Parser {
                     .get(self.pos..self.pos + follows.len())
                     .is_some_and(|ts| ts.iter().map(|(t, _)| t).eq(follows.iter()));
                 if !here {
-                    return Err(JqError::Unsupported(
+                    return Err(JqError::NotTranslated(
+                        d::SORT_NOT_TRANSLATED,
                         "the group_by function without map(length) after it (an array of \
                          arrays has no thread shape; --lenient translates group_by(KEY) | \
                          map(length), and a hand-written query folds by the pushed key: \
@@ -1212,7 +1283,8 @@ impl Parser {
                 }
                 Some(Tok::Dot | Tok::Question) => self.pos += 1,
                 Some(Tok::Ident(_, false) | Tok::Str(_)) => {
-                    return Err(JqError::Unsupported(
+                    return Err(JqError::NotTranslated(
+                        d::SORT_NOT_TRANSLATED,
                         "a key on an ordered array (index it, slice it or iterate it with [] \
                          first)"
                             .into(),
@@ -1224,7 +1296,8 @@ impl Parser {
         }
         let mut path = String::new();
         if self.nav_segments(&mut path)? {
-            return Err(JqError::Unsupported(
+            return Err(JqError::NotTranslated(
+                d::SLICE_NOT_TRANSLATED,
                 "a slice of an element picked after a by-key function".into(),
             ));
         }
@@ -1241,7 +1314,8 @@ impl Parser {
     /// asked for as nodes cannot go below the elements.
     fn value_below(&mut self, out: &mut String, path: &str) -> Result<(), JqError> {
         if !self.project {
-            return Err(JqError::Unsupported(
+            return Err(JqError::NotTranslated(
+                d::SORT_NOT_TRANSLATED,
                 "a path below an element after a by-key function, where nodes are asked for \
                  (the ordered elements are the nodes; a path below them is read as a value)"
                     .into(),
@@ -1295,9 +1369,10 @@ impl Parser {
                 if calls {
                     self.expect(Tok::LParen, "'('")?;
                     let Some(Tok::Str(s)) = self.bump() else {
-                        return Err(JqError::Unsupported(format!(
-                            "{f} with a non-literal argument"
-                        )));
+                        return Err(JqError::NotTranslated(
+                            d::FUNCTION_NOT_TRANSLATED,
+                            format!("{f} with a non-literal argument"),
+                        ));
                     };
                     self.expect(Tok::RParen, "')'")?;
                     write!(out, " @| {fname}({})", quarb_literal(&s)?).unwrap();
@@ -1308,9 +1383,10 @@ impl Parser {
             }
             other => {
                 let what = other.map(|t| t.to_string()).unwrap_or_else(|| "end".into());
-                Err(JqError::Unsupported(format!(
-                    "'{what}' after an array collect (only array functions follow)"
-                )))
+                Err(JqError::NotTranslated(
+                    d::CONSTRUCT_NOT_TRANSLATED,
+                    format!("'{what}' after an array collect (only array functions follow)"),
+                ))
             }
         }
     }
@@ -1354,7 +1430,8 @@ fn quarb_literal(s: &str) -> Result<String, JqError> {
     } else if !s.contains('\'') {
         Ok(format!("'{s}'"))
     } else {
-        Err(JqError::Unsupported(
+        Err(JqError::NotTranslated(
+            d::LITERAL_NOT_TRANSLATED,
             "a literal containing both quote characters".into(),
         ))
     }
@@ -1374,7 +1451,7 @@ mod tests {
 
     fn unsupported(jq: &str) -> String {
         match translate(jq) {
-            Err(JqError::Unsupported(msg)) => msg,
+            Err(JqError::NotTranslated(_, msg) | JqError::Lenient(_, msg)) => msg,
             other => panic!("expected Unsupported, got {other:?}"),
         }
     }
@@ -1482,13 +1559,22 @@ mod tests {
             m.contains("/events/* @| sort_by(/payload/duration_ms::), then @| [1]"),
             "{m}"
         );
+        // the text ends with the Quarb way; the flag is named by the
+        // line's tail, since the lenient translator takes the form
         assert!(
-            m.ends_with(
-                "a null key sorts last there, first in jq); --lenient translates it so, with \
-                 a warning where the answer differs from jq's"
-            ),
+            m.ends_with("a null key sorts last there, first in jq)"),
             "{m}"
         );
+        assert!(matches!(
+            translate(".events | sort_by(.payload.duration_ms) | .[0].id"),
+            Err(JqError::Lenient(code, _)) if code == d::SORT_NOT_TRANSLATED
+        ));
+        // a refusal the flag does not lift has its own word and
+        // variant
+        assert!(matches!(
+            translate(".."),
+            Err(JqError::NotTranslated(code, _)) if code == d::DESCENT_NOT_TRANSLATED
+        ));
 
         let m = unsupported(".events | min_by(.ms) | .id");
         assert!(
@@ -1526,16 +1612,13 @@ mod tests {
         let m = unsupported(".events | sort_by(.a, .b)");
         assert!(m.contains("/events/* @| sort_by(KEY), then"), "{m}");
         assert!(
-            m.contains("; KEY is a value read from the element, as ::price); --lenient"),
+            m.ends_with("; KEY is a value read from the element, as ::price)"),
             "{m}"
         );
         // an input that is no node set: the array's place is named
         let m = unsupported(".events | map(.ms) | sort_by(.)");
         assert!(m.contains("ARRAY/* @| sort_by(::), then"), "{m}");
-        assert!(
-            m.contains("; ARRAY is the path to the array); --lenient"),
-            "{m}"
-        );
+        assert!(m.ends_with("; ARRAY is the path to the array)"), "{m}");
         let m = unsupported(".events | map(.ms) | group_by(length)");
         assert!(
             m.ends_with(
@@ -1560,7 +1643,7 @@ mod tests {
 
     fn lenient_unsupported(jq: &str) -> String {
         match translate_lenient(jq) {
-            Err(JqError::Unsupported(msg)) => msg,
+            Err(JqError::NotTranslated(_, msg) | JqError::Lenient(_, msg)) => msg,
             other => panic!("expected Unsupported, got {other:?}"),
         }
     }
@@ -1692,7 +1775,7 @@ mod tests {
         );
         // nodes asked for, and a path below the element
         match translate_nodes_lenient(".events | sort_by(.id) | .[0].kind") {
-            Err(JqError::Unsupported(m)) => {
+            Err(JqError::NotTranslated(_, m)) => {
                 assert!(m.starts_with("a path below an element"), "{m}")
             }
             other => panic!("expected Unsupported, got {other:?}"),

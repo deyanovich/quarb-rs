@@ -313,6 +313,7 @@ impl Doc {
         run: &Run,
         model: &quarb_model::Model,
     ) -> quarb::Result<Outcome> {
+        self.base_dyn().refresh();
         let base = quarb_model::Borrowed(self.base_dyn());
         let enriched = quarb_model::ModelAdapter::new(base, model.clone());
         enriched
@@ -331,8 +332,13 @@ impl Doc {
     }
 
     /// Run `query` under `run` (its instant, shell gate, reference
-    /// targets).
+    /// targets). A source that can move under a session looks again
+    /// first (a git repository at its refs, as qua's standing session
+    /// has it): a notebook, a REPL and a kernel are sessions that
+    /// stand, and a commit made beside one is answered by the next
+    /// query.
     pub fn run(&self, query: &str, run: &Run) -> quarb::Result<Outcome> {
+        self.base_dyn().refresh();
         macro_rules! go {
             ($a:expr) => {{ quarb::Query::parse_with(query, &quarb::Defs::default(), $a, run)?.run($a, run) }};
         }
@@ -354,6 +360,7 @@ impl Doc {
     /// the outcome's result, the closing command in `closing`, for a
     /// host that draws the table itself.
     pub fn run_rendering(&self, query: &str, run: &Run) -> quarb::Result<Outcome> {
+        self.base_dyn().refresh();
         macro_rules! go {
             ($a:expr) => {{
                 quarb::Query::parse_with(query, &quarb::Defs::default(), $a, run)?

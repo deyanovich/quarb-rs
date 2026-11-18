@@ -607,6 +607,72 @@ pub fn glyph_list(rows: &[Glyph], ru: bool) -> String {
         .join("\n")
 }
 
+/// The rows of a diagnostic code asked for in small letters
+/// (`sort_not_pushed`).
+fn code_rows(name: &str) -> Vec<&'static crate::diagnostic::Row> {
+    crate::diagnostic::rows_of(&name.to_ascii_uppercase())
+}
+
+/// The manual page of a diagnostic code: its severity and family,
+/// when it is raised, and the remedy where there is one. A code
+/// raised under two severities (`OMITTED`) has a block for each.
+pub fn code_page(rows: &[&crate::diagnostic::Row], ru: bool) -> String {
+    rows.iter()
+        .map(|r| {
+            let (raised, remedy) = if ru {
+                (r.raised_ru, r.remedy_ru)
+            } else {
+                (r.raised_en, r.remedy_en)
+            };
+            let mut s = format!("{} — {}, {}\n", r.code, r.severity, r.family);
+            let row = |s: &mut String, label: &str, text: &str| {
+                if !text.is_empty() {
+                    s.push_str(&format!("  {label:<9} {text}\n"));
+                }
+            };
+            row(&mut s, "raised", raised);
+            row(&mut s, "remedy", remedy);
+            s.trim_end().to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Diagnostic codes one per line: the code, its severity, when it
+/// is raised (`man diagnostics`, `man diagnostics planner`).
+fn code_list<'a>(rows: impl Iterator<Item = &'a crate::diagnostic::Row>, ru: bool) -> String {
+    let rows: Vec<&crate::diagnostic::Row> = rows.collect();
+    let code = rows.iter().map(|r| r.code.len()).max().unwrap_or(0);
+    let severity = rows
+        .iter()
+        .map(|r| r.severity.word().len())
+        .max()
+        .unwrap_or(0);
+    rows.iter()
+        .map(|r| {
+            format!(
+                "{:<code$}  {:<severity$}  {}",
+                r.code,
+                r.severity.word(),
+                if ru { r.raised_ru } else { r.raised_en }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The families the inventory names, in the order it first names
+/// them.
+fn code_families() -> Vec<&'static str> {
+    let mut families: Vec<&'static str> = Vec::new();
+    for r in crate::diagnostic::inventory() {
+        if !families.contains(&r.family) {
+            families.push(r.family);
+        }
+    }
+    families
+}
+
 /// The kinds the index names, in the order it first names them.
 pub fn kinds() -> Vec<String> {
     let mut kinds: Vec<String> = Vec::new();
@@ -628,7 +694,12 @@ pub fn kinds() -> Vec<String> {
 /// A pipe is both: its page, then the commands that stand after it.
 /// `syntax` lists the glyphs as the bare `man` lists the commands,
 /// and `syntax KIND` those of one kind (`syntax operator`, `syntax
-/// sigils`).
+/// sigils`). A diagnostic code is its row of the inventory: when it
+/// is raised and what to do (`man SORT_NOT_PUSHED`, the door a
+/// line's tail names); `diagnostics` lists the codes, and
+/// `diagnostics WORD` those of one family, severity or remedy
+/// (`diagnostics planner`, `diagnostics warning`, `diagnostics
+/// respell`).
 pub fn man(args: &[&str]) -> Result<String, String> {
     let ru = args.iter().any(|a| *a == "--ru");
     let words: Vec<&str> = args.iter().copied().filter(|a| *a != "--ru").collect();
@@ -679,9 +750,34 @@ pub fn man(args: &[&str]) -> Result<String, String> {
                 )),
             }
         }
+        [word] if *word == "diagnostics" && entry(word).is_none() => {
+            Ok(code_list(crate::diagnostic::inventory().iter(), ru))
+        }
+        [word, of] if *word == "diagnostics" && entry(word).is_none() => {
+            let rows: Vec<&crate::diagnostic::Row> = crate::diagnostic::inventory()
+                .iter()
+                .filter(|r| r.family == *of || r.severity.word() == *of || r.remedy == *of)
+                .collect();
+            if rows.is_empty() {
+                Err(format!(
+                    "no family, severity or remedy '{of}' of diagnostics; the families: {}",
+                    code_families().join(", ")
+                ))
+            } else {
+                Ok(code_list(rows.into_iter(), ru))
+            }
+        }
+        // a diagnostic code as a line prints it
+        [name] if !crate::diagnostic::rows_of(name).is_empty() => {
+            Ok(code_page(&crate::diagnostic::rows_of(name), ru))
+        }
         [name] => {
             let rows = glyphs_of(name);
             match (entry(name), rows.is_empty()) {
+                // a code in small letters, where the word is no
+                // command and no glyph (`mount` is a statement of a
+                // model file, `MOUNT` a code)
+                (None, true) if !code_rows(name).is_empty() => Ok(code_page(&code_rows(name), ru)),
                 // a reading that is a command and a glyph (`#`, `%`)
                 (Some(e), false) => Ok(format!("{}\n\n{}", page(name, &e, ru), pages(&rows))),
                 (Some(e), true) => Ok(page(name, &e, ru)),
@@ -690,8 +786,9 @@ pub fn man(args: &[&str]) -> Result<String, String> {
             }
         }
         _ => Err(
-            "man takes one name, one glyph, or the word syntax: man upper, man '@|', \
-             man '<=>', man syntax, man syntax operator, man --ru upper"
+            "man takes one name, one glyph, a diagnostic code, or the word syntax or \
+             diagnostics: man upper, man '@|', man '<=>', man syntax, man syntax operator, \
+             man SORT_NOT_PUSHED, man diagnostics, man diagnostics planner, man --ru upper"
                 .into(),
         ),
     }
@@ -729,6 +826,35 @@ pub fn line(line: &str) -> Option<Result<String, String>> {
 /// The message of a word neither table has: the nearest command
 /// names, and the glyphs that carry the word's marks.
 fn unknown(name: &str, ru: bool) -> String {
+    // a word in capitals is asked for as a diagnostic code: the
+    // codes that share a part with it
+    if name.len() > 3
+        && name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+    {
+        let mut near: Vec<&str> = Vec::new();
+        for r in crate::diagnostic::inventory() {
+            // the family's suffix is shared by every code of it
+            let shares = name.split('_').any(|part| {
+                part.len() > 2
+                    && !matches!(part, "NOT" | "PUSHED" | "TRANSLATED")
+                    && r.code.split('_').any(|p| p == part)
+            });
+            if shares && !near.contains(&r.code) {
+                near.push(r.code);
+            }
+        }
+        near.truncate(8);
+        return if near.is_empty() {
+            format!("no diagnostic code '{name}' (`man diagnostics` lists the codes)")
+        } else {
+            format!(
+                "no diagnostic code '{name}'; the nearest: {} (`man diagnostics` lists the codes)",
+                near.join(", ")
+            )
+        };
+    }
     // a command the word is part of, or one (of three letters at
     // least: `s` is in every other word) that is part of it
     let near: Vec<String> = entries()
@@ -882,6 +1008,93 @@ pub fn registry_tsv() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A diagnostic code is a page: the door a line's tail names.
+    #[test]
+    fn a_diagnostic_code_has_a_page() {
+        let page = man(&["SORT_NOT_PUSHED"]).unwrap();
+        // the sentence is the inventory's, and moves with it: the
+        // page's frame is what is held here
+        assert!(
+            page.starts_with("SORT_NOT_PUSHED — info, planner\n  raised    a sort"),
+            "{page}"
+        );
+        assert!(page.contains("\n  remedy    "), "{page}");
+        // small letters ask for the same page
+        assert_eq!(man(&["sort_not_pushed"]).unwrap(), page);
+        // a word of the language keeps its own page: `mount` is a
+        // statement of a model file, `MOUNT` the debug code
+        assert!(!man(&["mount"]).unwrap().starts_with("MOUNT"));
+        assert!(
+            man(&["MOUNT"])
+                .unwrap()
+                .starts_with("MOUNT — debug, engine")
+        );
+        // a session's line
+        assert_eq!(line("man SORT_NOT_PUSHED").unwrap().unwrap(), page);
+        // the Russian page keeps the code and the labels
+        let ru = man(&["--ru", "SORT_NOT_PUSHED"]).unwrap();
+        assert!(
+            ru.starts_with("SORT_NOT_PUSHED — info, planner\n  raised    "),
+            "{ru}"
+        );
+        assert_ne!(ru, page);
+        // a code under two severities prints both rows
+        let omitted = man(&["OMITTED"]).unwrap();
+        assert!(
+            omitted.contains("OMITTED — error, spec")
+                && omitted.contains("OMITTED — warning, spec"),
+            "{omitted}"
+        );
+        // a row with nothing to do has no remedy line
+        let locale = man(&["LOCALE"]).unwrap();
+        assert!(!locale.contains("remedy"), "{locale}");
+    }
+
+    #[test]
+    fn the_codes_are_listed_whole_and_by_family() {
+        let all = man(&["diagnostics"]).unwrap();
+        assert_eq!(all.lines().count(), crate::diagnostic::inventory().len());
+        let planner = man(&["diagnostics", "planner"]).unwrap();
+        assert!(
+            planner.lines().all(|l| l.contains("_NOT_PUSHED")) && planner.lines().count() >= 16,
+            "{planner}"
+        );
+        // a severity and a remedy filter as a family does
+        assert!(
+            man(&["diagnostics", "warning"])
+                .unwrap()
+                .lines()
+                .all(|l| l.contains("  warning  "))
+        );
+        assert!(
+            man(&["diagnostics", "lenient"])
+                .unwrap()
+                .contains("SORT_NOT_TRANSLATED")
+        );
+        let err = man(&["diagnostics", "nonesuch"]).unwrap_err();
+        assert!(
+            err.contains("the families: spec, planner, bridge, engine"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_code_names_the_nearest() {
+        let err = man(&["SORT_NOT_PUSHD"]).unwrap_err();
+        assert!(
+            err.starts_with(
+                "no diagnostic code 'SORT_NOT_PUSHD'; the nearest: SORT_NOT_PUSHED, \
+                 SORT_NOT_TRANSLATED ("
+            ),
+            "{err}"
+        );
+        assert!(err.contains("`man diagnostics` lists the codes"), "{err}");
+        assert_eq!(
+            man(&["NOPE_NOT_PUSHED"]).unwrap_err(),
+            "no diagnostic code 'NOPE_NOT_PUSHED' (`man diagnostics` lists the codes)"
+        );
+    }
 
     #[test]
     fn the_inventory_and_the_registry_name_the_same_commands() {

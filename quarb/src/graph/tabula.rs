@@ -1000,7 +1000,7 @@ fn warn_text_columns(t: &Table, rows: &[Vec<String>], opts: &ReadOptions, site: 
             cleanup.join(", or ")
         );
         crate::value::ambient::record_diagnostic(crate::Diagnostic::warning(
-            "TABLE_TEXT",
+            crate::diagnostic::TABLE_TEXT,
             site.to_string(),
             msg,
         ));

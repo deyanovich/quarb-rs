@@ -25,7 +25,7 @@ fn translations() {
             "SELECT al.title, t.title FROM albums al JOIN tracks t ON t.album_id = al.id \
            WHERE t.secs > 400"
         ),
-        "/albums/* <=> /tracks/*[::album_id = $$0::id && ::secs > 400] \
+        "/albums/* <=>* /tracks/*[::album_id = $$0::id && ::secs > 400] \
          | %(::title; \"t.title\" = $$1::title)"
     );
     assert_eq!(
@@ -69,6 +69,77 @@ fn translations() {
         t("SELECT country AS c, COUNT(*) FROM artists GROUP BY country"),
         "/artists/* | .c(::country) @|{.c} count | .count | %."
     );
+    // An outer join keeps the driver's rows with no pair, and its
+    // WHERE reads the joined rows, so it stands after the join.
+    assert_eq!(
+        t(
+            "SELECT a.name, t.title FROM artists a LEFT JOIN tracks t ON t.artist_id = a.id \
+           WHERE t.secs IS NULL"
+        ),
+        "/artists/* <=>*? /tracks/*[::artist_id = $$0::id] | [$$1::secs = null] \
+         | %(::name; \"t.title\" = $$1::title)"
+    );
+    // RIGHT is LEFT with the tables' places exchanged.
+    assert_eq!(
+        t("SELECT a.name, t.title FROM tracks t RIGHT JOIN artists a ON t.artist_id = a.id"),
+        "/artists/* <=>*? /tracks/*[::artist_id = $$0::id] | %(::name; \"t.title\" = $$1::title)"
+    );
+    // Every pair, and a join on any condition.
+    assert_eq!(
+        t("SELECT a.name, t.title FROM artists a CROSS JOIN tracks t"),
+        "/artists/* <=>* /tracks/* | %(::name; \"t.title\" = $$1::title)"
+    );
+    assert_eq!(
+        t("SELECT a.name, t.title FROM artists a JOIN tracks t ON t.artist_id > a.id"),
+        "/artists/* <=>* /tracks/*[::artist_id > $$0::id] | %(::name; \"t.title\" = $$1::title)"
+    );
+    // SQL's third truth value: a comparison with a NULL is neither
+    // true nor false, so `<>` is guarded and a negation is carried
+    // inward to the comparisons.
+    assert_eq!(
+        t("SELECT name FROM artists WHERE country <> 'GB'"),
+        "/artists/*[::country != null && ::country != \"GB\"] | %(::name)"
+    );
+    assert_eq!(
+        t("SELECT title FROM tracks WHERE NOT (artist_id > 1 AND secs > 100)"),
+        "/tracks/*[(::artist_id <= 1 || ::secs <= 100)] | %(::title)"
+    );
+    assert_eq!(
+        t("SELECT name FROM artists WHERE country = 'GB' OR country = 'HU'"),
+        "/artists/*[(::country = \"GB\" || ::country = \"HU\")] | %(::name)"
+    );
+    assert_eq!(
+        t("SELECT name FROM artists WHERE country NOT IN ('GB', 'HU')"),
+        "/artists/*[::country != null && ::country != \"GB\" && ::country != \"HU\"] | %(::name)"
+    );
+    // Any LIKE pattern: anchored at both ends, `%` a run and `_` one
+    // character; the simple forms keep their short spelling.
+    assert_eq!(
+        t("SELECT title FROM tracks WHERE title LIKE 'M_r%s'"),
+        "/tracks/*[::title == (/(?is)^M.r.*s$/)] | %(::title)"
+    );
+    assert_eq!(
+        t("SELECT title FROM tracks WHERE title NOT LIKE '%s'"),
+        "/tracks/*[::title != null && !(::title == (/(?i)s$/))] | %(::title)"
+    );
+    // DISTINCT over several columns: the rows as records.
+    assert_eq!(
+        t("SELECT DISTINCT price, artist_id FROM tracks ORDER BY price LIMIT 3"),
+        "/tracks/* @| sort_by(::price) | %(::price; ::artist_id) @| unique @| [..3]"
+    );
+    // UNION ALL of two tables is a branch union; UNION removes the
+    // duplicate values.
+    assert_eq!(
+        t("SELECT name FROM artists UNION ALL SELECT title FROM tracks WHERE secs > 400"),
+        "/artists/*::name || /tracks/*[::secs > 400]::title"
+    );
+    assert_eq!(
+        t(
+            "SELECT country FROM artists UNION SELECT title FROM tracks \
+           ORDER BY country DESC LIMIT 2"
+        ),
+        "/artists/*::country || /tracks/*::title @| unique @| sort @| reverse @| [..2]"
+    );
     // SQL strings escape into Quarb string syntax.
     assert_eq!(
         t("SELECT a FROM t WHERE a = 'say \"hi\" for $5'"),
@@ -84,13 +155,30 @@ fn refusals() {
         err("SELECT a FROM t1 JOIN t2 ON t2.x = t1.x JOIN t3 ON t3.y = t2.y")
             .contains("more than one JOIN")
     );
-    assert!(err("SELECT title FROM tracks WHERE title LIKE 'a%b'").contains("LIKE pattern"));
     assert!(err("SELECT a, COUNT(*) FROM t").contains("mixing aggregates"));
-    // Outer and cross joins have no existential-correlation
-    // equivalent — refused, never silently inner.
-    assert!(err("SELECT t.a FROM t LEFT JOIN u ON u.x = t.x").contains("outer JOIN"));
-    assert!(err("SELECT t.a FROM t RIGHT JOIN u ON u.x = t.x").contains("outer JOIN"));
-    assert!(err("SELECT t.a FROM t CROSS JOIN u ON u.x = t.x").contains("CROSS"));
+    // A FULL join keeps the unmatched rows of both tables: no
+    // correlation does. A CROSS JOIN has no ON.
+    assert!(err("SELECT t.a FROM t FULL JOIN u ON u.x = t.x").contains("FULL JOIN"));
+    assert!(err("SELECT t.a FROM t FULL OUTER JOIN u ON u.x = t.x").contains("FULL JOIN"));
+    assert!(err("SELECT t.a FROM t CROSS JOIN u ON u.x = t.x").contains("CROSS JOIN with an ON"));
+    // A row node is one table's row: `*` over a join is refused.
+    assert!(err("SELECT * FROM t JOIN u ON u.x = t.x").contains("SELECT * over a JOIN"));
+    // A comparison with NULL is never true; a NOT IN over a NULL
+    // never holds.
+    assert!(err("SELECT a FROM t WHERE a = NULL").contains("comparison with NULL"));
+    assert!(
+        err("SELECT a FROM t WHERE a NOT IN (1, NULL)").contains("NOT IN over a list with NULL")
+    );
+    // UNION ALL over one table twice would lose the rows both take;
+    // a UNION joins single columns.
+    assert!(
+        err("SELECT a FROM t WHERE a > 1 UNION ALL SELECT a FROM t WHERE a < 9")
+            .contains("UNION ALL over the table 't' twice")
+    );
+    assert!(err("SELECT a, b FROM t UNION SELECT a, b FROM u").contains("single columns"));
+    assert!(
+        err("SELECT a FROM t UNION SELECT b FROM u ORDER BY b").contains("ORDER BY of a UNION")
+    );
     // HAVING binds to a group.
     assert!(err("SELECT name FROM t HAVING name > 5").contains("HAVING without GROUP BY"));
     assert!(err("SELECT SUM(x) FROM t HAVING x > 5").contains("HAVING without GROUP BY"));
@@ -144,12 +232,76 @@ fn differential_against_sqlite() {
         "SELECT title FROM tracks WHERE secs > -1 AND price < 1 ORDER BY title",
         "SELECT name FROM artists WHERE country IN ('GB','HU') ORDER BY name",
         "SELECT price, COUNT(*) AS n FROM tracks GROUP BY price ORDER BY price",
+        // SQL's third truth value: Satie's country and Sketch's
+        // artist are NULL, and neither passes a negated comparison
+        "SELECT name FROM artists WHERE country <> 'GB' ORDER BY name",
+        "SELECT name FROM artists WHERE NOT (country = 'GB') ORDER BY name",
+        "SELECT name FROM artists WHERE country NOT IN ('GB', 'HU') ORDER BY name",
+        "SELECT name FROM artists WHERE country IN ('GB', NULL) ORDER BY name",
+        "SELECT title FROM tracks WHERE NOT (artist_id > 1) ORDER BY title",
+        "SELECT title FROM tracks WHERE NOT (artist_id > 1 AND secs > 100) ORDER BY title",
+        "SELECT title FROM tracks WHERE NOT (artist_id > 1 OR secs > 100) ORDER BY title",
+        "SELECT title FROM tracks WHERE NOT (NOT (artist_id = 1)) ORDER BY title",
+        "SELECT title FROM tracks WHERE artist_id = 1 OR price < 0.9 ORDER BY title",
+        "SELECT title FROM tracks WHERE NOT (artist_id IS NULL OR secs < 100) ORDER BY title",
+        "SELECT title FROM tracks WHERE id <> artist_id ORDER BY title",
+        "SELECT title FROM tracks WHERE id = artist_id ORDER BY title",
+        "SELECT title FROM tracks WHERE NOT (id = artist_id) ORDER BY title",
+        // any LIKE pattern, and its negation
+        "SELECT title FROM tracks WHERE title LIKE 'M_r%' ORDER BY title",
+        "SELECT title FROM tracks WHERE title LIKE '%e%s' ORDER BY title",
+        "SELECT title FROM tracks WHERE title LIKE '_e%' ORDER BY title",
+        "SELECT title FROM tracks WHERE title NOT LIKE '%s' ORDER BY title",
+        "SELECT name FROM artists WHERE country NOT LIKE 'g%' ORDER BY name",
+        // DISTINCT over several columns
+        "SELECT DISTINCT price, artist_id FROM tracks ORDER BY price",
+        "SELECT DISTINCT price, artist_id FROM tracks ORDER BY price LIMIT 3",
+        // aggregates skip the NULLs; COUNT(col) counts the values
+        "SELECT COUNT(artist_id) FROM tracks",
+        "SELECT COUNT(*) FROM tracks",
+        "SELECT SUM(artist_id) FROM tracks",
+        "SELECT MIN(artist_id) FROM tracks",
+        "SELECT MAX(artist_id) FROM tracks",
+        "SELECT price, COUNT(artist_id) AS n FROM tracks GROUP BY price ORDER BY price",
+        "SELECT price, COUNT(artist_id) FROM tracks GROUP BY price ORDER BY price",
+        "SELECT price, SUM(artist_id) AS s FROM tracks GROUP BY price ORDER BY price",
+        "SELECT COUNT(*) FROM tracks WHERE secs > 9999",
+        "SELECT COUNT(artist_id) FROM tracks WHERE secs > 9999",
+        "SELECT AVG(secs) FROM tracks",
+        "SELECT MAX(secs) FROM tracks WHERE price < 1",
+        // a branch union of two tables; UNION removes duplicates
+        "SELECT name FROM artists UNION ALL SELECT title FROM tracks WHERE secs > 400 ORDER BY name",
+        "SELECT country FROM artists WHERE country IS NOT NULL UNION SELECT title FROM tracks ORDER BY 1 DESC LIMIT 3",
+        "SELECT price FROM tracks WHERE secs > 400 UNION SELECT price FROM tracks WHERE price < 1 ORDER BY price",
     ];
-    for sql in cases {
+
+    // Joins: SQL leaves the order of the rows to the engine where
+    // no key decides it, so the two answers are compared as
+    // multisets. Every pair of an inner join is a row (Holst has
+    // three tracks); an outer join keeps the rows with no pair.
+    let unordered = [
+        "SELECT a.name, t.title FROM artists a JOIN tracks t ON t.artist_id = a.id",
+        "SELECT a.name, t.title FROM artists a INNER JOIN tracks t ON t.artist_id = a.id WHERE t.secs > 400",
+        "SELECT a.name, t.title FROM artists a LEFT JOIN tracks t ON t.artist_id = a.id",
+        "SELECT a.name, t.title FROM artists a LEFT OUTER JOIN tracks t ON t.artist_id = a.id WHERE t.secs IS NULL",
+        "SELECT a.name, t.title FROM artists a LEFT JOIN tracks t ON t.artist_id = a.id WHERE t.secs > 100",
+        "SELECT a.name, t.title FROM artists a LEFT JOIN tracks t ON t.artist_id = a.id AND t.secs > 450",
+        "SELECT t.title, a.name FROM artists a RIGHT JOIN tracks t ON t.artist_id = a.id",
+        "SELECT a.name, COUNT(*) AS n FROM artists a JOIN tracks t ON t.artist_id = a.id GROUP BY a.name",
+        "SELECT a.name, COUNT(t.id) AS n FROM artists a LEFT JOIN tracks t ON t.artist_id = a.id GROUP BY a.name",
+        "SELECT COUNT(*) FROM artists a CROSS JOIN tracks t",
+        "SELECT COUNT(*) FROM artists a JOIN tracks t ON t.artist_id > a.id",
+        "SELECT COUNT(*) FROM artists a JOIN tracks t ON t.artist_id = a.id OR t.secs < 100",
+    ];
+    let all = cases
+        .iter()
+        .map(|c| (*c, true))
+        .chain(unordered.iter().map(|c| (*c, false)));
+    for (sql, ordered) in all {
         // SQL side.
         let mut stmt = conn.prepare(sql).unwrap();
         let ncols = stmt.column_count();
-        let sql_rows: Vec<String> = stmt
+        let mut sql_rows: Vec<String> = stmt
             .query_map([], |r| {
                 Ok((0..ncols)
                     .map(|i| {
@@ -175,11 +327,13 @@ fn differential_against_sqlite() {
         // Quarb side: single-column rec streams as {"col": v} — use
         // the projected value form for comparison.
         let quarb = translate(sql).unwrap().query;
-        let got = match quarb::run(&quarb, &adapter).unwrap() {
+        let ran = quarb::run(&quarb, &adapter)
+            .unwrap_or_else(|e| panic!("{sql}\n  translated: {quarb}\n  {e}"));
+        let got = match ran {
             quarb::QueryResult::Values(vs) => vs,
             quarb::QueryResult::Nodes(_) => panic!("expected values for {sql}"),
         };
-        let quarb_rows: Vec<String> = got
+        let mut quarb_rows: Vec<String> = got
             .iter()
             .map(|v| match v {
                 quarb::Value::Record(fields) => fields
@@ -190,13 +344,148 @@ fn differential_against_sqlite() {
                 other => other.to_string(),
             })
             .collect();
-        assert_eq!(quarb_rows, sql_rows, "differential mismatch for: {sql}");
+        if !ordered {
+            sql_rows.sort();
+            quarb_rows.sort();
+        }
+        assert_eq!(
+            quarb_rows, sql_rows,
+            "differential mismatch for: {sql}\n  translated: {quarb}"
+        );
     }
 }
 
 // ---------------------------------------------------------------
 // The exporter: Quarb → SQL, and its own differential rig.
 // ---------------------------------------------------------------
+
+/// The plan's answer beside the scan's over NULLs, for the
+/// comparisons where SQL's three-valued logic and Quarb's two-valued
+/// one part: `!=`, a negation, and an equality of two columns (two
+/// NULLs are equal in Quarb). The first two were refused; the third
+/// was pushed as the bare `a = b` and lost the row where both are
+/// NULL (to 0.68.0).
+#[test]
+fn the_plan_follows_the_scan_over_nulls() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, a INTEGER, b INTEGER, s TEXT);
+         INSERT INTO t VALUES (1,1,1,'x'), (2,1,2,'y'), (3,NULL,NULL,'z'), (4,NULL,2,NULL),
+           (5,3,NULL,'x');",
+    )
+    .unwrap();
+    let adapter = quarb_sqlite::SqliteAdapter::load(&conn).unwrap();
+    for q in [
+        "/t/*[::a = ::b]::id",
+        "/t/*[::a != ::b]::id",
+        "/t/*[::a != 1]::id",
+        "/t/*[::s != \"x\"]::id",
+        "/t/*[!(::a = 1)]::id",
+        "/t/*[!(::a > 1)]::id",
+        "/t/*[!(::a = ::b)]::id",
+        "/t/*[!(::a != ::b)]::id",
+        "/t/*[!(::a = 1 && ::b = 1)]::id",
+        "/t/*[!(::a = 1 || ::b = 2)]::id",
+        "/t/*[!(!(::a = 1))]::id",
+        "/t/*[::a != 1 && ::b != 2]::id",
+        "/t/*[::a < ::b]::id",
+        "/t/*[::a <= ::b]::id",
+        "/t/*[!(::a < ::b)] @| count",
+        // a substring test, by bytes and by case: SQLite's instr
+        "/t/*[::s *= \"x\"]::id",
+        "/t/*[::s *= \"X\"] @| count",
+        "/t/*[!(::s *= \"x\")]::id",
+        "/t/*[::s *= \"\"]::id",
+        // a count of the distinct values: a null is one of them
+        "/t/* | ::a @| unique @| count",
+        "/t/*::b @| unique @| count",
+        "/t/*[::a = 1] | ::b @| unique @| count",
+        "/t/*[::id > 99] | ::a @| unique @| count",
+    ] {
+        let scan: Vec<String> = match quarb::run(q, &adapter).unwrap() {
+            quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect(),
+            quarb::QueryResult::Nodes(_) => panic!("values expected for {q}"),
+        };
+        let plan = quarb_sql::pushdown_explained(q, Some(quarb_sql::Dialect::Sqlite))
+            .unwrap_or_else(|e| panic!("{q} is not pushed: {e}"));
+        let sql = match &plan.order_table {
+            Some(t) => format!("{} ORDER BY {t}.id", plan.sql),
+            None => plan.sql.clone(),
+        };
+        let mut stmt = conn.prepare(&sql).unwrap();
+        let pushed: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, i64>(0).map(|v| v.to_string()))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(pushed, scan, "{q}\n  plan: {sql}");
+    }
+}
+
+/// A pushed reducer answers as the scan does under its options. The
+/// plan read the reducer's name and none of its arguments:
+/// `count(--values)` and `count(--nulls)` over a column with a NULL
+/// were both answered as COUNT(*), six where the scan counts five
+/// and one (in every release that pushed a count, to 0.68.0).
+#[test]
+fn a_pushed_reducer_reads_its_options() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE tracks (id INTEGER PRIMARY KEY, title TEXT, price REAL,
+                              artist_id INTEGER);
+         INSERT INTO tracks VALUES
+           (1,'Mars',1.29,1), (2,'Venus',0.99,1), (3,'Jupiter',1.29,1),
+           (4,'Bourree',0.99,2), (5,'Gymnopedie',0.99,3), (6,'Sketch',0.5,NULL);",
+    )
+    .unwrap();
+    let adapter = quarb_sqlite::SqliteAdapter::load(&conn).unwrap();
+    let scan = |q: &str| match quarb::run(q, &adapter).unwrap() {
+        quarb::QueryResult::Values(vs) => vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+        quarb::QueryResult::Nodes(_) => panic!("values expected for {q}"),
+    };
+    let pushed = |q: &str| -> Option<Vec<String>> {
+        let plan = quarb_sql::pushdown(q, Some(quarb_sql::Dialect::Sqlite))?;
+        let mut stmt = conn.prepare(&plan.sql).unwrap();
+        let n = stmt.column_count();
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((0..n)
+                    .map(|i| match r.get_ref(i).unwrap() {
+                        rusqlite::types::ValueRef::Integer(v) => v.to_string(),
+                        rusqlite::types::ValueRef::Real(v) => v.to_string(),
+                        rusqlite::types::ValueRef::Null => "null".to_string(),
+                        other => format!("{other:?}"),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("|"))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        Some(rows)
+    };
+    // the bare count is every row, a column projected or not
+    assert_eq!(scan("/tracks/* | ::artist_id @| count"), ["6"]);
+    assert_eq!(pushed("/tracks/* | ::artist_id @| count").unwrap(), ["6"]);
+    // the values other than null: the plan says COUNT(col)
+    assert_eq!(scan("/tracks/* | ::artist_id @| count(--values)"), ["5"]);
+    assert_eq!(
+        pushed("/tracks/* | ::artist_id @| count(--values)").unwrap(),
+        ["5"]
+    );
+    assert_eq!(scan("/tracks/*::artist_id @| count(--values)"), ["5"]);
+    assert_eq!(
+        pushed("/tracks/*::artist_id @| count(--values)").unwrap(),
+        ["5"]
+    );
+    // a row node is no value: that count is the engine's to say
+    assert_eq!(scan("/tracks/* @| count(--values)"), ["0"]);
+    assert_eq!(pushed("/tracks/* @| count(--values)"), None);
+    // the nulls, and any other argument, are the engine's to count
+    assert_eq!(scan("/tracks/* | ::artist_id @| count(--nulls)"), ["1"]);
+    assert_eq!(pushed("/tracks/* | ::artist_id @| count(--nulls)"), None);
+    assert_eq!(pushed("/tracks/* | ::price @| sum(--of=::artist_id)"), None);
+}
 
 use quarb_sql::export;
 
@@ -211,6 +500,21 @@ fn export_translations() {
         "SELECT title, secs FROM tracks WHERE price < 1 ORDER BY title"
     );
     assert_eq!(x("/tracks/* @| count"), "SELECT COUNT(*) FROM tracks");
+    // a reducer's own arguments decide what is reduced: the bare
+    // count is every row, a projected column or none; `--values`
+    // counts the values other than null, which is COUNT(col)
+    assert_eq!(
+        x("/tracks/* | ::artist_id @| count"),
+        "SELECT COUNT(*) FROM tracks"
+    );
+    assert_eq!(
+        x("/tracks/* | ::artist_id @| count(--values)"),
+        "SELECT COUNT(artist_id) FROM tracks"
+    );
+    assert_eq!(
+        x("/tracks/* | .price(::price) | ::artist_id @|{.price} count(--values) | .n | %."),
+        "SELECT price, COUNT(artist_id) AS n FROM tracks GROUP BY price"
+    );
     // the fold's answer unrecorded: one value per group
     assert_eq!(
         x("/tracks/* | .price(::price) @|{.price} count"),
@@ -248,6 +552,14 @@ fn export_refusals() {
     assert!(err("//tracks/*::title").contains("/table/*"));
     // SUM(*) is not SQL: bare-row aggregates beyond count refuse.
     assert!(err("/t/* @| sum").contains("project a column"));
+    // a reducer's arguments change what is reduced: all but
+    // `count(--values)` stay with the engine
+    assert!(err("/t/* | ::c @| count(--nulls)").contains("the '--nulls' option of 'count'"));
+    assert!(err("/t/* | ::c @| sum(--of=::d)").contains("option of 'sum'"));
+    assert!(
+        err("/t/* | .k(::k) | ::c @|{.k} count(--nulls) | .n | %.")
+            .contains("the '--nulls' option of 'count'")
+    );
     // The fixed SELECT shape orders before LIMIT and dedups before
     // LIMIT; command orders it cannot render refuse rather than
     // silently reordering.
@@ -469,11 +781,89 @@ fn pushdown_gate() {
     // identical.
     assert!(pushdown("/tracks/*[::title *= \"o\"] | ::title").is_none()); // LIKE folding
     assert!(pushdown("/tracks/*[::album_id] | ::title").is_none()); // truthiness
-    assert!(pushdown("/t/* | ::p | .k(::k) @|{.k} sum | .s | %.").is_none()); // group order
     assert!(pushdown("/t/* | ::p @| unique").is_none()); // distinct order
-    assert!(pushdown("/t/* @| sort_by(::a) | ::a").is_none()); // collation
-    assert!(pushdown("/t/* @| [..3]").is_none()); // unordered LIMIT
     assert!(pushdown("/t/* | ::p @| window(3) | mean").is_none()); // quarb-side
+    // a sort by an expression, by two keys or under a collation is
+    // the engine's; so is a fold over a join, and a reducer over the
+    // rows a selection kept
+    assert!(pushdown("/t/* @| sort_by(::a + 1) | ::a").is_none());
+    assert!(pushdown("/t/* @| sort_by(::a; ::b) | ::a").is_none());
+    assert!(pushdown("/t/* @| sort_by(::a; --locale=de) | ::a").is_none());
+    assert!(pushdown("/t/* @| [..3] | ::a @| sum").is_none());
+    assert!(pushdown("/t/* @| [..3] @| sort_by(::a) | ::a").is_none());
+    assert!(pushdown("/t/* @| [2..3] | ::a").is_none());
+    assert!(pushdown("/t/* @| top(2; ::a; --locale=de) | ::a").is_none());
+    assert!(pushdown("/t/* @| sort_by(::a) @| top(2; ::b) | ::a").is_none());
+    // a reducer over a cut would count the table's rows
+    assert!(pushdown("/t/* @| top(2; ::a) @| count").is_none());
+    // row nodes, cut or sorted: the scan answers the nodes, a plan
+    // their rows
+    assert!(pushdown("/t/* @| [..3]").is_none());
+    assert!(pushdown("/t/* @| sort_by(::a)").is_none());
+    // a record the query built is told as one, of one field too
+    assert!(pushdown("/t/* | %(::a)").unwrap().record);
+    assert!(!pushdown("/t/* | ::a").unwrap().record);
+}
+
+/// The order a plan owes beyond the FROM table's key is the driver's
+/// to write, and the plan says what it is: a sort by one numeric
+/// column, a reverse, the first rows, the groups of a fold in the
+/// order they first appear. Each needs the column numeric, which
+/// the catalog confirms (`keyed_by`).
+#[test]
+fn a_plan_says_the_order_it_owes() {
+    let pushdown = |q: &str| quarb_sql::pushdown(q, None).unwrap_or_else(|| panic!("{q}"));
+    // a sort: the null key last, the ties to the key after it
+    let p = pushdown("/t/* @| sort_by(::a) | ::a");
+    assert_eq!(p.sql, "SELECT a FROM t");
+    assert_eq!(p.order_first.as_deref(), Some("(a IS NULL), a"));
+    assert_eq!(p.order_table.as_deref(), Some("t"));
+    assert!(!p.order_desc && p.limit.is_none());
+    assert_eq!(
+        p.keyed_by,
+        Some((quarb_sql::Refusal::Sort, "a".to_string()))
+    );
+    assert_eq!(p.column_types.numeric, ["a"]);
+    // descending values keep a null last; a reverse turns every term
+    let p = pushdown("/t/* @| sort_by(::a; --desc) @| [..5] | %(::a; ::b)");
+    assert_eq!(p.sql, "SELECT a, b FROM t");
+    assert_eq!(p.order_first.as_deref(), Some("(a IS NULL), a DESC"));
+    assert_eq!((p.order_desc, p.limit), (false, Some(5)));
+    let p = pushdown("/t/* @| sort_by(::a) @| reverse | ::a");
+    assert_eq!(p.order_first.as_deref(), Some("(a IS NULL) DESC, a DESC"));
+    assert!(p.order_desc);
+    // the first rows, and the last ones reversed: the key alone
+    let p = pushdown("/t/*[::a > 1] @| [..3] | ::b");
+    assert_eq!(p.sql, "SELECT b FROM t WHERE a > 1");
+    assert_eq!((p.order_first.as_deref(), p.limit), (None, Some(3)));
+    assert!(p.keyed_by.is_none());
+    let p = pushdown("/t/* @| reverse @| [..2] | ::a");
+    assert_eq!((p.order_desc, p.limit), (true, Some(2)));
+    // a fold by a numeric column: the groups as they first appear
+    let p = pushdown("/t/* | ::p | .k(::k) @|{.k} sum | .s | %.");
+    assert_eq!(p.sql, "SELECT k, SUM(p) AS s FROM t GROUP BY k");
+    assert!(p.order_groups);
+    assert_eq!(
+        p.keyed_by,
+        Some((quarb_sql::Refusal::Fold, "k".to_string()))
+    );
+    assert_eq!(p.order_table.as_deref(), Some("t"));
+    assert_eq!(p.column_types.numeric, ["k", "p"]);
+    // top and bottom: a sort and a cut over the keys that are not null
+    let p = pushdown("/t/* @| top(3; ::a) | ::b");
+    assert_eq!(p.sql, "SELECT b FROM t WHERE a IS NOT NULL");
+    assert_eq!(p.order_first.as_deref(), Some("(a IS NULL), a DESC"));
+    assert_eq!(p.limit, Some(3));
+    let p = pushdown("/t/*[::b > 1] @| bottom(2; ::a) | ::b");
+    assert_eq!(p.sql, "SELECT b FROM t WHERE b > 1 AND a IS NOT NULL");
+    assert_eq!(p.order_first.as_deref(), Some("(a IS NULL), a"));
+    // a count of the distinct values asks for no order
+    let p = pushdown("/t/* | ::a @| unique @| count");
+    assert!(p.order_table.is_none());
+    assert_eq!(
+        p.keyed_by,
+        Some((quarb_sql::Refusal::Unique, "a".to_string()))
+    );
 }
 
 #[test]
@@ -535,6 +925,46 @@ fn pushdown_join_soundness_metadata() {
 /// An every-witness join (`<=>*`, ruling 2026-11-11) is the JOIN
 /// as SQL means it: no uniqueness to verify, and the joined table's
 /// order owed after the driver's.
+/// A test of the driver's key for null inside a join condition never
+/// holds in the scan (spec: Null keys), so it is not pushed as IS
+/// [NOT] NULL, which would answer.
+#[test]
+fn a_null_test_of_the_drivers_key_in_a_join_condition_is_not_pushed() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE artists (id INTEGER PRIMARY KEY, name TEXT);
+         CREATE TABLE tracks (id INTEGER PRIMARY KEY, title TEXT, artist_id INTEGER);
+         INSERT INTO artists VALUES (1,'Holst'), (2,'Bartok');
+         INSERT INTO tracks VALUES (1,'Mars',1), (2,'Venus',1), (3,'Bourree',2), (4,'Sketch',NULL);",
+    )
+    .unwrap();
+    let adapter = quarb_sqlite::SqliteAdapter::load(&conn).unwrap();
+    let count = |q: &str| match quarb::run(q, &adapter).unwrap() {
+        quarb::QueryResult::Values(vs) => vs[0].to_string(),
+        quarb::QueryResult::Nodes(ns) => ns.len().to_string(),
+    };
+    let on_driver = "/tracks/* <=>* /artists/*[$$0::artist_id != null && ::id = $$0::artist_id] \
+                     @| count";
+    assert_eq!(count(on_driver), "0");
+    let Err(refused) = quarb_sql::pushdown_explained(on_driver, Some(quarb_sql::Dialect::Sqlite))
+    else {
+        panic!("the plan took a null test of the driver's key");
+    };
+    let (word, reason) = refused.not_pushed().unwrap();
+    assert_eq!(word, quarb_sql::Refusal::Join);
+    assert!(
+        reason.starts_with("a test of the driver's key for null"),
+        "{reason}"
+    );
+    // on the candidate the test is a predicate like any other, and
+    // on the driver's own step it stands before the join
+    let on_candidate = "/tracks/* <=>* /artists/*[::id != null && ::id = $$0::artist_id] @| count";
+    assert_eq!(count(on_candidate), "3");
+    assert!(quarb_sql::pushdown(on_candidate, Some(quarb_sql::Dialect::Sqlite)).is_some());
+    let before = "/tracks/*[::artist_id != null] <=>* /artists/*[::id = $$0::artist_id] @| count";
+    assert_eq!(count(before), "3");
+}
+
 #[test]
 fn pushdown_of_the_every_witness_join() {
     let pushdown = |q: &str| quarb_sql::pushdown(q, None);
@@ -764,4 +1194,60 @@ fn pushdown_reads_the_marks_of_a_join() {
             .sql,
         "SELECT title AS x, secs AS y FROM tracks"
     );
+}
+
+/// A whole plan answers values. A query that ends on row nodes is
+/// the scan's (ruling 2026-11-18: locators), its conditions the
+/// partial plan's, and the refusal carries no code.
+#[test]
+fn a_whole_plan_never_answers_row_nodes() {
+    for q in ["/t/*", "/t/*[::a > 1]", "/t/* <=>* /u/*[::t_id = $$0::id]"] {
+        let Err(refused) = quarb_sql::pushdown_explained(q, Some(quarb_sql::Dialect::Sqlite))
+        else {
+            panic!("{q} was planned whole");
+        };
+        let (word, _) = refused.not_pushed().expect("a refusal with a word");
+        assert_eq!(word.code(), None, "{q}");
+    }
+    let partial = quarb_sql::partial_pushdown("/t/*[::a > 1]", Some(quarb_sql::Dialect::Sqlite))
+        .expect("the condition goes ahead");
+    assert_eq!(partial.where_sql, "a > 1");
+    // with a column or a record after it, the plan is whole
+    for q in [
+        "/t/*[::a > 1]::b",
+        "/t/*[::a > 1] | %(::b)",
+        "/t/* @| count",
+    ] {
+        assert!(
+            quarb_sql::pushdown(q, Some(quarb_sql::Dialect::Sqlite)).is_some(),
+            "{q}"
+        );
+    }
+}
+
+/// `| %` over the rows of one table is the SELECT * plan: the record
+/// of each row's properties, its NULL cells left out by the printer
+/// (`properties`).
+#[test]
+fn the_whole_row_record_is_the_select_star_plan() {
+    let pushdown = |q: &str| quarb_sql::pushdown(q, Some(quarb_sql::Dialect::Sqlite));
+    let p = pushdown("/t/*[::a > 1] | %").expect("pushed");
+    assert_eq!(p.sql, "SELECT * FROM t WHERE a > 1");
+    assert!(p.record && p.properties);
+    let p = pushdown("/t/* @| sort_by(::a) @| [..3] | %").expect("pushed");
+    assert_eq!(p.sql, "SELECT * FROM t");
+    assert_eq!(p.limit, Some(3));
+    assert!(p.properties);
+    // a record the query built keeps its nulls
+    let p = pushdown("/t/* | %(::a; ::b)").expect("pushed");
+    assert!(p.record && !p.properties);
+    // not the rows themselves, not last, over a join: the engine's
+    for q in [
+        "/t/*::a | %",
+        "/t/* | % @| count",
+        "/t/* | % | ::a",
+        "/t/* <=>* /u/*[::t_id = $$0::id] | %",
+    ] {
+        assert!(pushdown(q).is_none(), "{q}");
+    }
 }

@@ -449,14 +449,33 @@ concerns\,---\,the core engine, one crate per adapter, and the CLI:
   sentinel value a real row could bear), rows
   keep their identity when the table is later read whole, and
   untouched tables are never read (\texttt{:::loaded},
-  \texttt{:::n-loaded} report the state). Engine
+  \texttt{:::n-loaded} report the state). A database mount's own
+  options, \texttt{graft=} and \texttt{crosslinks=}, are written
+  after \texttt{?} on a file and in the query string of a database
+  URL (ruling 2026-11-18): the opener takes them out by name
+  (\texttt{quarb\_open::split\_database\_url}), the driver receives
+  the rest as written, and every relational adapter holds the
+  named references (\texttt{hold\_crosslinks}). Engine
   adapters are thin catalog drivers over it. Depends on
   \texttt{quarb}. The pushdown scanning round (2026-11-06): a child step keeping
   a prefix reads \texttt{LIMIT k} in the whole read's order
   through the driver's prefix fetcher (declined where no order
   backs the cut), and \texttt{@| count} on a table not read is
   the driver's \texttt{count(*)}; a model or a multi-source
-  mount forwards both to the source under its own node. \\
+  mount forwards both to the source under its own node. A step
+  that names what it follows reads that reference alone: the
+  engine asks for a node's links under the step's one label
+  (\texttt{AstAdapter::link\_rows\_by},
+  \texttt{backlink\_rows\_by}; \texttt{graph::memo} keys its last
+  list by the label too) and hints a sweep with the label or with
+  a resolution's property (\texttt{prefetch\_links\_by},
+  \texttt{LinkBy}), and the model follows the one key
+  (\texttt{key\_named}): \texttt{<-manager} reads the referrers
+  by \texttt{manager\_id} and no other table with a key into the
+  node's. The defaults are the unnarrowed methods, the engine
+  selecting by the label either way; the forwarding macro does not
+  pass the narrowed methods through a wrapper that defines its own
+  links. \\
 \texttt{quarb-sqlite} & The SQLite catalog driver: PRAGMA
   introspection, storage-class type mapping. Depends on
   \texttt{quarb-relational} and \texttt{rusqlite}. \\
@@ -1139,7 +1158,48 @@ hold this), so the rungs trade only latency and transfer:
     GROUP BY/DISTINCT order, collations, unordered LIMIT) refuses.
     Row order is part of the contract — the plan names the result
     table, and each driver appends \texttt{ORDER BY} its key from
-    the catalog. Column types are part of it too: Quarb compares
+    the catalog. An every-witness join (\texttt{<=>*},
+    \texttt{<=>*?}) owes a second order, the joined table's within
+    each driver's rows (\texttt{Pushdown::order\_then}): the
+    SQLite, DuckDB, PostgreSQL and MySQL drivers append both keys
+    and decline where a table has no primary key (SQLite orders by
+    \texttt{rowid} there); the other drivers do not keep it, and
+    \texttt{qua} scans (\texttt{JOIN\_NOT\_PUSHED}). The same
+    four compose every other order a plan owes, through
+    \texttt{quarb\_relational::order\_clause}: the plan's own
+    sort (\texttt{order\_first}: \texttt{(n IS NULL), n} for
+    \texttt{sort\_by(::n)}, a null key last and the ties left to
+    the keys, as the engine's stable sort leaves them), the keys
+    turned for a reverse (\texttt{order\_desc}), the least key of
+    each group of a fold (\texttt{order\_groups}, the groups as
+    they first appear), and the \texttt{LIMIT} of a head slice
+    after them. \texttt{top(k; ::n)} and \texttt{bottom} are that
+    sort and that cut over the rows whose key is not null
+    (\texttt{WHERE n IS NOT NULL}), as the commands leave a null
+    key out. A sort, a fold and a distinct count go by a numeric
+    column only (\texttt{Pushdown::keyed\_by}): to the engine two
+    texts that read as one number are one value, to \texttt{GROUP
+    BY}, \texttt{DISTINCT} and a collation two, and the database
+    would run the plan over a text column all the same; so those
+    are pushed where the catalog is asked and scanned where it is
+    not, and a key the catalog says is not numeric is told under
+    the construct's own word. SQLite and MySQL are asked for every
+    column a plan compares; PostgreSQL and DuckDB for the key
+    alone (\texttt{column\_catalog} over
+    \texttt{information\_schema.columns}), their comparisons being
+    held by the engines' own types. A whole plan answers
+    values, never row nodes: a query that ends on rows is answered
+    by their locators, which are the scan's to write (ruling
+    2026-11-18; it was pushed as \texttt{SELECT *} and printed
+    records), so the planner declines it under no code
+    (\texttt{Refusal::Nodes}) and its conditions go ahead through
+    the partial plan. The rows as records are
+    \texttt{/t/*[\ldots] | \%}, the record of a node's properties:
+    that is the \texttt{SELECT *} plan, last in a pipeline over
+    the rows of one table. \texttt{Pushdown::record} tells the
+    printer that a one-column row is a record of one field. Column
+    types
+    are part of it too: Quarb compares
     by value (numeric-looking text meets a number as a number, a
     number and other text never meet), SQL by the column's type,
     and SQLite and MySQL coerce a mixed comparison by rules of
@@ -1177,7 +1237,19 @@ hold this), so the rungs trade only latency and transfer:
     \texttt{json\_type IS NOT NULL}) — extras are re-checked
     by the re-run, and a server-rejected prefilter surfaces
     through an eager prefetch and falls back to the scan
-    rather than answering empty. Full JSON string-equality
+    rather than answering empty. A regex match
+    (\texttt{== (/\ldots/)}) is narrowed the same way: the
+    literals no match can do without
+    (\texttt{required\_literals}, from the regex crate's own
+    parse: a literal of a concatenation, of a group, of a
+    repetition that runs at least once; nothing from an
+    alternation, a class, an optional part or a letter under
+    \texttt{(?i)}) become substring tests on a text column,
+    \texttt{instr} on SQLite and \texttt{LIKE} on PostgreSQL,
+    and the engine runs the regex over what is fetched. In the
+    ladder a conjunction keeps whichever side narrows, a
+    disjunction is narrowed only when both sides are, a negation
+    never. Full JSON string-equality
     pushdown carries the dialect's validity guard
     (\texttt{json\_valid} and kin) and refuses
     numeric-looking literals (Quarb's \texttt{value\_eq}
@@ -3067,6 +3139,41 @@ nothing about encodings.
   \texttt{QuaiSession::run} and \texttt{run\_cell}, the kernel's
   cell), the browser's hosts having no shell and no colon commands.
   A manual line is no query: it takes no label.
+\item \textbf{The diagnostic codes} (\texttt{diagnostic}) are one
+  list, \texttt{diagnostic::CODES}, each code a constant of its own
+  name (the \texttt{codes!} macro), and a third table of the
+  language repository, \texttt{diagnostics.tsv}, vendored beside
+  the manual's two: a row for a code and severity with its family,
+  the class of its remedy, the lead of its line's tail, and when it
+  is raised and what to do, in both languages. A unit test holds
+  the list and the rows equal both ways, \texttt{Diagnostic::new}
+  asserts in a debug build that a code is raised under a severity
+  it has a row for, and a test of \texttt{qua} scans the sources
+  for a code written as a literal: a new code is a constant and a
+  row, or the gate fails. \texttt{Diagnostic::line} ends with the
+  tail of a row that has a lead (\texttt{Narrow first: qua man
+  SORT\_NOT\_PUSHED}); the door is the host's
+  (\texttt{set\_manual\_door}: \texttt{qua man} from the command
+  line, \texttt{man} where the manual is a line of the session),
+  and the structured hosts carry it as \texttt{tail}.
+  \texttt{man CODE} prints the row and \texttt{man diagnostics
+  [WORD]} lists the rows, of one family, severity or remedy. The
+  planner's refusals are typed where they are made:
+  \texttt{quarb\_sql::Refusal} names the word
+  (\texttt{SqlError::NotPushed}), the web store's plan carries its
+  code (\texttt{Plan::code}), and \texttt{qua} tells each under
+  \texttt{WORD\_NOT\_PUSHED}; a partial plan with nothing to send
+  ahead (\texttt{Refusal::Nothing}), one refused for the whole
+  plan's own reason, and a query that does not parse tell nothing.
+  A translator's refusal carries its code from the place it is
+  made (\texttt{NotTranslated} in the error type of each bridge,
+  \texttt{Lenient} for a construct the lenient translator takes),
+  and \texttt{diagnostic::translator\_refusal} makes the one line
+  \texttt{qua} and the three \texttt{*2quarb} tools end with:
+  \texttt{error SORT\_NOT\_TRANSLATED (jq): …}, the tail naming
+  \texttt{--lenient} only where the flag would translate what was
+  refused and is not already on. A statement that is no SQL, jq or
+  XPath at all stays a plain error.
 \item \textbf{Encoding} (\texttt{source::encode}): \texttt{@|
   encoding(LABEL)} is the output boundary and stands last. The
   engine has no byte value, so the tool takes the command off the

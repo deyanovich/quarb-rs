@@ -44,8 +44,15 @@ fn main() -> ExitCode {
             println!("{}", tr.query);
             ExitCode::SUCCESS
         }
+        // a worded refusal is the line `qua` prints for it
         Err(e) => {
-            eprintln!("error: {e}");
+            match e.not_translated() {
+                Some((code, reason, takes)) => eprintln!(
+                    "{}",
+                    quarb::diagnostic::translator_refusal("xpath", code, reason, takes, lenient)
+                ),
+                None => eprintln!("error: {e}"),
+            }
             ExitCode::FAILURE
         }
     }

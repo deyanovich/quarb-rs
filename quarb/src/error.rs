@@ -98,8 +98,8 @@ impl QuarbError {
             Some(c) => c,
             None => match self.kind {
                 Kind::Lex | Kind::Parse => crate::diagnostic::SYNTAX,
-                Kind::Unsupported => "UNSUPPORTED",
-                Kind::Expansion => "EXPANSION",
+                Kind::Unsupported => crate::diagnostic::UNSUPPORTED,
+                Kind::Expansion => crate::diagnostic::EXPANSION,
                 Kind::Refused => crate::diagnostic::REFUSED,
             },
         }

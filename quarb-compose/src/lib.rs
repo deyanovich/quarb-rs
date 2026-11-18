@@ -2049,6 +2049,33 @@ impl<A: AstAdapter> AstAdapter for ComposeAdapter<A> {
         }
     }
 
+    // A step that names what it follows reads that reference alone
+    // in the outer source; a grafted document's links are in memory.
+    fn prefetch_links_by(&self, nodes: &[NodeId], dir: quarb::LinkDir, by: quarb::LinkBy<'_>) {
+        let outer: Vec<NodeId> = nodes
+            .iter()
+            .copied()
+            .filter(|n| self.split(*n).is_none())
+            .collect();
+        if !outer.is_empty() {
+            self.outer.prefetch_links_by(&outer, dir, by);
+        }
+    }
+
+    fn link_rows_by(&self, node: NodeId, label: &str) -> Vec<(String, NodeId, Option<NodeId>)> {
+        match self.split(node) {
+            Some(_) => self.link_rows(node),
+            None => self.outer.link_rows_by(node, label),
+        }
+    }
+
+    fn backlink_rows_by(&self, node: NodeId, label: &str) -> Vec<(String, NodeId, Option<NodeId>)> {
+        match self.split(node) {
+            Some(_) => self.backlink_rows(node),
+            None => self.outer.backlink_rows_by(node, label),
+        }
+    }
+
     fn links(&self, node: NodeId) -> Vec<(String, NodeId)> {
         match self.split(node) {
             Some((g, inner)) => {

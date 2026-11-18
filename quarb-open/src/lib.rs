@@ -1435,6 +1435,93 @@ pub fn refuse_untaken_graft(p: &Path) -> anyhow::Error {
     )
 }
 
+/// The options a database mount takes of the engine: the reading
+/// of its grafts and the references to hold in memory.
+const DATABASE_MOUNT_OPTIONS: [&str; 2] = ["graft", "crosslinks"];
+
+/// Whether `s` is a database reached by a URL, whose query string
+/// belongs to the driver. (PostgreSQL's keyword form, `host=…
+/// dbname=…`, has no query string and takes the options through
+/// the options-alone mount statement.)
+pub fn is_database_url(s: &str) -> bool {
+    [
+        "postgres://",
+        "postgresql://",
+        "mysql://",
+        "mssql://",
+        "oracle://",
+        "bigquery://",
+        "athena:",
+    ]
+    .iter()
+    .any(|scheme| s.starts_with(scheme))
+}
+
+/// A database URL without the mount's own options, and those
+/// options as written: `postgres://h/shop?sslmode=require&
+/// crosslinks=order` is `postgres://h/shop?sslmode=require` and
+/// `[("crosslinks", "order")]` (ruling 2026-11-18: the options ride
+/// in the URL's query string; the engine takes out the names it
+/// knows and passes the rest to the driver). `None` for a target
+/// that is no database URL. A pair is the engine's by its key
+/// alone, so a driver's own parameter of another name is never
+/// touched, and a URL with none of the engine's is returned as it
+/// was written.
+pub fn split_database_url(s: &str) -> Option<(String, Vec<(&str, &str)>)> {
+    if !is_database_url(s) {
+        return None;
+    }
+    let Some((base, query)) = s.split_once('?') else {
+        return Some((s.to_string(), Vec::new()));
+    };
+    let mut options = Vec::new();
+    let mut kept = Vec::new();
+    for pair in query.split('&') {
+        match pair.split_once('=') {
+            Some((key, value)) if DATABASE_MOUNT_OPTIONS.contains(&key) => {
+                options.push((key, value))
+            }
+            _ => kept.push(pair),
+        }
+    }
+    if options.is_empty() {
+        return Some((s.to_string(), options));
+    }
+    let url = if kept.iter().all(|p| p.is_empty()) {
+        base.to_string()
+    } else {
+        format!("{base}?{}", kept.join("&"))
+    };
+    Some((url, options))
+}
+
+/// `graft=json2`: the mount's data grafts read under the property
+/// reading. `shown` names the source in a refusal (never a URL,
+/// which may carry a password).
+fn set_graft_option(label: &str, shown: &str, ctx: &SourceCtx) -> anyhow::Result<()> {
+    *ctx.graft.borrow_mut() =
+        quarb_compose::DataGraft::parse(label).map_err(|e| anyhow::anyhow!("{shown}: {e}"))?;
+    Ok(())
+}
+
+/// `crosslinks=order,customer`: the references of these labels are
+/// held in memory.
+fn set_crosslinks_option(labels: &str, shown: &str, ctx: &SourceCtx) -> anyhow::Result<()> {
+    let labels: Vec<String> = labels
+        .split(',')
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if labels.is_empty() {
+        anyhow::bail!(
+            "{shown}: crosslinks= names the references to hold in memory by their labels, as \
+             in ?crosslinks=order,customer"
+        );
+    }
+    *ctx.crosslinks.borrow_mut() = labels;
+    Ok(())
+}
+
 /// Take `?encoding=LABEL` off a plain target (one that is not a
 /// path as written): the one option a file or directory mount
 /// takes. The label is validated here, before anything is read.
@@ -1451,6 +1538,19 @@ pub fn take_encoding_option(p: &Path, ctx: &SourceCtx) -> anyhow::Result<PathBuf
     let Some(s) = p.to_str() else {
         return Ok(p.to_path_buf());
     };
+    // A database reached by a URL: its query string is the
+    // driver's, and the mount's own options ride in it (ruling
+    // 2026-11-18). The names the engine knows come out, the rest
+    // goes to the driver as written.
+    if let Some((url, options)) = split_database_url(s) {
+        for (key, value) in options {
+            match key {
+                "graft" => set_graft_option(value, "the database", ctx)?,
+                _ => set_crosslinks_option(value, "the database", ctx)?,
+            }
+        }
+        return Ok(PathBuf::from(url));
+    }
     // A scheme or reader prefix (`text:`, `imap://`, `lines:`)
     // parses its own options; a path as written is taken as is.
     let prefixed = s.split_once(':').is_some_and(|(pre, _)| {
@@ -1486,27 +1586,12 @@ pub fn take_encoding_option(p: &Path, ctx: &SourceCtx) -> anyhow::Result<PathBuf
             // `?graft=json2`: the mount's data grafts (a leaf, a
             // member, a cell declared JSON) read under the property
             // reading (ruling 2026-11-17)
-            Some(("graft", label)) => {
-                *ctx.graft.borrow_mut() = quarb_compose::DataGraft::parse(label)
-                    .map_err(|e| anyhow::anyhow!("{}: {e}", p.display()))?;
-            }
+            Some(("graft", label)) => set_graft_option(label, &p.display().to_string(), ctx)?,
             // `?crosslinks=order,customer`: the references of these
             // labels are held in memory (ruling 2026-11-17; a name
             // is the link's label, as in `<-order`)
             Some(("crosslinks", labels)) => {
-                let labels: Vec<String> = labels
-                    .split(',')
-                    .map(|l| l.trim().to_string())
-                    .filter(|l| !l.is_empty())
-                    .collect();
-                if labels.is_empty() {
-                    anyhow::bail!(
-                        "{}: crosslinks= names the references to hold in memory by their \
-                         labels, as in ?crosslinks=order,customer",
-                        p.display()
-                    );
-                }
-                *ctx.crosslinks.borrow_mut() = labels;
+                set_crosslinks_option(labels, &p.display().to_string(), ctx)?
             }
             Some(("delimiter", label)) => set_csv_option(|c| c.with_delimiter_label(label), ctx)?,
             Some(("decimal", label)) => set_csv_option(|c| c.with_decimal_label(label), ctx)?,
@@ -2378,8 +2463,8 @@ fn open_mount_as_written(p: &Path, cli: &OpenOpts) -> anyhow::Result<Mounted> {
     }
     if ctx.crosslinks_untaken() {
         anyhow::bail!(
-            "{}: crosslinks= holds the named references of a database in memory (a SQLite \
-             or DuckDB file); this source declares none",
+            "{}: crosslinks= holds the named references of a database in memory; this \
+             source declares none",
             p.display()
         );
     }
@@ -3102,10 +3187,13 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
     if let Some(s) = p.to_str()
         && s.starts_with("mssql://")
     {
+        let mut a = MssqlAdapter::connect(s).context("connecting to SQL Server")?;
+        a.hold_crosslinks(&ctx.crosslinks())
+            .map_err(|e| anyhow::anyhow!("the database: {e}"))?;
         return Ok(mounted_relational(
             cli.no_graft,
             ctx.data_graft(),
-            MssqlAdapter::connect(s).context("connecting to SQL Server")?,
+            a,
             |a, n| a.locator(n),
         ));
     }
@@ -3113,10 +3201,13 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
     if let Some(s) = p.to_str()
         && s.starts_with("oracle://")
     {
+        let mut a = OracleAdapter::connect(s).context("connecting to Oracle")?;
+        a.hold_crosslinks(&ctx.crosslinks())
+            .map_err(|e| anyhow::anyhow!("the database: {e}"))?;
         return Ok(mounted_relational(
             cli.no_graft,
             ctx.data_graft(),
-            OracleAdapter::connect(s).context("connecting to Oracle")?,
+            a,
             |a, n| a.locator(n),
         ));
     }
@@ -3287,10 +3378,13 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
     if let Some(s) = p.to_str()
         && s.starts_with("athena:")
     {
+        let mut a = AthenaAdapter::connect(s).context("connecting to Athena")?;
+        a.hold_crosslinks(&ctx.crosslinks())
+            .map_err(|e| anyhow::anyhow!("the database: {e}"))?;
         return Ok(mounted_relational(
             cli.no_graft,
             ctx.data_graft(),
-            AthenaAdapter::connect(s).context("connecting to Athena")?,
+            a,
             |a, n| a.locator(n),
         ));
     }
@@ -3349,10 +3443,13 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
     if let Some(s) = p.to_str()
         && s.starts_with("bigquery://")
     {
+        let mut a = BigqueryAdapter::connect(s).context("connecting to BigQuery")?;
+        a.hold_crosslinks(&ctx.crosslinks())
+            .map_err(|e| anyhow::anyhow!("the database: {e}"))?;
         return Ok(mounted_relational(
             cli.no_graft,
             ctx.data_graft(),
-            BigqueryAdapter::connect(s).context("connecting to BigQuery")?,
+            a,
             |a, n| a.locator(n),
         ));
     }
@@ -3360,20 +3457,26 @@ pub fn open_mount_inner(p: &Path, cli: &OpenOpts, ctx: &SourceCtx) -> anyhow::Re
     if let Some(s) = p.to_str()
         && s.starts_with("mysql://")
     {
+        let mut a = MysqlAdapter::connect(s).context("connecting to MySQL")?;
+        a.hold_crosslinks(&ctx.crosslinks())
+            .map_err(|e| anyhow::anyhow!("the database: {e}"))?;
         return Ok(mounted_relational(
             cli.no_graft,
             ctx.data_graft(),
-            MysqlAdapter::connect(s).context("connecting to MySQL")?,
+            a,
             |a, n| a.locator(n),
         ));
     }
     if let Some(s) = p.to_str()
         && is_pg_config(s)
     {
+        let mut a = PostgresAdapter::connect(s).context("connecting to PostgreSQL")?;
+        a.hold_crosslinks(&ctx.crosslinks())
+            .map_err(|e| anyhow::anyhow!("the database: {e}"))?;
         return Ok(mounted_relational(
             cli.no_graft,
             ctx.data_graft(),
-            PostgresAdapter::connect(s).context("connecting to PostgreSQL")?,
+            a,
             |a, n| a.locator(n),
         ));
     }

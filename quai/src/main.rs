@@ -349,6 +349,9 @@ fn local_executor(remount: &Remount) -> Result<Box<LocalExecutor>> {
 }
 
 fn main() -> Result<()> {
+    // The manual is a line of a session here: a diagnostic's tail
+    // names it so (`Narrow first: man SORT_NOT_PUSHED`).
+    quarb::diagnostic::set_manual_door("man");
     // Offline kaiv resolution by default, as in qua: registry
     // imports come from built-ins, local bases, or the warm cache
     // — never a surprise fetch. `KAIV_OFFLINE=0` opts back in.
@@ -872,18 +875,33 @@ fn apply_model_cell(
             };
             let old = ctx.specs[at].path.clone();
             let target = old.to_string_lossy();
-            // a file whose name holds a `?` is taken as it is
-            let bare = match target.rsplit_once('?') {
-                Some((path, _)) if !old.exists() => path.to_string(),
-                _ => target.to_string(),
-            };
-            ctx.specs[at].path = if options.is_empty() {
-                std::path::PathBuf::from(bare)
+            ctx.specs[at].path = if let Some((url, _)) = qua::split_database_url(&target) {
+                // A database URL's query string is the driver's:
+                // the statement replaces the mount's own options
+                // (`graft=`, `crosslinks=`) and leaves the driver's
+                // parameters where they stand (ruling 2026-11-18;
+                // it took the whole query string off, the driver's
+                // parameters with it).
+                let sep = if url.contains('?') { '&' } else { '?' };
+                std::path::PathBuf::from(if options.is_empty() {
+                    url
+                } else {
+                    format!("{url}{sep}{options}")
+                })
             } else {
-                std::path::PathBuf::from(resolve_option_files(
-                    &format!("{bare}?{options}"),
-                    base_dir,
-                ))
+                // a file whose name holds a `?` is taken as it is
+                let bare = match target.rsplit_once('?') {
+                    Some((path, _)) if !old.exists() => path.to_string(),
+                    _ => target.to_string(),
+                };
+                if options.is_empty() {
+                    std::path::PathBuf::from(bare)
+                } else {
+                    std::path::PathBuf::from(resolve_option_files(
+                        &format!("{bare}?{options}"),
+                        base_dir,
+                    ))
+                }
             };
             replaced.push((at, old));
             continue;
