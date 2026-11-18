@@ -754,26 +754,68 @@ pub(crate) fn apply_command_in<H: Host>(
         // pointer. On a value, the readings of the value.
         Command::Func(call)
             if matches!(call.name.as_str(), "#" | "%" | "@" | "fields")
-                && caps.iter().any(|c| c.topic.is_none()) =>
+                && (caps.iter().any(|c| c.topic.is_none())
+                    || (call.name == "%"
+                        && caps.iter().any(|c| match &c.topic {
+                            Some(Value::Node(_)) => true,
+                            Some(Value::List(items)) => {
+                                items.iter().any(|v| matches!(v, Value::Node(_)))
+                            }
+                            _ => false,
+                        }))) =>
         {
+            // the record of a node's properties: its names, each read
+            // as `::name` reads it
+            let record_of = |ext: &H::Ext| {
+                Value::Record(
+                    host.property_names_of(ext)
+                        .into_iter()
+                        .map(|n| {
+                            let v = host.property_of(ext, &n).unwrap_or(Value::Null);
+                            (n, v)
+                        })
+                        .collect(),
+                )
+            };
             caps.into_iter()
             .map(|mut c| {
                 let v = match c.topic.take() {
+                    // A node is a node however it arrives (ruling
+                    // 2026-11-18): a witness by number (`$$1 | %`)
+                    // and a field that holds a node answer the
+                    // record of its properties, as the thread's own
+                    // node does. (The value was read as rows with no
+                    // field names, and refused.)
+                    Some(Value::Node(n)) if call.name == "%" => {
+                        record_of(&host.ext_at(crate::NodeId(n.id)))
+                    }
+                    // A list of nodes is the column view of the
+                    // nodes' records (ruling 2026-11-18): one record
+                    // of lists, an entry per node in the list's
+                    // order, null where a node lacks the property.
+                    // A node among records is read as its record; a
+                    // member that is neither is refused as before.
+                    Some(Value::List(items))
+                        if call.name == "%"
+                            && items.iter().any(|v| matches!(v, Value::Node(_))) =>
+                    {
+                        let read: Vec<Value> = items
+                            .iter()
+                            .map(|v| match v {
+                                Value::Node(n) => record_of(&host.ext_at(crate::NodeId(n.id))),
+                                other => other.clone(),
+                            })
+                            .collect();
+                        stdlib::apply_scalar(call, Value::list(read), &|e| host.scale_of(e))
+                            .into_iter()
+                            .next()
+                            .unwrap_or(Value::Null)
+                    }
                     Some(t) => stdlib::apply_scalar(call, t, &|e| host.scale_of(e))
                         .into_iter()
                         .next()
                         .unwrap_or(Value::Null),
-                    // the record of the node's properties: its names,
-                    // each read as `::name` reads it
-                    None if call.name == "%" => Value::Record(
-                        host.property_names_of(&c.ext)
-                            .into_iter()
-                            .map(|n| {
-                                let v = host.property_of(&c.ext, &n).unwrap_or(Value::Null);
-                                (n, v)
-                            })
-                            .collect(),
-                    ),
+                    None if call.name == "%" => record_of(&c.ext),
                     // `| fields` on a node: its core field projections
                     None if call.name == "fields" => Value::list(
                         crate::graph::navigate::CORE_FIELDS

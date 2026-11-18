@@ -260,3 +260,73 @@ fn the_mark_is_kept_in_the_text_and_in_the_reflection() {
     assert!(text.contains(" <=>* /readings/*"), "{text}");
     assert!(text.contains(" <=>*? /owners/*"), "{text}");
 }
+
+/// The literal null inside a join's condition is the presence test,
+/// true or false as everywhere else (ruling 2026-11-18): a
+/// comparison with it is no key comparison. In 0.69 `$$0::born !=
+/// null` and `= null` were unknown there and admitted nothing. Two
+/// values compared stay three-valued: a null key meets no key.
+#[test]
+fn the_null_literal_in_a_join_condition_is_the_presence_test() {
+    let doc = quarb_json::JsonAdapter::parse(
+        r#"{"authors": [{"id": 1, "name": "Homer"},
+                        {"id": 2, "name": "Austen", "born": 1775},
+                        {"id": 3, "name": "Twain", "born": 1835}],
+            "books":   [{"title": "Iliad", "author": 1},
+                        {"title": "Odyssey", "author": 1},
+                        {"title": "Emma", "author": 2},
+                        {"title": "Persuasion", "author": 2},
+                        {"title": "Tom Sawyer", "author": 3},
+                        {"title": "Fragments"}]}"#,
+    )
+    .unwrap();
+    let values = |q: &str| -> Vec<String> {
+        let run = quarb::Run::ambient();
+        let out = quarb::Query::parse(q, &doc)
+            .unwrap_or_else(|e| panic!("{q}: {e}"))
+            .run(&doc, &run)
+            .unwrap_or_else(|e| panic!("{q}: {e}"));
+        match out.result {
+            QueryResult::Values(vs) => vs.iter().map(Value::to_quarb).collect(),
+            QueryResult::Nodes(ns) => ns.iter().map(|n| format!("{n:?}")).collect(),
+        }
+    };
+    let join =
+        |test: &str| format!("/authors/* <=>* /books/*[::author = $$0::id && {test}] | $$1::title");
+    // the driver has the value
+    assert_eq!(
+        values(&join("$$0::born != null")),
+        ["\"Emma\"", "\"Persuasion\"", "\"Tom Sawyer\""]
+    );
+    // the driver has none
+    assert_eq!(
+        values(&join("$$0::born = null")),
+        ["\"Iliad\"", "\"Odyssey\""]
+    );
+    // either side of the comparison
+    assert_eq!(values(&join("null != $$0::born")).len(), 3);
+    // the same answer as the test on the driver's own step
+    assert_eq!(
+        values(&join("$$0::born != null")),
+        values("/authors/*[::born != null] <=>* /books/*[::author = $$0::id] | $$1::title")
+    );
+    // the outer form keeps the driver the test fails for, its
+    // witness null
+    assert_eq!(
+        values(
+            "/authors/* <=>*? /books/*[::author = $$0::id && $$0::born != null] \
+             | %(a = ::name; b = $$1::title) @| [1]"
+        ),
+        ["%(a = \"Homer\"; b = null)"]
+    );
+    // two values compared stay three-valued: the book with no author
+    // meets no author, under `=` and under `!=`
+    assert_eq!(
+        values("/books/* <=>* /authors/*[::id = $$0::author] @| count"),
+        ["5"]
+    );
+    assert_eq!(
+        values("/books/*[::title = \"Fragments\"] <=>* /authors/*[::id != $$0::author] @| count"),
+        ["0"]
+    );
+}

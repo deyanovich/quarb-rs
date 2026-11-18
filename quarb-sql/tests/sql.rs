@@ -925,11 +925,13 @@ fn pushdown_join_soundness_metadata() {
 /// An every-witness join (`<=>*`, ruling 2026-11-11) is the JOIN
 /// as SQL means it: no uniqueness to verify, and the joined table's
 /// order owed after the driver's.
-/// A test of the driver's key for null inside a join condition never
-/// holds in the scan (spec: Null keys), so it is not pushed as IS
-/// [NOT] NULL, which would answer.
+/// A comparison with the literal null inside a join condition is the
+/// presence test, true or false as everywhere else (ruling
+/// 2026-11-18; in 0.69 it was a key comparison, never held, and the
+/// plan was refused): the scan admits by it, and the plan says IS
+/// [NOT] NULL. Two values compared stay three-valued.
 #[test]
-fn a_null_test_of_the_drivers_key_in_a_join_condition_is_not_pushed() {
+fn a_null_test_inside_a_join_condition_is_the_presence_test() {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(
         "CREATE TABLE artists (id INTEGER PRIMARY KEY, name TEXT);
@@ -945,17 +947,38 @@ fn a_null_test_of_the_drivers_key_in_a_join_condition_is_not_pushed() {
     };
     let on_driver = "/tracks/* <=>* /artists/*[$$0::artist_id != null && ::id = $$0::artist_id] \
                      @| count";
-    assert_eq!(count(on_driver), "0");
-    let Err(refused) = quarb_sql::pushdown_explained(on_driver, Some(quarb_sql::Dialect::Sqlite))
-    else {
-        panic!("the plan took a null test of the driver's key");
-    };
-    let (word, reason) = refused.not_pushed().unwrap();
-    assert_eq!(word, quarb_sql::Refusal::Join);
+    // the three tracks that have an artist, each with its one
+    assert_eq!(count(on_driver), "3");
+    let plan = quarb_sql::pushdown(on_driver, Some(quarb_sql::Dialect::Sqlite))
+        .expect("the presence test is pushed");
     assert!(
-        reason.starts_with("a test of the driver's key for null"),
-        "{reason}"
+        plan.sql.contains("tracks.artist_id IS NOT NULL"),
+        "{}",
+        plan.sql
     );
+    // the plan's own answer, where the planner has one (a join with
+    // no key equality has no JOIN to write)
+    let planned = |q: &str| {
+        quarb_sql::pushdown(q, Some(quarb_sql::Dialect::Sqlite)).map(|plan| {
+            let n: i64 = conn.query_row(&plan.sql, [], |r| r.get(0)).unwrap();
+            n.to_string()
+        })
+    };
+    assert_eq!(planned(on_driver).as_deref(), Some("3"));
+    // `= null`: the driver that has no value. No artist's id equals
+    // a null key, so with the key comparison beside it nothing is
+    // admitted; alone it admits every candidate for that driver.
+    let absent = "/tracks/* <=>* /artists/*[$$0::artist_id = null] @| count";
+    assert_eq!(count(absent), "2");
+    assert!(planned(absent).is_none_or(|n| n == "2"));
+    let both = "/tracks/* <=>* /artists/*[$$0::artist_id = null && ::id = $$0::artist_id] \
+                @| count";
+    assert_eq!(count(both), "0");
+    assert_eq!(planned(both).as_deref(), Some("0"));
+    // two values compared stay three-valued: a null key meets no key
+    let keys = "/tracks/* <=>* /artists/*[::id != $$0::artist_id] @| count";
+    assert_eq!(count(keys), "3");
+    assert!(planned(keys).is_none_or(|n| n == "3"));
     // on the candidate the test is a predicate like any other, and
     // on the driver's own step it stands before the join
     let on_candidate = "/tracks/* <=>* /artists/*[::id != null && ::id = $$0::artist_id] @| count";

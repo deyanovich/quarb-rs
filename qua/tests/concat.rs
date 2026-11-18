@@ -269,3 +269,160 @@ fn concatenation_round_trips_through_unparse() {
         assert_eq!(printed, again, "{q}");
     }
 }
+
+/// `a ++? b` keeps the left (ruling 2026-11-18), the mirror of
+/// `++!`: on a record the right side's fields are appended where the
+/// left lacks the name and left out where it has it; on a table a
+/// row whose label the left has is left out and a shared column
+/// keeps the left's values; any other left side is refused, as for
+/// `++!`.
+#[test]
+fn the_question_mark_keeps_the_left() {
+    // a record: only the missing names are picked up
+    assert_eq!(
+        one("= %(a = 1; b = 2) ++? %(b = 3; c = 4)"),
+        "%(a = 1; b = 2; c = 4)"
+    );
+    assert_eq!(
+        one("= %(a = 1; b = 2) ++! %(b = 3; c = 4)"),
+        "%(a = 1; b = 3; c = 4)"
+    );
+    assert_eq!(one("= %(a = 1) ++? %(a = 9)"), "%(a = 1)");
+    // left-associative, with the other concatenations
+    assert_eq!(
+        one("= %(a = 1) ++? %(b = 2) ++? %(a = 5; c = 3)"),
+        "%(a = 1; b = 2; c = 3)"
+    );
+    assert_eq!(
+        one("= %(a = 1) ++ %(b = 2) ++? %(a = 5) ++! %(b = 7)"),
+        "%(a = 1; b = 7)"
+    );
+    // a node's properties under the defaults a query supplies
+    assert_eq!(
+        one(r#"/rows/*[1] | %(::book; ::x) ++? %(x = 0; z = 9)"#),
+        r#"%(book = "a"; x = 1; z = 9)"#
+    );
+    // null on either side is null, as for every concatenation
+    assert_eq!(run("= null ++? %(a = 1)").unwrap(), vec!["null"]);
+
+    // tables, indexed: a label the left has keeps its row, a new
+    // label is appended
+    let t = "(#(@(a; b); %(1; 2); %(5; 6)) | #(-i=:a))";
+    let u = "(#(@(a; b); %(1; 3); %(7; 8)) | #(-i=:a))";
+    assert_eq!(
+        one(&format!("= {t} ++? {u} | @")),
+        "@%(@(a; b); %(1; 2); %(5; 6); %(7; 8))"
+    );
+    assert_eq!(
+        one(&format!("= {t} ++! {u} | @")),
+        "@%(@(a; b); %(1; 3); %(5; 6); %(7; 8))"
+    );
+    // headers that overlap: the new column is appended, the shared
+    // one keeps the left's values
+    let w = "(#(@(a; b; c); %(1; 9; 30); %(5; 9; 40)) | #(-i=:a))";
+    assert_eq!(
+        one(&format!("= {t} ++? {w} | @")),
+        "@%(@(a; b; c); %(1; 2; 30); %(5; 6; 40))"
+    );
+    assert_eq!(
+        one(&format!("= {t} ++! {w} | @")),
+        "@%(@(a; b; c); %(1; 9; 30); %(5; 9; 40))"
+    );
+    // by position where there is no index
+    assert_eq!(
+        one("= #(@(a; b); %(1; 2)) ++? #(@(b; c); %(3; 4)) | @"),
+        "%(a = 1; b = 2; c = 4)"
+    );
+
+    // refused as `++!` is: a record on the right of a table, a list,
+    // a text, a number
+    assert!(
+        refuse("= #(@(a; b); %(1; 2)) ++? %(a = 9)").contains("'++?' on a table takes a table")
+    );
+    assert!(refuse("= @(1; 2) ++? @(3)").contains("a list takes '++'"));
+    assert!(refuse(r#"= "ab" ++? "c""#).contains("text takes '++'"));
+    assert!(refuse("= 5 ++? 6").contains("takes no concatenation"));
+    // the question mark is glued, as the bang is
+    assert!(run("= %(a = 1) ++ ? %(b = 2)").is_err());
+    // `++` names both remedies
+    assert!(refuse("= %(a = 1) ++ %(a = 2)").contains("'++?' keeps the field as it is"));
+}
+
+/// The reflection carries `keep` beside `overwrite`, and the
+/// operator unparses as written.
+#[test]
+fn the_keep_concatenation_reflects_and_unparses() {
+    let once = quarb::expand("= %(a = 1) ++? %(b = 2)", &quarb::Defs::default()).unwrap();
+    assert!(once.contains("++? "), "{once}");
+    assert_eq!(quarb::expand(&once, &quarb::Defs::default()).unwrap(), once);
+}
+
+/// A node as an item of the `%(…)` after `++`, `++!` and `++?` is
+/// the node's record, with no parentheses, whatever stands on the
+/// left (ruling 2026-11-18: "any record on the right of ++/++?/++!
+/// should provide its properties to what's on the left"). A record
+/// takes the fields under the operator's own rule for a name met
+/// twice, a list takes the record as one element, a table takes a
+/// named row. An item with no name that is no node stays a
+/// positional cell.
+#[test]
+fn a_node_in_the_row_after_a_concatenation_is_its_record() {
+    // a record on the left
+    assert_eq!(
+        one("/rows/*[1] | %(n = 1) ++ %(^/names/*[1])"),
+        r#"%(n = 1; first = "Jane"; last = "Austen")"#
+    );
+    assert_eq!(
+        one("/rows/*[1] .R | ^/names/*[1] | % | ++? %($$.R)"),
+        r#"%(first = "Jane"; last = "Austen"; book = "a"; x = 1; y = 2)"#
+    );
+    // a name met twice: each operator's own rule
+    assert!(
+        refuse("/rows/*[1] .R | ^/rows/*[2] | % | ++ %($$.R)")
+            .contains("'book' is already a field of the record")
+    );
+    assert_eq!(
+        one("/rows/*[1] .R | ^/rows/*[2] | % | ++! %($$.R)"),
+        r#"%(book = "a"; x = 1; y = 2)"#
+    );
+    assert_eq!(
+        one("/rows/*[1] .R | ^/rows/*[2] | % | ++? %($$.R)"),
+        r#"%(book = "b"; x = 3; y = 4)"#
+    );
+    // beside other items of the row, where it stands
+    assert_eq!(
+        one("/rows/*[1] | %(n = 1) ++ %(^/names/*[1]; m = 2)"),
+        r#"%(n = 1; first = "Jane"; last = "Austen"; m = 2)"#
+    );
+    assert!(
+        refuse(r#"= %(a = 1) ++ %(^/names/*[1]; first = "x")"#)
+            .contains("'first' is named twice in the row")
+    );
+    // several nodes: lists aligned by node; no node: nothing
+    assert_eq!(
+        one("= %(a = 1) ++ %(^/rows/*)"),
+        r#"%(a = 1; book = @("a"; "b"; "c"); x = @(1; 3; 5); y = @(2; 4; 6))"#
+    );
+    assert_eq!(one("= %(a = 1) ++ %(^/none/*)"), "%(a = 1)");
+    // a list on the left takes the record as one element
+    assert_eq!(
+        one("= @(1) ++ %(^/names/*[1])"),
+        r#"@(1; %(first = "Jane"; last = "Austen"))"#
+    );
+    // a table on the left takes a named row, the header growing by
+    // the names it lacks
+    assert_eq!(
+        one(r#"= #(@(first; n); %("x"; 1)) ++ %(^/names/*[1]) | @"#),
+        r#"@%(@(first; n; last); %("x"; 1; null); %("Jane"; null; "Austen"))"#
+    );
+    // the positional row is what it was: its keys are the header's
+    assert_eq!(
+        one("= #(@(a; b); %(1; 2)) ++ %(3; 4) | @"),
+        "@%(@(a; b); %(1; 2); %(3; 4))"
+    );
+    // and with a key a path is still its test
+    assert_eq!(
+        one("= %(a = 1) ++ %(b = ^/names/*[1])"),
+        "%(a = 1; b = true)"
+    );
+}

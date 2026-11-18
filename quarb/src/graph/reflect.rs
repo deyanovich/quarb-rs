@@ -742,6 +742,7 @@ impl QueryArbor {
                 let props = match mode {
                     ConcatMode::Merge => Vec::new(),
                     ConcatMode::Overwrite => vec![("overwrite".to_string(), Value::Bool(true))],
+                    ConcatMode::Keep => vec![("keep".to_string(), Value::Bool(true))],
                     ConcatMode::Item => vec![("item".to_string(), Value::Bool(true))],
                 };
                 let id = self.intern(Some("concat"), props, Some(parent));

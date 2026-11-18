@@ -2647,10 +2647,21 @@ impl Parser<'_> {
             // fields named, on a list of records each item.
             Some(Token::Percent) if self.projector_items_ahead() => {
                 let v = self.unary()?;
-                Ok(Command::Expr(Operand::Projected {
+                let projected = Operand::Projected {
                     base: Box::new(Operand::Topic),
                     shape: ProjShape::Value(Box::new(v)),
-                }))
+                };
+                // The projector heads an expression that continues
+                // past its closing parenthesis, as a constructor
+                // with named items does: `| %(::name) ++ %(n = 2)`.
+                // (It ended the command there, and the rest was
+                // refused as trailing input; lang's finding of
+                // 2026-11-18.)
+                if self.expr_continues() {
+                    let left = self.multiplicative_from(projected)?;
+                    return Ok(Command::Expr(self.additive_from(left)?));
+                }
+                Ok(Command::Expr(projected))
             }
             // `| #` bare — the table reading (spec: The Table Kind):
             // a list of records as a frame, a list of lists as an
@@ -9526,6 +9537,14 @@ impl Parser<'_> {
             "++" if matches!(self.toks.get(self.pos + 1), Some(Token::Bang)) => {
                 Some(ConcatMode::Overwrite)
             }
+            // `++?`, the question mark glued as the bang is
+            "++" if matches!(
+                self.toks.get(self.pos + 1),
+                Some(Token::Question { spaced: false })
+            ) =>
+            {
+                Some(ConcatMode::Keep)
+            }
             "++" => Some(ConcatMode::Merge),
             "+@+" => Some(ConcatMode::Item),
             _ => None,
@@ -9537,7 +9556,11 @@ impl Parser<'_> {
     /// literal's rules (positional by the left side's header, named,
     /// or both).
     fn concat_rest(&mut self, mode: ConcatMode, left: Operand) -> Result<Operand> {
-        self.pos += if mode == ConcatMode::Overwrite { 2 } else { 1 };
+        self.pos += if matches!(mode, ConcatMode::Overwrite | ConcatMode::Keep) {
+            2
+        } else {
+            1
+        };
         let right = if matches!(self.peek(), Some(Token::Percent))
             && matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
         {
@@ -13855,6 +13878,16 @@ fn validate_record_convention(call: &FnCall, what: &str) -> Result<()> {
             // a fragment parameter: the form it binds names the field
             // at the invocation, where the convention is checked again
             Arg::Expr(Operand::Param(_)) => {
+                i += 1;
+            }
+            // a node as an item (ruling 2026-11-18): all of its
+            // property projections, each naming itself. The names
+            // are the node's, known when the record is built, where a
+            // name met twice is refused.
+            Arg::Expr(e)
+                if crate::syntax::ast::auto_field_name(e).is_none()
+                    && crate::syntax::ast::node_item(e) =>
+            {
                 i += 1;
             }
             Arg::Expr(e) => {

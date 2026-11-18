@@ -7169,6 +7169,26 @@ pub(crate) fn table_reading(v: Value) -> Result<Value, String> {
     }
 }
 
+/// What a concatenation does with a name both sides carry: `++`
+/// refuses it, `++!` takes the right side's, `++?` keeps the left
+/// side's (ruling 2026-11-18).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Clash {
+    Refuse,
+    Overwrite,
+    Keep,
+}
+
+impl Clash {
+    fn symbol(self) -> &'static str {
+        match self {
+            Clash::Refuse => "++",
+            Clash::Overwrite => "++!",
+            Clash::Keep => "++?",
+        }
+    }
+}
+
 /// The concatenation's shape rule (spec: Concatenation): `right`
 /// joined to `left`, the left side giving the shape. Under `++` a
 /// list concatenates a list and takes any other value as one
@@ -7195,11 +7215,32 @@ pub(crate) fn concat(mode: ConcatMode, left: Value, right: Value) -> Result<Valu
             "'+@+' appends one item to a list; {} takes '++'",
             kind_of(&other)
         )),
-        (ConcatMode::Overwrite, Value::Record(fields)) => record_concat(fields, right, true),
+        (ConcatMode::Overwrite, Value::Record(fields)) => {
+            record_concat(fields, right, Clash::Overwrite)
+        }
+        // `a ++? b` keeps the left: the mirror of `++!` on a record
+        // and on a table, refused on every other left side as `++!`
+        // is (ruling 2026-11-18)
+        (ConcatMode::Keep, Value::Record(fields)) => record_concat(fields, right, Clash::Keep),
+        (ConcatMode::Keep, Value::Table(t)) if matches!(&right, Value::Table(_)) => {
+            table_concat(&t, right, Clash::Keep)
+        }
+        (ConcatMode::Keep, Value::Table(_)) => Err(format!(
+            "'++?' on a table takes a table, and keeps the left side's rows and columns of one name; {} takes '++'",
+            kind_of(&right)
+        )),
+        (ConcatMode::Keep, other @ (Value::List(_) | Value::Str(_))) => Err(format!(
+            "'++?' keeps a record's fields; {} takes '++'",
+            kind_of(&other)
+        )),
+        (ConcatMode::Keep, other) => Err(format!(
+            "'++?' keeps a record's fields; {} takes no concatenation",
+            kind_of(&other)
+        )),
         // `t ++! u` — the right side's columns appended, overwriting
         // the left's of one name (the header rule, ruling 2026-11-05)
         (ConcatMode::Overwrite, Value::Table(t)) if matches!(&right, Value::Table(_)) => {
-            table_concat(&t, right, true)
+            table_concat(&t, right, Clash::Overwrite)
         }
         (ConcatMode::Overwrite, Value::Table(_)) => Err(format!(
             "'++!' on a table takes a table, its columns under the left side's names; {} takes '++'",
@@ -7227,8 +7268,10 @@ pub(crate) fn concat(mode: ConcatMode, left: Value, right: Value) -> Result<Valu
             }
             Ok(Value::list(out))
         }
-        (ConcatMode::Merge, Value::Table(t)) => table_concat(&t, right, false),
-        (ConcatMode::Merge, Value::Record(fields)) => record_concat(fields, right, false),
+        (ConcatMode::Merge, Value::Table(t)) => table_concat(&t, right, Clash::Refuse),
+        (ConcatMode::Merge, Value::Record(fields)) => {
+            record_concat(fields, right, Clash::Refuse)
+        }
         (ConcatMode::Merge, Value::Str(s)) => {
             Ok(Value::Str(format!("{s}{}", right.display_form())))
         }
@@ -7244,11 +7287,12 @@ pub(crate) fn concat(mode: ConcatMode, left: Value, right: Value) -> Result<Valu
 }
 
 /// A record's fields joined by a record's, in order; a duplicate
-/// name is refused under `++` and replaced under `++!`.
+/// name is refused under `++`, replaced under `++!` and left as the
+/// left side has it under `++?`.
 fn record_concat(
     mut fields: crate::value::Record,
     right: Value,
-    overwrite: bool,
+    clash: Clash,
 ) -> Result<Value, String> {
     let Value::Record(more) = right else {
         return Err(format!(
@@ -7262,7 +7306,9 @@ fn record_concat(
         let key = more.key(i);
         let v = more[i].1.clone();
         match fields.find_key(&key) {
-            Some(j) if overwrite => {
+            // the left side's field stays as it is
+            Some(_) if clash == Clash::Keep => {}
+            Some(j) if clash == Clash::Overwrite => {
                 let v = match fields.declaration(j) {
                     Some(ty) => crate::value::cast_cell(&v, &ty).ok_or_else(|| {
                         format!(
@@ -7278,7 +7324,7 @@ fn record_concat(
             }
             Some(_) => {
                 return Err(format!(
-                    "'{}' is already a field of the record; '++' never overwrites ('++!' does)",
+                    "'{}' is already a field of the record; '++' never overwrites ('++!' does, '++?' keeps the field as it is)",
                     crate::value::Record::key_text(&key)
                 ));
             }
@@ -7301,7 +7347,7 @@ fn record_concat(
 /// header a right row whose label the left has replaces that row in
 /// place (the update), under overlapping headers the right side's
 /// values take the shared names.
-fn table_concat(t: &crate::Table, right: Value, overwrite: bool) -> Result<Value, String> {
+fn table_concat(t: &crate::Table, right: Value, clash: Clash) -> Result<Value, String> {
     // Rows appended under the header of an indexed table bring their
     // labels in the columns the index names, and `++!` updates by
     // them: the two meet as indexes do, and agree on a type first.
@@ -7314,9 +7360,8 @@ fn table_concat(t: &crate::Table, right: Value, overwrite: bool) -> Result<Value
         let pairs: Vec<(usize, usize)> = (0..t.index)
             .filter_map(|j| h2.iter().position(|c| *c == h1[j]).map(|r| (j, r)))
             .collect();
-        let command = if overwrite { "++!" } else { "++" };
-        if let Some((ta, ua)) = agreed_keys(command, t, more, &pairs)? {
-            return table_concat(&ta, Value::table(ua), overwrite);
+        if let Some((ta, ua)) = agreed_keys(clash.symbol(), t, more, &pairs)? {
+            return table_concat(&ta, Value::table(ua), clash);
         }
     }
     let mut header = t.header.clone();
@@ -7333,7 +7378,7 @@ fn table_concat(t: &crate::Table, right: Value, overwrite: bool) -> Result<Value
                 if same {
                     // the right's label, read in its columns named like
                     // the left's index levels, for the update
-                    let levels: Vec<usize> = if overwrite && t.index > 0 {
+                    let levels: Vec<usize> = if clash != Clash::Refuse && t.index > 0 {
                         (0..t.index)
                             .map(|j| h2.iter().position(|c| *c == h1[j]).unwrap_or(0))
                             .collect()
@@ -7371,6 +7416,9 @@ fn table_concat(t: &crate::Table, right: Value, overwrite: bool) -> Result<Value
                         let l = label(&r.cells(), &levels);
                         let slot = seen_right.next(&mut classes, &l);
                         match at.get(&slot) {
+                            // `++?`: the left has this label, and
+                            // its row stays
+                            Some(_) if clash == Clash::Keep => {}
                             Some(&i) => rows[i] = row,
                             None => {
                                 at.insert(slot, rows.len());
@@ -7389,11 +7437,11 @@ fn table_concat(t: &crate::Table, right: Value, overwrite: bool) -> Result<Value
                         (h1, h2)
                     };
                     let shared: Vec<&String> = right.iter().filter(|c| left.contains(c)).collect();
-                    if shared.is_empty() || overwrite {
-                        return column_concat(t, &more, overwrite);
+                    if shared.is_empty() || clash != Clash::Refuse {
+                        return column_concat(t, &more, clash);
                     }
                     return Err(format!(
-                        "the headers share {} but are not the same: one header appends rows, disjoint headers append columns; '++!' appends the columns and takes the right side's under the shared name{}",
+                        "the headers share {} but are not the same: one header appends rows, disjoint headers append columns; '++!' appends the columns and takes the right side's under the shared name{} ('++?' keeps the left side's)",
                         shared
                             .iter()
                             .map(|c| format!("'{c}'"))
@@ -7447,9 +7495,9 @@ fn table_concat(t: &crate::Table, right: Value, overwrite: bool) -> Result<Value
 /// the rows aligned by label where both tables are indexed
 /// (`labeled_concat`) and by position otherwise, on tables of one
 /// height; the left side's index and name kept.
-fn column_concat(t: &crate::Table, u: &crate::Table, overwrite: bool) -> Result<Value, String> {
+fn column_concat(t: &crate::Table, u: &crate::Table, clash: Clash) -> Result<Value, String> {
     if t.index > 0 && u.index > 0 {
-        return labeled_concat(t, u, overwrite);
+        return labeled_concat(t, u, clash);
     }
     if t.n_rows() != u.n_rows() {
         return Err(format!(
@@ -7468,7 +7516,9 @@ fn column_concat(t: &crate::Table, u: &crate::Table, overwrite: bool) -> Result<
     let mut right_cols: Vec<(usize, usize)> = Vec::new(); // (column of u, column of the result)
     for j in 0..u.width() {
         match tn.iter().position(|n| *n == un[j]) {
-            Some(p) if overwrite => {
+            // `++?`: the left side's column of this name stays
+            Some(_) if clash == Clash::Keep => {}
+            Some(p) if clash == Clash::Overwrite => {
                 right_cols.push((j, p));
                 declared[p] = u.declaration(j);
             }
@@ -7668,7 +7718,7 @@ pub(crate) fn agreed_keys(
 /// pairs its n-th row with the other side's n-th. A data column both
 /// sides have is refused as a duplicate field (`++!` takes the right
 /// side's).
-fn labeled_concat(t: &crate::Table, u: &crate::Table, overwrite: bool) -> Result<Value, String> {
+fn labeled_concat(t: &crate::Table, u: &crate::Table, clash: Clash) -> Result<Value, String> {
     let names =
         |x: &crate::Table| -> Vec<String> { (0..x.width()).map(|j| x.column_name(j)).collect() };
     let (tn, un) = (names(t), names(u));
@@ -7708,9 +7758,8 @@ fn labeled_concat(t: &crate::Table, u: &crate::Table, overwrite: bool) -> Result
         }
     };
     let pairs: Vec<(usize, usize)> = lk.iter().copied().zip(rk.iter().copied()).collect();
-    let command = if overwrite { "++!" } else { "++" };
-    if let Some((ta, ua)) = agreed_keys(command, t, u, &pairs)? {
-        return labeled_concat(&ta, &ua, overwrite);
+    if let Some((ta, ua)) = agreed_keys(clash.symbol(), t, u, &pairs)? {
+        return labeled_concat(&ta, &ua, clash);
     }
     let (shape, other, sk, ok) = if shape_left {
         (t, u, &lk, &rk)
@@ -7733,7 +7782,9 @@ fn labeled_concat(t: &crate::Table, u: &crate::Table, overwrite: bool) -> Result
     let mut right_cols: Vec<(usize, usize)> = Vec::new();
     for j in u.index..u.width() {
         match left_cols.iter().find(|(lj, _)| tn[*lj] == un[j]) {
-            Some(&(_, to)) if overwrite => {
+            // `++?`: the left side's column of this name stays
+            Some(_) if clash == Clash::Keep => {}
+            Some(&(_, to)) if clash == Clash::Overwrite => {
                 right_cols.push((j, to));
                 declared[to] = u.declaration(j);
             }

@@ -242,6 +242,7 @@ const COMMANDS: &[Synopsis] = &[
         "a concatenation: the two operands beneath",
         [
             op("item", "true for +@+", false),
+            op("keep", "true for ++?", false),
             op("overwrite", "true for ++!", false)
         ]
     ),

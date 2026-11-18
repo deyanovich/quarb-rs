@@ -168,7 +168,7 @@ const CORPUS: &[&str] = &[
     // left side's shape, `++!` overwrites a record's fields (a row
     // on the right reflects as the record it spells), `+@+` appends
     // one item
-    "/row | @(::a) ++ @(1) | ++! %(k = 2; ::b) | +@+ @(2; 3)",
+    "/row | @(::a) ++ @(1) | ++! %(k = 2; ::b) | ++? %(k = 0) | +@+ @(2; 3)",
     // the expression head (2026-10-21, draft 164): a literal or a
     // constructor after a pipe opens an expression; after `@|` it
     // is one expression over the context
@@ -242,8 +242,9 @@ const VOCABULARY: &[(&str, &[&str])] = &[
     ("compare", &["form", "op"]),
     // v1 additive growth: cond (2026-07-11, the conditional).
     // v2 additive growth: concat (2026-10-20, draft 163: `++`,
-    // `++!` with overwrite, `+@+` with item).
-    ("concat", &["form", "item", "overwrite"]),
+    // `++!` with overwrite, `+@+` with item); `++?` with keep
+    // (2026-11-18).
+    ("concat", &["form", "item", "keep", "overwrite"]),
     ("cond", &["form"]),
     ("context", &["form", "index"]),
     ("default", &["form"]),

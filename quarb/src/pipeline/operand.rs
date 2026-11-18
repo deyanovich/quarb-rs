@@ -1681,22 +1681,58 @@ fn eval_operand_in<H: Host>(
         // the left's header, its items gathered as a constructor's
         // are. A refusal nulls the result.
         Operand::Concat { mode, left, right } => {
-            let row_of = |items: &[(Option<String>, Operand)]| -> Vec<(Option<String>, Value)> {
-                items
-                    .iter()
-                    .map(|(name, e)| match e {
+            let row_of = |items: &[(Option<String>, Operand)]| -> Result<Vec<(Option<String>, Value)>, String> {
+                let mut row: Vec<(Option<String>, Value)> = Vec::with_capacity(items.len());
+                let mut node_items = false;
+                for (name, e) in items {
+                    match e {
                         // a declared field casts its value
                         Operand::Typed { inner, typing } => {
                             let v = gathered(eval_operand(host, ext, inner, trace, scope));
                             let key = name.clone().unwrap_or_default();
-                            (name.clone(), cast_reading(v, &key, Some(typing.clone())))
+                            row.push((name.clone(), cast_reading(v, &key, Some(typing.clone()))));
                         }
-                        e => (
+                        // A node as an item of the row (ruling
+                        // 2026-11-18: "any record on the right of
+                        // ++/++?/++! should provide its properties to
+                        // what's on the left"): its properties, each a
+                        // named item, whatever stands on the left: a
+                        // record takes the fields, a list the record,
+                        // a table the named cells. The names are text
+                        // as the node has them (the quoted key's
+                        // marker). An item with no name that is no
+                        // node stays a positional cell.
+                        e if name.is_none() && crate::syntax::ast::node_item(e) => {
+                            let exts = node_item_exts(host, ext, e, trace, scope)?;
+                            for (k, v) in node_item_fields(host, &exts) {
+                                row.push((Some(format!("\u{0}{k}")), v));
+                            }
+                            node_items = true;
+                        }
+                        e => row.push((
                             name.clone(),
                             gathered(eval_operand(host, ext, e, trace, scope)),
-                        ),
-                    })
-                    .collect()
+                        )),
+                    }
+                }
+                // the node's names are known only here: one met twice
+                // in the row is refused, as in a record constructor
+                if node_items {
+                    let key = |n: &Option<String>| {
+                        n.as_deref().map(|k| crate::syntax::ast::row_key(k).0.to_string())
+                    };
+                    for (i, (name, _)) in row.iter().enumerate() {
+                        if let Some(k) = key(name)
+                            && row[..i].iter().any(|(m, _)| key(m).as_deref() == Some(k.as_str()))
+                        {
+                            return Err(format!(
+                                "'{k}' is named twice in the row, and the node brings a property \
+                                 of that name: give one of the two another key"
+                            ));
+                        }
+                    }
+                }
+                Ok(row)
             };
             // `$_ ++! %(axis = "//")` on a reflected node: the node
             // copied with the named properties replaced (`++` added),
@@ -1707,7 +1743,13 @@ fn eval_operand_in<H: Host>(
                 && let Operand::Row(items) = right.as_ref()
                 && let Some(form) = host.node_form(ext)
             {
-                let row = row_of(items);
+                let row = match row_of(items) {
+                    Ok(row) => row,
+                    Err(why) => {
+                        crate::pipeline::record_refusal(format!("{}: {why}", mode.symbol()));
+                        return vec![Value::Null];
+                    }
+                };
                 return vec![match form.rewrite(*mode, &row) {
                     Ok(f) => Value::quarq_form(f),
                     Err(why) => {
@@ -1719,7 +1761,13 @@ fn eval_operand_in<H: Host>(
             let ls = forking(eval_operand(host, ext, left, trace, scope));
             let rs: Vec<Result<Value, String>> = match right.as_ref() {
                 Operand::Row(items) => {
-                    let row = row_of(items);
+                    let row = match row_of(items) {
+                        Ok(row) => row,
+                        Err(why) => {
+                            crate::pipeline::record_refusal(format!("{}: {why}", mode.symbol()));
+                            return vec![Value::Null];
+                        }
+                    };
                     ls.iter()
                         .map(|l| crate::stdlib::concat_row(*mode, l.clone(), row.clone()))
                         .collect()
@@ -2291,6 +2339,79 @@ pub(crate) fn record_fields_prov<H: Host>(
         .collect())
 }
 
+/// The nodes an item of a record constructor reaches where it
+/// carries no name of its own ([`crate::syntax::ast::node_item`];
+/// ruling 2026-11-18): a path's own threads (in value position a
+/// bare path is the test that it reaches something), any other form
+/// by its value, which must be a node or a list of nodes.
+fn node_item_exts<H: Host>(
+    host: &H,
+    ext: &H::Ext,
+    e: &Operand,
+    trace: &H::Trace,
+    scope: Scope<'_, H::Ext>,
+) -> Result<Vec<H::Ext>, String> {
+    if let Operand::Rel {
+        steps,
+        projection: None,
+        anchor,
+    } = e
+    {
+        return Ok(crate::pipeline::run::out_of_row_reach(|| {
+            host.rel_threads(ext, steps, anchor, None, trace, scope)
+        })
+        .into_iter()
+        .map(|(x, _, _)| x)
+        .collect());
+    }
+    let mut exts = Vec::new();
+    for v in eval_operand(host, ext, e, trace, scope)
+        .iter()
+        .flat_map(|v| match v {
+            Value::List(items) => items.to_vec(),
+            one => vec![one.clone()],
+        })
+    {
+        match v {
+            Value::Node(n) => exts.push(host.ext_at(crate::NodeId(n.id))),
+            other => {
+                return Err(format!(
+                    "a record field needs a name: the item answers {}, which is no node; give \
+                     it a key, %(name = …)",
+                    crate::stdlib::kind_of(&other)
+                ));
+            }
+        }
+    }
+    Ok(exts)
+}
+
+/// The fields a node item brings: every property of the nodes, each
+/// under its own name, in the order first met. One node gives its
+/// values; several give lists aligned by node, null where a node
+/// lacks the property, as written projections gather.
+fn node_item_fields<H: Host>(host: &H, exts: &[H::Ext]) -> Vec<(String, Value)> {
+    let mut names: Vec<String> = Vec::new();
+    for x in exts {
+        for n in host.property_names_of(x) {
+            if !names.contains(&n) {
+                names.push(n);
+            }
+        }
+    }
+    names
+        .into_iter()
+        .map(|name| {
+            let read = |x: &H::Ext| host.property_of(x, &name).unwrap_or(Value::Null);
+            let value = match exts {
+                [one] => read(one),
+                many => Value::list(many.iter().map(read).collect()),
+            };
+            (name, value)
+        })
+        .collect()
+}
+
 /// The record constructor's build (spec: Record, draft 166): the
 /// record with its typed keys and its declarations, and one
 /// provenance per field. `record_fields_prov` is the text-keyed view
@@ -2309,6 +2430,10 @@ pub(crate) fn record_build<H: Host>(
     let mut declared: Vec<Option<ColumnType>> = Vec::new();
     let mut keys_type: Option<ColumnType> = None;
     let mut values_type: Option<ColumnType> = None;
+    // whether a node stood as an item: its names are known only
+    // here, so a field written after it under one of them is
+    // refused at the build
+    let mut node_items = false;
     // what `:*` leaves out (ruling 2026-11-05): the fields the items
     // produce (a bare `:k`, the key of `name = expr`) and the ones a
     // rename takes whole (`new = :old`)
@@ -2479,6 +2604,32 @@ pub(crate) fn record_build<H: Host>(
                     }
                 }
             }
+            // A node as an item (ruling 2026-11-18): the constructor
+            // takes it as it takes a projection, and reads it as all
+            // of the node's property projections, each naming itself
+            // (`::` properties only; a core field or adapter
+            // metadata is written out). One node gives its values;
+            // several give one record of lists aligned by node, null
+            // where a node lacks the property, as written
+            // projections gather. The names are the nodes', so a
+            // name met twice is refused here, where the record is
+            // built.
+            Arg::Expr(e)
+                if crate::syntax::ast::auto_field_name(e).is_none()
+                    && crate::syntax::ast::node_item(e) =>
+            {
+                let (exts, o) = capture(|| node_item_exts(host, ext, e, trace, scope));
+                for (name, value) in node_item_fields(host, &exts?) {
+                    if fields.iter().any(|(f, _, _)| *f == name) {
+                        return Err(format!(
+                            "'{name}' is already a field of the record, and the node brings a \
+                             property of that name: give one of the two a key"
+                        ));
+                    }
+                    fields.push((name, value, Prov::leaf(o.clone())));
+                }
+                node_items = true;
+            }
             Arg::Expr(e) => {
                 let name = crate::syntax::ast::auto_field_name(e)
                     .unwrap_or_default()
@@ -2547,6 +2698,16 @@ pub(crate) fn record_build<H: Host>(
         let _ = before;
         keys.resize(fields.len(), None);
         declared.resize(fields.len(), None);
+    }
+    if node_items {
+        for (i, (name, _, _)) in fields.iter().enumerate() {
+            if fields[..i].iter().any(|(f, _, _)| f == name) {
+                return Err(format!(
+                    "'{name}' is already a field of the record, and the node brings a property \
+                     of that name: give one of the two a key"
+                ));
+            }
+        }
     }
     // `--keys=T`: every key cast into T; `--values=T`: every value
     // cast and every field declared T
@@ -2762,6 +2923,11 @@ fn eval_pred_expr_in<H: Host>(
     }
 }
 
+/// The literal `null` as an operand: `x = null`, `null != x`.
+fn is_null_literal(o: &Operand) -> bool {
+    matches!(o, Operand::Lit(Value::Null))
+}
+
 /// A join condition (spec: Correlation; ruling 2026-11-10): the ON
 /// clause read in three-valued logic. A comparison one of whose
 /// operands reads the other side of the join — the driver or an
@@ -2807,6 +2973,16 @@ pub(crate) fn eval_join_condition<H: Host>(
         // a parenthesized condition is the condition: `!(a = b)`
         PredExpr::Truthy(Operand::Group(inner)) => {
             eval_join_condition(host, ext, inner, trace, scope)
+        }
+        // A comparison with the literal null is no key comparison
+        // (ruling 2026-11-18): it is the presence test, true or
+        // false as everywhere else. `$$0::born != null` admits the
+        // candidates of a driver that has the value, `= null` of one
+        // that has none. (Both were unknown, and admitted nothing.)
+        // Two values compared stay three-valued: a null key still
+        // meets no null key.
+        PredExpr::Compare(l, _, r) if is_null_literal(l) || is_null_literal(r) => {
+            Some(eval_pred_expr(host, ext, e, trace, scope))
         }
         PredExpr::Compare(l, op, r) if keyed(l) || keyed(r) => {
             let lhs = known(l);

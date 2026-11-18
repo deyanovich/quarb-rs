@@ -205,3 +205,143 @@ fn a_table_shape_nests_in_a_record_or_a_list() {
         "@(683)"
     );
 }
+
+/// `| %` answers the record of a node however the node arrives
+/// (ruling 2026-11-18): the thread's own node, a mark, a witness by
+/// number, a field that holds a node. The last two arrived as
+/// values and were refused ("the rows have no field names").
+#[test]
+fn the_record_of_a_node_however_it_arrives() {
+    let iliad = "%(name = \"Iliad\"; pages = 683)";
+    assert_eq!(one("/rows/*[1] | %"), iliad);
+    assert_eq!(one("/rows/*[1] .R | $$.R | %"), iliad);
+    // a witness by number
+    assert_eq!(
+        one("/rows/*[2] <=> /rows/*[::pages = 683] | $$1 | %"),
+        iliad
+    );
+    // a field that holds a node
+    assert_eq!(one("/rows/*[1] .R | %(t = $$.R) | :t | %"), iliad);
+    // the node itself is still what a keyed field holds
+    assert!(one("/rows/*[1] .R | %(t = $$.R) | :t").starts_with('/'));
+    // a value that is no node reads as it did
+    assert_eq!(one("= %(a = 1) | %"), "%(a = 1)");
+    let e = run("= @(1; 2) | %").unwrap_err().to_string();
+    assert!(e.contains("no field names"), "{e}");
+}
+
+/// A record constructor whose items are self-labelled projections
+/// heads an expression after a pipe, as one with named items does:
+/// `| %(::name) ++ %(n = 2)`. It ended the command at its closing
+/// parenthesis, and the rest was refused as trailing input.
+#[test]
+fn a_projector_after_a_pipe_heads_an_expression() {
+    assert_eq!(
+        one("/rows/*[1] | %(::name) ++ %(n = 2)"),
+        "%(name = \"Iliad\"; n = 2)"
+    );
+    assert_eq!(
+        one("/rows/*[1] | %(::name; p = ::pages) ++ %(n = 2) ++ %(m = 3)"),
+        "%(name = \"Iliad\"; p = 683; n = 2; m = 3)"
+    );
+    // the same value as the spellings that parsed
+    assert_eq!(
+        one("/rows/*[1] | %(::name) ++ %(n = 2)"),
+        one("/rows/*[1] | %(name = ::name) ++ %(n = 2)")
+    );
+    assert_eq!(
+        one("/rows/*[1] | %(::name) ++ %(n = 2)"),
+        one("/rows/*[1] | (%(::name)) ++ %(n = 2)")
+    );
+    assert_eq!(
+        one("/rows/*[1] | %(::pages) ++! %(pages = 1)"),
+        "%(pages = 1)"
+    );
+    // alone it is what it was, and the text it unparses to parses
+    assert_eq!(one("/rows/*[1] | %(::name)"), "%(name = \"Iliad\")");
+    fixpoint("/rows/*[1] | %(::name) ++ %(n = 2)");
+}
+
+/// The record constructor takes a node as an item (ruling
+/// 2026-11-18): as it takes a projection `::proj` and keys it
+/// `proj`, it takes a node and reads all of its property
+/// projections, each naming itself. With a key the item holds the
+/// node, as before.
+#[test]
+fn a_node_as_a_record_item_is_its_property_projections() {
+    let iliad = "%(name = \"Iliad\"; pages = 683)";
+    // a mark, an absolute path, a witness by number
+    assert_eq!(one("/rows/*[1] .R | %($$.R)"), iliad);
+    assert_eq!(one("= %(^/rows/*[1])"), iliad);
+    assert_eq!(one("/rows/*[2] | %(^/rows/*[1])"), iliad);
+    assert_eq!(one("/rows/*[2] <=> /rows/*[::pages = 683] | %($$1)"), iliad);
+    // the alternate form of `$$.R | %`
+    assert_eq!(
+        one("/rows/*[1] .R | %($$.R)"),
+        one("/rows/*[1] .R | $$.R | %")
+    );
+    // among other items, where it stands
+    assert_eq!(
+        one("/rows/*[2] | %(n = 1; ^/rows/*[1]; m = 2)"),
+        "%(n = 1; name = \"Iliad\"; pages = 683; m = 2)"
+    );
+    // its use is beside another record, not in pipe position
+    assert_eq!(
+        one("/rows/*[1] .R | %($$.R) ++? %(name = \"x\"; n = 1)"),
+        "%(name = \"Iliad\"; pages = 683; n = 1)"
+    );
+    // several nodes: one record of lists, aligned by node
+    assert_eq!(
+        one("= %(^/rows/*)"),
+        "%(name = @(\"Iliad\"; \"Emma\"); pages = @(683; 474))"
+    );
+    // no node: no field
+    assert_eq!(one("= %(^/none/*)"), "%()");
+    // with a key the item is what it was: the node, or a path's test
+    assert!(one("/rows/*[1] .R | %(t = $$.R) | :t").starts_with('/'));
+    assert_eq!(one("= %(t = ^/rows/*[1])"), "%(t = true)");
+
+    // a name met twice is refused when the record is built
+    for q in [
+        "/rows/*[1] | %(name = 1; ^/rows/*[2])",
+        "/rows/*[1] | %(^/rows/*[2]; name = 1)",
+        "/rows/*[1] | %(::name; ^/rows/*[2])",
+        "/rows/*[1] .R | %($$.R; ^/rows/*[2])",
+    ] {
+        let e = run(q).unwrap_err().to_string();
+        assert!(
+            e.contains("'name' is already a field of the record"),
+            "{q}: {e}"
+        );
+    }
+    // an item with no key that answers no node is still refused: by
+    // its form where it can answer none, by its value otherwise
+    let e = run("= %(1 + 2)").unwrap_err().to_string();
+    assert!(e.contains("a record field needs a name"), "{e}");
+    let e = run("/rows/*[1] | ::name | %($_)").unwrap_err().to_string();
+    assert!(e.contains("which is no node"), "{e}");
+    // and it unparses as written
+    fixpoint("/rows/*[1] .R | %($$.R; n = 1)");
+    fixpoint("= %(^/rows/*[1])");
+}
+
+/// `| %` on a list of nodes is the column view of the nodes'
+/// records (ruling 2026-11-18): one record of lists, an entry per
+/// node, the value `%(/x)` gives over the same nodes.
+#[test]
+fn the_record_of_a_list_of_nodes_is_their_column_view() {
+    let columns = "%(name = @(\"Iliad\"; \"Emma\"); pages = @(683; 474))";
+    assert_eq!(one("/rows/* @| (@@_) | %"), columns);
+    assert_eq!(one("/rows/* @| (@@_) | %"), one("= %(^/rows/*)"));
+    assert_eq!(one("/rows/* @| (@@_) | %"), one("/rows/* | % @| %"));
+    // a node among records is read as its record
+    assert_eq!(
+        one("/rows/*[1] .R | @($$.R; %(name = \"x\"; n = 1)) | %"),
+        "%(name = @(\"Iliad\"; \"x\"); pages = @(683; null); n = @(null; 1))"
+    );
+    // a member that is neither is refused as before
+    let e = run("/rows/*[1] .R | @($$.R; 5) | %")
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("no field names"), "{e}");
+}

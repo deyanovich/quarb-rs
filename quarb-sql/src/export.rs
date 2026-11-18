@@ -1687,22 +1687,12 @@ impl Exporter {
                     } else {
                         kids[0]
                     };
-                    // Inside a join condition a comparison that reads
-                    // the driver is a key comparison, unknown for a
-                    // null on either side, the literal too (spec:
-                    // Null keys): `[$$0::x != null && …]` admits no
-                    // candidate. IS [NOT] NULL would answer, so the
-                    // plan is not the scan's. (It was pushed so: five
-                    // pairs from the plan, none from the scan.)
-                    if self.in_on && self.subtree_has_driver(other) {
-                        return Err(not_pushed(
-                            Refusal::Join,
-                            "a test of the driver's key for null inside the join condition (a \
-                             key comparison never holds for a null there: test it on the \
-                             driver, '/t/*[::x != null] <=> …')"
-                                .into(),
-                        ));
-                    }
+                    // A comparison with the literal null is the
+                    // presence test wherever it stands, inside a join
+                    // condition too (ruling 2026-11-18: no key
+                    // comparison, true or false): IS [NOT] NULL. In
+                    // 0.69 the engine left it unknown there and the
+                    // plan was refused.
                     let col = self.operand(other, qual)?;
                     return Ok(if op == "=" {
                         format!("{col} IS NULL")

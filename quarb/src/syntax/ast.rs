@@ -733,6 +733,28 @@ pub fn auto_field_name(op: &Operand) -> Option<&str> {
     }
 }
 
+/// Whether an item of a record constructor that carries no name of
+/// its own can answer a node: a path or a context read with no
+/// projection (`/albums/1`, `->album`, `$$.M`, `$$1`), or the topic.
+/// Such an item is read as all of the node's property projections,
+/// each naming itself (ruling 2026-11-18). A literal, an arithmetic,
+/// a call can answer none, and still need a key.
+pub fn node_item(op: &Operand) -> bool {
+    match op {
+        Operand::Rel {
+            projection: None, ..
+        }
+        | Operand::Ctx {
+            projection: None, ..
+        }
+        | Operand::Topic => true,
+        Operand::Invoking(inner) | Operand::Position(inner) | Operand::Driver(inner) => {
+            node_item(inner)
+        }
+        _ => false,
+    }
+}
+
 /// A projection turning the node context into scalar values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Projection {
@@ -1514,6 +1536,10 @@ pub enum ConcatMode {
     /// `++!` — records only: the right side's field replaces the
     /// left's.
     Overwrite,
+    /// `++?` — the mirror of `++!` (ruling 2026-11-18): the left
+    /// side's field stays, and the right side brings only the names
+    /// the left lacks.
+    Keep,
     /// `+@+` — lists only: the right side goes in as one item
     /// whatever it is.
     Item,
@@ -1525,6 +1551,7 @@ impl ConcatMode {
         match self {
             ConcatMode::Merge => "++",
             ConcatMode::Overwrite => "++!",
+            ConcatMode::Keep => "++?",
             ConcatMode::Item => "+@+",
         }
     }

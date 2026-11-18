@@ -442,6 +442,13 @@ impl Form {
         if mode == ConcatMode::Item {
             return Err("'+@+' appends one item to a list; a node takes '++!' or '++'".to_string());
         }
+        if mode == ConcatMode::Keep {
+            return Err(
+                "'++?' keeps the fields a record has, or the rows and columns a table has; a \
+                 node takes '++!' or '++'"
+                    .to_string(),
+            );
+        }
         let overwrite = mode == ConcatMode::Overwrite;
         let kind = self.node_kind();
         let text = |v: &Value| match v {
@@ -649,6 +656,12 @@ impl Form {
                     carries(prop, *mode == ConcatMode::Overwrite)?;
                     if value.is_truthy() {
                         *mode = ConcatMode::Overwrite;
+                    }
+                }
+                (Form::Operand(Operand::Concat { mode, .. }), "keep") => {
+                    carries(prop, *mode == ConcatMode::Keep)?;
+                    if value.is_truthy() {
+                        *mode = ConcatMode::Keep;
                     }
                 }
                 (Form::Command(Command::Recall(r)), "ref")
