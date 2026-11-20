@@ -391,14 +391,16 @@ fn a_parse_error_prints_one_line_with_or_without_a_target() {
     let (_, head, ok) = qua(&dir, &["= null | mi(22; 355; 690; 71275)"]);
     assert!(!ok);
     assert!(
-        head.starts_with("Error: parse error: 'mi' takes 3 operands at most, 4 given"),
+        head.starts_with(
+            "error SYNTAX (query): parse error: 'mi' takes 3 operands at most, 4 given"
+        ),
         "{head}"
     );
     assert!(!head.contains("Caused by"), "{head}");
     let (_, target, ok) = qua(&dir, &["/* | upper(::name)", "shelf/emma.txt"]);
     assert!(!ok);
     assert!(
-        target.starts_with("Error: parse error: 'upper' takes no operand, 1 given"),
+        target.starts_with("error SYNTAX (query): parse error: 'upper' takes no operand, 1 given"),
         "{target}"
     );
     assert!(!target.contains("Caused by"), "{target}");

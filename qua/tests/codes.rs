@@ -166,8 +166,87 @@ fn a_query_that_does_not_parse_has_no_planner_line() {
     let (ok, out, err) = run(&dir, &["--diagnostics=info", "/books/*[", "lib.db"]);
     assert!(!ok);
     assert_eq!(out, "");
-    assert!(err.starts_with("Error: parse error: "), "{err}");
+    assert!(
+        err.starts_with("error SYNTAX (query): parse error: "),
+        "{err}"
+    );
     assert_eq!(err.lines().count(), 1, "{err}");
+}
+
+/// An error the engine raises is told as its diagnostic's line: the
+/// code and the site, the message as it always read, and the door
+/// to the code's remedy where it has one (rulings 2026-11-18; until
+/// 0.72 `Error: MESSAGE`). A failure that is no engine error has no
+/// code and prints as before.
+#[test]
+fn an_error_is_told_under_its_code_with_the_door_to_its_remedy() {
+    let dir = fixture("errors");
+    std::fs::write(
+        dir.join("deep.json"),
+        r#"{"a": {"b": {"c": {"d": {"e": 1}}}}}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("bad.defs"), "def &f: /a ||| ;\n").unwrap();
+    let told = |args: &[&str]| -> String {
+        let (ok, out, err) = run(&dir, args);
+        assert!(!ok, "{args:?}");
+        assert_eq!(out, "", "{args:?}");
+        err.trim_end().to_string()
+    };
+    assert_eq!(
+        told(&["/a/* @| nosuch", "deep.json"]),
+        "error SYNTAX (query): parse error: 'nosuch' is not a command ('man' lists the \
+         commands) (at character 9)"
+    );
+    assert_eq!(
+        told(&["= \"1 kg\" | convert(m)"]),
+        "error REFUSED (query): refused: convert(m): a quantity converts within its own \
+         dimension, and these are unlike (kg and m)"
+    );
+    // a code with a remedy: the door after the message
+    assert_eq!(
+        told(&["--quantifier-bound=2", "/a(/*)+", "deep.json"]),
+        "error QUANTIFIER_BOUND (round 2): refused: quantifier bound reached at round 2 with \
+         edges still to take — the closure would be silently incomplete; raise \
+         --quantifier-bound. Give a bound: qua man QUANTIFIER_BOUND"
+    );
+    // no engine error, no code: the runtime's own layout
+    assert_eq!(
+        told(&["/a", "nosuch.json"]),
+        "Error: reading nosuch.json\n\nCaused by:\n    No such file or directory (os error 2)"
+    );
+    // under a host's context the context stays the `Error:` line and
+    // the engine's line stands under it
+    assert_eq!(
+        told(&["--defs", "bad.defs", "/a", "deep.json"]),
+        "Error: parsing definitions in bad.defs\n\nCaused by:\n    error SYNTAX (query): lex \
+         error: '||' is an operator and takes a space on both sides: write ' || '"
+    );
+    // a cause of several lines (an expansion's error draws the
+    // operand it was given) keeps every line under its first, as the
+    // runtime lays a cause out: the first pin of 0.72 indented the
+    // first line alone
+    let several = told(&[
+        "macro &show($p): //* @| tree; &show(/a/*[::e > 30])",
+        "--expand",
+        "deep.json",
+    ]);
+    let cause: Vec<&str> = several
+        .split_once("\n\nCaused by:\n")
+        .unwrap_or_else(|| panic!("a cause: {several}"))
+        .1
+        .lines()
+        .collect();
+    assert!(
+        several.starts_with("Error: expanding the query\n"),
+        "{several}"
+    );
+    assert!(
+        cause[0].starts_with("    error EXPANSION (query): expansion error: "),
+        "{several}"
+    );
+    assert!(cause.len() > 2, "{several}");
+    assert!(cause.iter().all(|l| l.starts_with("    ")), "{several}");
 }
 
 #[test]

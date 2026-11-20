@@ -634,21 +634,84 @@ pub fn cli_main() -> anyhow::Result<()> {
     report_top_error(r)
 }
 
-/// The refusal that ends a run, on stderr as the runtime would print
-/// it (`Error: …`, the causes under it), the word painted when
+/// The refusal that ends a run, on stderr, the word painted when
 /// colour is on; the exit status stays 1.
+///
+/// An error the engine raises is its diagnostic's own line, as every
+/// host prints the record (rulings 2026-11-18: "qua and quai should
+/// get the same line - that was the whole point for introducing
+/// error codes, so that users can look them up"): `error CODE
+/// (site): MESSAGE`, the message as it always read (`refused: …`,
+/// `parse error: … (at character 9)`), then the door to the code's
+/// remedy where it has one (`Give a bound: qua man
+/// QUANTIFIER_BOUND`). Until 0.72 it was the bare `Error: MESSAGE`.
+/// Under a host's context (a definitions file, the expansion) the
+/// context stays the `Error:` line and the engine's line stands
+/// under `Caused by:`. A failure that is no engine error (a file
+/// that is missing, input that does not parse, a database that does
+/// not answer) has no code and prints as the runtime would,
+/// `Error: …` with its causes.
 fn report_top_error(r: anyhow::Result<()>) -> anyhow::Result<()> {
     let Err(e) = r else {
         return Ok(());
     };
     let (pre, post) = paint(quarb::Severity::Error);
-    match e.downcast_ref::<Told>() {
-        // a refusal with a code is its diagnostic's own line
-        Some(Told(line)) => {
-            let rest = line.strip_prefix("error").unwrap_or(line);
-            eprintln!("{pre}error{post}{rest}");
+    let coded = |line: &str| {
+        let rest = line.strip_prefix("error").unwrap_or(line);
+        format!("{pre}error{post}{rest}")
+    };
+    let engine = |cause: &(dyn std::error::Error + 'static)| {
+        cause
+            .downcast_ref::<quarb::QuarbError>()
+            .map(|q| q.diagnostic().line())
+    };
+    // the stack, when it was asked for by name (RUST_LIB_BACKTRACE):
+    // after the refusal, as the runtime lays it out
+    let stack = || {
+        let b = e.backtrace();
+        if b.status() == std::backtrace::BacktraceStatus::Captured {
+            eprintln!("\nStack backtrace:\n{b}");
         }
-        None => eprintln!("{pre}Error{post}: {e:?}"),
+    };
+    if let Some(Told(line)) = e.downcast_ref::<Told>() {
+        // a translator's refusal is told the same way
+        eprintln!("{}", coded(line));
+    } else if let Some(line) = engine(e.as_ref()) {
+        eprintln!("{}", coded(&line));
+        stack();
+    } else if e.chain().skip(1).any(|c| engine(c).is_some()) {
+        // the host's context, then the causes as the runtime lays
+        // them out, the engine's among them as its line
+        eprintln!("{pre}Error{post}: {e}");
+        let causes: Vec<String> = e
+            .chain()
+            .skip(1)
+            .map(|c| {
+                engine(c)
+                    .map(|l| coded(&l))
+                    .unwrap_or_else(|| c.to_string())
+            })
+            .collect();
+        eprintln!("\nCaused by:");
+        // every line of a cause stands under its first, as the
+        // runtime indents a cause of several lines (a drawing inside
+        // an expansion's error): four columns, or seven under a
+        // cause's number
+        let lay = |first: String, rest: &str, text: &str| {
+            let mut lines = text.split('\n');
+            eprintln!("{first}{}", lines.next().unwrap_or_default());
+            lines.for_each(|l| eprintln!("{rest}{l}"));
+        };
+        match causes.as_slice() {
+            [one] => lay("    ".to_string(), "    ", one),
+            many => many
+                .iter()
+                .enumerate()
+                .for_each(|(i, c)| lay(format!("{i: >5}: "), "       ", c)),
+        }
+        stack();
+    } else {
+        eprintln!("{pre}Error{post}: {e:?}");
     }
     std::process::exit(1)
 }
@@ -3172,14 +3235,22 @@ fn execute(cli: &Cli, query: &str, oc: &OutputCtx) -> anyhow::Result<()> {
                     .context("opening SQLite database")?;
                 Ok(a.hold_crosslinks(&ctx.crosslinks()))
             })?;
-            match quarb_sqlite::raw_query(
-                p,
-                &plan.sql,
-                &plan_order(&plan),
-                plan.join_left
-                    .as_ref()
-                    .map(|(t, c)| (t.as_str(), c.as_slice())),
-            ) {
+            // A sum is the engine's on SQLite from 3.43, which adds
+            // floats by the careful sum; a build linked against an
+            // older library would get that library's plain total,
+            // so such a plan is not run there.
+            let ran = match quarb_sqlite::plain_sum_refusal().filter(|_| !plan.sums.is_empty()) {
+                Some(refusal) => Err(refusal),
+                None => quarb_sqlite::raw_query(
+                    p,
+                    &plan.sql,
+                    &plan_order(&plan),
+                    plan.join_left
+                        .as_ref()
+                        .map(|(t, c)| (t.as_str(), c.as_slice())),
+                ),
+            };
+            match ran {
                 Ok((cols, rows)) => {
                     print_raw(&cols, rows, plan.record, plan.properties, oc)?;
                     return Ok(());
@@ -3788,6 +3859,11 @@ fn with_ordered_sums(
             table: &s.table,
             column: &s.column,
             column_sql: &s.column_sql,
+            order: s
+                .order
+                .iter()
+                .map(|(t, n)| (t.as_str(), n.as_str()))
+                .collect(),
         })
         .collect();
     let Some(forms) = forms(&asked) else {

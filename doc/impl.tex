@@ -1158,7 +1158,16 @@ hold this), so the rungs trade only latency and transfer:
     GROUP BY/DISTINCT order, collations, unordered LIMIT) refuses.
     Row order is part of the contract — the plan names the result
     table, and each driver appends \texttt{ORDER BY} its key from
-    the catalog. An every-witness join (\texttt{<=>*},
+    the catalog. A first-witness join (\texttt{<=>}) runs as SQL
+    only where its ON binds the joined table by a unique key, since
+    a JOIN answers every candidate where the engine binds the
+    first: the plan names the table and the bound columns
+    (\texttt{Pushdown::join\_left}) and the driver asks its catalog
+    (\texttt{quarb\_relational::binds\_unique\_key}: the primary
+    key, a unique constraint or index over plain columns, none
+    partial, bound whole); SQLite, PostgreSQL, MySQL and DuckDB
+    do, the other drivers decline such a plan and \texttt{qua}
+    scans. An every-witness join (\texttt{<=>*},
     \texttt{<=>*?}) owes a second order, the joined table's within
     each driver's rows (\texttt{Pushdown::order\_then}): the
     SQLite, DuckDB, PostgreSQL and MySQL drivers append both keys
@@ -1272,10 +1281,17 @@ hold this), so the rungs trade only latency and transfer:
     \texttt{sum(x ORDER BY key)} on PostgreSQL, the same number
     every run, and \texttt{fsum(x ORDER BY key)} on DuckDB, its
     compensated sum, which on ordinary columns is the engine's to
-    the last digit; a four-byte column is widened first. What may
-    still differ from the engine in the last digits: PostgreSQL's
-    plain tail, MySQL's sum, and any float sum over a table with
-    no single-column key.
+    the last digit; a four-byte column is widened first. In a
+    plan that joins the order is the scan's too
+    (\texttt{FloatSum::order}): the driver's key, and after it the
+    joined table's where every witness is bound, under its alias
+    where a table is joined to itself. What may still differ from
+    the engine in the last digits: PostgreSQL's plain tail,
+    MySQL's sum, and any float sum over a table with no
+    single-column key. A build linked against a SQLite older than
+    3.43, which adds plainly, does not run a plan that holds a sum
+    (\texttt{quarb\_sqlite::plain\_sum\_refusal}; told as
+    \texttt{STATEMENT\_NOT\_PUSHED}).
     What remains outside: a SQLite cell that violates its column's
     declared type; a column of DuckDB declared under a collation;
     a \texttt{CHAR} of Oracle, compared without its padding; a
@@ -3227,7 +3243,19 @@ nothing about encodings.
   SORT\_NOT\_PUSHED}); the door is the host's
   (\texttt{set\_manual\_door}: \texttt{qua man} from the command
   line, \texttt{man} where the manual is a line of the session),
-  and the structured hosts carry it as \texttt{tail}.
+  and the structured hosts carry it as \texttt{tail}. An error
+  the engine raises is told by the native tools as that line too
+  (rulings 2026-11-18; until 0.72 the bare \texttt{Error:
+  MESSAGE}): \texttt{qua} prints \texttt{error SYNTAX (query):
+  parse error: \ldots} for the refusal that ends a run
+  (\texttt{report\_top\_error}, which finds a
+  \texttt{QuarbError} in the error or among its causes; under a
+  host's context the context stays the \texttt{Error:} line and
+  the engine's line stands under \texttt{Caused by:}), and
+  \texttt{quai} prints it for a cell (\texttt{Refusal::told}, a
+  context in front of the message). A failure that is no engine
+  error (a missing file, input that does not parse, a session's
+  own refusal) has no code and prints as before.
   \texttt{man CODE} prints the row and \texttt{man diagnostics
   [WORD]} lists the rows, of one family, severity or remedy. The
   planner's refusals are typed where they are made:

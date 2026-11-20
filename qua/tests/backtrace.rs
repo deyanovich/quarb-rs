@@ -38,7 +38,12 @@ fn a_refusal_prints_no_stack_under_rust_backtrace() {
     // a parse error, and a refusal with a cause under it
     for args in [&["/a[", "x.json"][..], &["/a", "missing.json"][..]] {
         let plain = refusal(&dir, args, &[]);
-        assert!(plain.starts_with("Error: "), "{plain}");
+        // (the engine's error is its coded line from 0.72; a file
+        // that is missing has no code)
+        assert!(
+            plain.starts_with("error SYNTAX (query): ") || plain.starts_with("Error: reading "),
+            "{plain}"
+        );
         assert!(!plain.contains("Stack backtrace"), "{plain}");
         for value in ["1", "full"] {
             let traced = refusal(&dir, args, &[("RUST_BACKTRACE", value)]);

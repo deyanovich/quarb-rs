@@ -479,15 +479,17 @@ pub fn float_sum_forms(
                 continue;
             }
         };
-        let key = specs
-            .iter()
-            .find(|t| t.name == s.table)
-            .and_then(|t| t.pk.map(|i| t.columns[i].clone()));
-        forms.push(match key {
-            Some(k) => Some(format!(
-                "{}({value} ORDER BY \"{}\".\"{k}\")",
-                if s.mean { "favg" } else { "fsum" },
-                s.table
+        let key_of = |table: &str| {
+            specs
+                .iter()
+                .find(|t| t.name == table)
+                .and_then(|t| t.pk.map(|i| t.columns[i].clone()))
+        };
+        let keys = s.keys(&key_of, &|t, k| format!("\"{t}\".\"{k}\""));
+        forms.push(match keys {
+            Some(keys) => Some(format!(
+                "{}({value} ORDER BY {keys})",
+                if s.mean { "favg" } else { "fsum" }
             )),
             None if value != s.column_sql => {
                 Some(format!("{}({value})", if s.mean { "avg" } else { "sum" }))
@@ -504,19 +506,32 @@ pub fn raw_query(
     order: &quarb_relational::PlanOrder<'_>,
     join_left: Option<(&str, &[String])>,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>), DuckdbError> {
-    // Witness-JOIN plans carry a uniqueness obligation this
-    // driver does not yet verify against its catalog; decline
-    // so the caller falls back to the (sound) scan.
-    if join_left.is_some() {
-        return Err(DuckdbError::Plan(
-            "witness-JOIN uniqueness not verified by this driver".into(),
-        ));
-    }
-
     let conn = Connection::open_with_flags(
         path,
         duckdb::Config::default().access_mode(duckdb::AccessMode::ReadOnly)?,
     )?;
+    // A first-witness JOIN is the engine's only where the ON binds
+    // the joined table by a unique key (0.72: the catalog is asked;
+    // every such plan was declined before). The keys: the primary
+    // key and the UNIQUE constraints (a unique index made apart from
+    // the table is not looked for, and such a plan scans).
+    if let Some((table, cols)) = join_left {
+        let mut stmt = conn.prepare(
+            "SELECT array_to_string(constraint_column_names, chr(31)) FROM duckdb_constraints() \
+             WHERE table_name = ? AND constraint_type IN ('PRIMARY KEY', 'UNIQUE')",
+        )?;
+        let mut rows = stmt.query([table])?;
+        let mut keys: Vec<Vec<String>> = Vec::new();
+        while let Some(r) = rows.next()? {
+            let columns: String = r.get(0)?;
+            keys.push(columns.split('\u{1f}').map(str::to_string).collect());
+        }
+        if !quarb_relational::binds_unique_key(&keys, cols) {
+            return Err(DuckdbError::Plan(
+                quarb_relational::not_bound_by_a_unique_key(table),
+            ));
+        }
+    }
     // The plan's order: its own sort where it has one, then the
     // primary keys the whole reads are ordered by. A plan that needs
     // a key a table lacks could not keep the scan's order, and

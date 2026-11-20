@@ -175,13 +175,17 @@ fn colour_paints_the_severity_word_only_when_asked_or_on_a_terminal() {
     );
     assert!(ok, "{err}");
     assert!(err.contains("\x1b[32minfo\x1b[0m "), "{err}");
-    // The refusal that ends a run: `Error` painted, the text as before.
+    // The refusal that ends a run: its first word painted (from 0.72
+    // the engine's error is its coded line, `error SYNTAX …`).
     let (ok, err) = raw(&dir, &["--color=always", "/books/* | nope", "lib.db"]);
     assert!(!ok);
-    assert!(err.starts_with("\x1b[1;31mError\x1b[0m: "), "{err}");
+    assert!(
+        err.starts_with("\x1b[1;31merror\x1b[0m SYNTAX (query): "),
+        "{err}"
+    );
     let (ok, plain) = raw(&dir, &["/books/* | nope", "lib.db"]);
     assert!(!ok);
-    assert!(plain.starts_with("Error: "), "{plain}");
+    assert!(plain.starts_with("error SYNTAX (query): "), "{plain}");
     assert_eq!(plain, err.replace("\x1b[1;31m", "").replace("\x1b[0m", ""));
     // `--color=never` under a forcing environment stays plain.
     let (_, err) = raw(&dir, &["--color=never", "/books/* | nope", "lib.db"]);

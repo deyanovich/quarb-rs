@@ -688,6 +688,26 @@ fn numeric_affinity(declared: &str) -> bool {
     }
 }
 
+/// Whether a SQLite of this version number adds floats as the
+/// engine does: the compensated sum came with 3.43.
+pub fn adds_carefully(version_number: i32) -> bool {
+    version_number >= 3_043_000
+}
+
+/// The refusal of a plan that holds a sum, where the SQLite this
+/// build is linked against adds floats by a plain total (before
+/// 3.43): its SUM would differ from the engine's in the last digits.
+/// `None` on a library that adds as the engine does, which every
+/// build that vendors SQLite has.
+pub fn plain_sum_refusal() -> Option<SqliteError> {
+    (!adds_carefully(rusqlite::version_number())).then(|| {
+        SqliteError::Plan(format!(
+            "SQLite {} adds floats by a plain total; a sum is the engine's from SQLite 3.43",
+            rusqlite::version()
+        ))
+    })
+}
+
 pub fn raw_query(
     path: &std::path::Path,
     sql: &str,
@@ -702,10 +722,9 @@ pub fn raw_query(
     if let Some((table, cols)) = join_left
         && !unique_key(&conn, table, cols)?
     {
-        return Err(SqliteError::Plan(format!(
-            "join ON does not bind {table} by a unique key; \
-             the SQL JOIN would multiply rows"
-        )));
+        return Err(SqliteError::Plan(
+            quarb_relational::not_bound_by_a_unique_key(table),
+        ));
     }
     // The plan's order: its own sort where it has one, then the keys
     // the whole reads are ordered by (a table with no primary key is

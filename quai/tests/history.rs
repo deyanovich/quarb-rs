@@ -241,3 +241,51 @@ fn the_runner_refuses_the_previous_line_forms() {
     );
     assert!(out.contains("&3  &1 @| count\n    2"), "{out}");
 }
+
+/// An error the engine raises is told in the session as its
+/// diagnostic's line, as every host prints the record (rulings
+/// 2026-11-18): the code and the site, the message as it always
+/// read, the door to the code's remedy where it has one; until 0.72
+/// `error: MESSAGE`. `man CODE` is a line of the session. A refusal
+/// of the session's own has no code and is told as before.
+#[test]
+fn an_engine_error_is_told_under_its_code() {
+    let dir = scratch();
+    std::fs::write(
+        dir.join("cells.quai"),
+        "    /books/* @| nosuch\n\n    = \"1 kg\" | convert(m)\n\n    &_ @| count\n\n    \
+         /books/*/title:: @| count\n",
+    )
+    .unwrap();
+    let (out, _, ok) = quai(&dir, &["--run", "cells.quai"], "");
+    assert!(!ok);
+    assert!(
+        out.contains(
+            "&1  /books/* @| nosuch\n    error SYNTAX (query): parse error: 'nosuch' is not a \
+             command ('man' lists the commands)"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "&2  = \"1 kg\" | convert(m)\n    error REFUSED (query): refused: convert(m): a \
+             quantity converts within its own dimension, and these are unlike (kg and m)\n"
+        ),
+        "{out}"
+    );
+    // the session's own refusal: no code
+    assert!(
+        out.contains("    error: '&_' is the interactive form of a session"),
+        "{out}"
+    );
+    assert!(
+        out.contains("&4  /books/*/title:: @| count\n    2"),
+        "{out}"
+    );
+    // the interactive session prints the same line on stderr
+    let (_, err, _) = quai(&dir, &[], "/books/* @| nosuch\n");
+    assert!(
+        err.contains("error SYNTAX (query): parse error: 'nosuch' is not a command"),
+        "{err}"
+    );
+}

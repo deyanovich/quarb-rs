@@ -1017,3 +1017,16 @@ fn a_negation_inside_a_join_condition_is_the_scans() {
     }
     let _ = std::fs::remove_file(&path);
 }
+
+/// A SQLite before 3.43 adds floats by a plain total, so a plan that
+/// holds a sum is not run on a build linked against one (0.72). The
+/// library this build carries adds as the engine does.
+#[test]
+fn a_sum_is_the_engines_from_sqlite_3_43() {
+    assert!(!quarb_sqlite::adds_carefully(3_042_000));
+    assert!(!quarb_sqlite::adds_carefully(3_039_005));
+    assert!(quarb_sqlite::adds_carefully(3_043_000));
+    assert!(quarb_sqlite::adds_carefully(3_053_002));
+    assert!(quarb_sqlite::adds_carefully(rusqlite::version_number()));
+    assert!(quarb_sqlite::plain_sum_refusal().is_none());
+}

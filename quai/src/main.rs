@@ -231,6 +231,77 @@ fn out_paint() -> qua::Paint {
         .get_or_init(|| qua::Paint::decide(qua::ColorMode::Auto, std::io::stdout().is_terminal()))
 }
 
+/// What follows the word `error` in a refusal's line. An error the
+/// engine raises is told as its diagnostic's line, as every host
+/// prints the record (rulings 2026-11-18): ` CODE (site): MESSAGE`
+/// and the door to the code's remedy where it has one (`Give a
+/// bound: man QUANTIFIER_BOUND`, a line of this session). Until 0.72
+/// the session printed `error: MESSAGE` for every refusal. Under a
+/// host's context the context opens the message; a failure that is
+/// no engine error has no code and is told as before, `: MESSAGE`.
+trait Refusal {
+    /// With the causes under a host's error (`{e:#}`).
+    fn told(&self) -> String;
+    /// The error's own message alone (`{e}`).
+    fn told_top(&self) -> String {
+        self.told()
+    }
+}
+
+/// The engine's line after its first word, a host's context in
+/// front of the message where there is one.
+fn told_engine(q: &quarb::QuarbError, context: &[String]) -> String {
+    let mut d = q.diagnostic();
+    if !context.is_empty() {
+        d.message = format!("{}: {}", context.join(": "), d.message);
+    }
+    let line = d.line();
+    line.strip_prefix("error").unwrap_or(&line).to_string()
+}
+
+impl Refusal for quarb::QuarbError {
+    fn told(&self) -> String {
+        told_engine(self, &[])
+    }
+}
+
+impl Refusal for anyhow::Error {
+    fn told(&self) -> String {
+        let mut context = Vec::new();
+        for cause in self.chain() {
+            match cause.downcast_ref::<quarb::QuarbError>() {
+                Some(q) => return told_engine(q, &context),
+                None => context.push(cause.to_string()),
+            }
+        }
+        format!(": {self:#}")
+    }
+    fn told_top(&self) -> String {
+        match self.downcast_ref::<quarb::QuarbError>() {
+            Some(q) => told_engine(q, &[]),
+            None if self
+                .chain()
+                .any(|c| c.downcast_ref::<quarb::QuarbError>().is_some()) =>
+            {
+                self.told()
+            }
+            None => format!(": {self}"),
+        }
+    }
+}
+
+impl Refusal for String {
+    fn told(&self) -> String {
+        format!(": {self}")
+    }
+}
+
+impl Refusal for &str {
+    fn told(&self) -> String {
+        format!(": {self}")
+    }
+}
+
 /// The `error` a refusal opens with, painted when stderr is.
 fn error_prefix() -> String {
     ERR_PAINT
@@ -645,7 +716,7 @@ fn run_file(
                 Ok(text) => text.lines().for_each(|l| println!("    {l}")),
                 Err(e) => {
                     failed = true;
-                    println!("    error: {e}");
+                    println!("    error{}", e.told_top());
                 }
             }
             println!();
@@ -672,7 +743,7 @@ fn run_file(
         if first == "def" || first == "macro" {
             if let Err(e) = session.borrow_mut().add_def(&q) {
                 failed = true;
-                println!("    error: {e:#}");
+                println!("    error{}", e.told());
             }
             println!();
             continue;
@@ -684,7 +755,7 @@ fn run_file(
             let cell = re_read.as_deref().unwrap_or(&q);
             if let Err(e) = apply_model_cell(session, remount, cell, base_dir) {
                 failed = true;
-                println!("    error: {e:#}");
+                println!("    error{}", e.told());
             }
             session.borrow_mut().commit(&q, Vec::new());
             println!();
@@ -712,7 +783,7 @@ fn run_file(
                     Ok(headed) => Some(Prepared::Eval(headed)),
                     Err(e) => {
                         failed = true;
-                        println!("    error: {e}");
+                        println!("    error{}", e.told_top());
                         session.borrow_mut().commit(&q, Vec::new());
                         println!();
                         continue;
@@ -761,7 +832,7 @@ fn run_file(
                     }
                     Err(e) => {
                         failed = true;
-                        println!("    error: {e:#}");
+                        println!("    error{}", e.told());
                         session.borrow_mut().commit(&live, Vec::new());
                     }
                 }
@@ -804,7 +875,7 @@ fn run_file(
             }
             Err(e) => {
                 failed = true;
-                println!("    error: {e:#}");
+                println!("    error{}", e.told());
                 session.borrow_mut().commit(&q, Vec::new());
             }
         }
@@ -1104,7 +1175,7 @@ fn repl(
                 Ok(()) => {
                     session.borrow_mut().commit(line, Vec::new());
                 }
-                Err(e) => eprintln!("{}: {e:#}", error_prefix()),
+                Err(e) => eprintln!("{}{}", error_prefix(), e.told()),
             }
             continue;
         }
@@ -1124,7 +1195,7 @@ fn repl(
         let resolved = match quarb::resolve_previous_line(line, last) {
             Ok(resolved) => resolved,
             Err(e) => {
-                eprintln!("{}: {e}", error_prefix());
+                eprintln!("{}{}", error_prefix(), e.told_top());
                 continue;
             }
         };
@@ -1136,7 +1207,7 @@ fn repl(
             || line == "macro"
         {
             if let Err(e) = session.borrow_mut().add_def(line) {
-                eprintln!("{}: {e:#}", error_prefix());
+                eprintln!("{}{}", error_prefix(), e.told());
             }
             continue;
         }
@@ -1144,7 +1215,7 @@ fn repl(
         // by the session, not the engine — the engine's lexer has no
         // `#`, and its `!` signage rejects a bang on a pure fragment.
         match prepare(line) {
-            Err(e) => eprintln!("{}: {e}", error_prefix()),
+            Err(e) => eprintln!("{}{}", error_prefix(), e.told_top()),
             // (the snapshot is cloned out before the session is
             // borrowed again to record the replay: a borrow held across
             // the match scrutinee poisoned every later line)
@@ -1167,7 +1238,7 @@ fn repl(
                 let headed = frozen_head_query(&session.borrow(), n, &tail);
                 match headed {
                     Ok(q) => run_and_commit(&mut session.borrow_mut(), remount, &q, false),
-                    Err(e) => eprintln!("{}: {e}", error_prefix()),
+                    Err(e) => eprintln!("{}{}", error_prefix(), e.told_top()),
                 }
             }
             Ok(Prepared::Live(q)) => run_and_commit(&mut session.borrow_mut(), remount, &q, true),
@@ -1422,7 +1493,7 @@ fn run_and_commit(session: &mut Session, remount: &mut Option<Remount>, q: &str,
                 eprintln!("note: &{n} is not referenceable (its shape can't be a fragment's body)");
             }
         }
-        Err(e) => eprintln!("{}: {e:#}", error_prefix()),
+        Err(e) => eprintln!("{}{}", error_prefix(), e.told()),
     }
 }
 
@@ -1551,7 +1622,7 @@ fn command(session: &mut Session, remount: &mut Option<Remount>, line: &str) -> 
                     }
                     Err(e) => {
                         ctx.specs.pop();
-                        eprintln!("{}: {e:#}", error_prefix());
+                        eprintln!("{}{}", error_prefix(), e.told());
                     }
                 }
             }
@@ -1563,7 +1634,7 @@ fn command(session: &mut Session, remount: &mut Option<Remount>, line: &str) -> 
     {
         match session.plan_text(arg) {
             Ok(text) => print!("{text}"),
-            Err(e) => eprintln!("{}: {e:#}", error_prefix()),
+            Err(e) => eprintln!("{}{}", error_prefix(), e.told()),
         }
         return false;
     }

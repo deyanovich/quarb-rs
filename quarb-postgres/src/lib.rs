@@ -473,13 +473,16 @@ pub fn float_sum_forms(
                     continue;
                 }
             };
-            let key = specs
-                .iter()
-                .find(|t| t.name == s.table)
-                .and_then(|t| t.pk.map(|i| t.columns[i].clone()));
+            let key_of = |table: &str| {
+                specs
+                    .iter()
+                    .find(|t| t.name == table)
+                    .and_then(|t| t.pk.map(|i| t.columns[i].clone()))
+            };
+            let keys = s.keys(&key_of, &|t, k| format!("\"{t}\".\"{k}\""));
             let f = if s.mean { "avg" } else { "sum" };
-            forms.push(match key {
-                Some(k) => Some(format!("{f}({value} ORDER BY \"{}\".\"{k}\")", s.table)),
+            forms.push(match keys {
+                Some(keys) => Some(format!("{f}({value} ORDER BY {keys})")),
                 None if value != s.column_sql => Some(format!("{f}({value})")),
                 None => None,
             });
@@ -494,21 +497,49 @@ pub fn raw_query(
     order: &quarb_relational::PlanOrder<'_>,
     join_left: Option<(&str, &[String])>,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>), PostgresError> {
-    // Witness-JOIN plans carry a uniqueness obligation this
-    // driver does not yet verify against its catalog; decline
-    // so the caller falls back to the (sound) scan.
-    if join_left.is_some() {
-        return Err(PostgresError::Plan(
-            "witness-JOIN uniqueness not verified by this driver".into(),
-        ));
-    }
-
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     rt.block_on(async {
         let (client, connection) = tokio_postgres::connect(config, NoTls).await?;
         tokio::spawn(connection);
+        // A first-witness JOIN is the engine's only where the ON
+        // binds the joined table by a unique key (0.72: the catalog
+        // is asked; every such plan was declined before). The keys:
+        // the valid unique indexes over plain columns, none partial,
+        // their key columns alone (an INCLUDE column is no key).
+        if let Some((table, cols)) = join_left {
+            let rows = client
+                .query(
+                    "SELECT i.indexrelid::bigint, a.attname::text \
+                     FROM pg_index i \
+                     JOIN pg_class c ON c.oid = i.indrelid \
+                     JOIN pg_namespace n ON n.oid = c.relnamespace \
+                     CROSS JOIN LATERAL unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord) \
+                     JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum \
+                     WHERE n.nspname = 'public' AND c.relname = $1 \
+                       AND i.indisunique AND i.indisvalid \
+                       AND i.indpred IS NULL AND i.indexprs IS NULL \
+                       AND k.ord <= i.indnkeyatts \
+                     ORDER BY 1, k.ord",
+                    &[&table],
+                )
+                .await?;
+            let mut keys: Vec<(i64, Vec<String>)> = Vec::new();
+            for r in &rows {
+                let (index, column): (i64, String) = (r.get(0), r.get(1));
+                match keys.last_mut() {
+                    Some((last, columns)) if *last == index => columns.push(column),
+                    _ => keys.push((index, vec![column])),
+                }
+            }
+            let keys: Vec<Vec<String>> = keys.into_iter().map(|(_, c)| c).collect();
+            if !quarb_relational::binds_unique_key(&keys, cols) {
+                return Err(PostgresError::Plan(
+                    quarb_relational::not_bound_by_a_unique_key(table),
+                ));
+            }
+        }
         // The plan's order: its own sort where it has one, then
         // the primary keys the whole reads are ordered by. A plan
         // that needs a key a table lacks could not keep the scan's

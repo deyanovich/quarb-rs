@@ -118,6 +118,12 @@ fn refuse_marker(quarb: &str) -> Result<(), SqlError> {
 /// the sum in the dialect's ordered form (`sum(x ORDER BY key)`),
 /// which is the same number every run. The plan says which sums it
 /// holds; the door does the rest.
+///
+/// `table` is the table the column is looked up in. `order` is what
+/// the scan adds by: the tables whose keys order the rows, each with
+/// the name the statement gives it (the driver; after it the joined
+/// table where every witness is bound, under its alias where it is
+/// joined to itself).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FloatSum {
     pub text: String,
@@ -125,13 +131,13 @@ pub struct FloatSum {
     pub table: String,
     pub column: String,
     pub column_sql: String,
+    pub order: Vec<(String, String)>,
 }
 
 pub struct Pushdown {
     pub sql: String,
     /// The plan's sums and means over a column, for a source that
-    /// adds floats in its own order: see [`FloatSum`]. Empty for a
-    /// plan that joins.
+    /// adds floats in its own order: see [`FloatSum`].
     pub sums: Vec<FloatSum>,
     pub order_table: Option<String>,
     /// Present when the plan contains a witness JOIN: the joined
@@ -387,21 +393,38 @@ pub fn pushdown_explained(quarb: &str, dialect: Option<Dialect>) -> Result<Pushd
         };
         format!("({e} IS NULL){nulls}, {e}{dir}")
     });
-    // a sum's column is looked up in the one table of a plan that
-    // joins nothing
-    let sums = match tables.as_slice() {
-        [table] if join_left.is_none() && order_then.is_none() => ex
-            .sums
+    // A sum's column is the driver's or, under the joined table's
+    // name in the statement, the joined table's; the order the scan
+    // adds in is the driver's key and, where every witness is bound,
+    // the joined table's after it (a first witness is one row a
+    // driver).
+    let sums: Vec<FloatSum> = {
+        let from = ex.from_table.clone();
+        let joined: Option<(String, String)> = ex
+            .join_table
+            .clone()
+            .map(|t| (t.clone(), ex.join_alias.clone().unwrap_or(t)));
+        let mut order = vec![(from.clone(), from.clone())];
+        if let (true, Some(j)) = (ex.join_every, joined.as_ref()) {
+            order.push(j.clone());
+        }
+        ex.sums
             .iter()
-            .map(|(mean, column, column_sql)| FloatSum {
-                text: format!("{}({column_sql})", if *mean { "AVG" } else { "SUM" }),
-                mean: *mean,
-                table: table.clone(),
-                column: column.clone(),
-                column_sql: column_sql.clone(),
+            .map(|(mean, column, column_sql)| {
+                let table = match (column_sql.rsplit_once('.'), joined.as_ref()) {
+                    (Some((qual, _)), Some((t, name))) if qual == name => t.clone(),
+                    _ => from.clone(),
+                };
+                FloatSum {
+                    text: format!("{}({column_sql})", if *mean { "AVG" } else { "SUM" }),
+                    mean: *mean,
+                    table,
+                    column: column.clone(),
+                    column_sql: column_sql.clone(),
+                    order: order.clone(),
+                }
             })
-            .collect(),
-        _ => Vec::new(),
+            .collect()
     };
     Ok(Pushdown {
         sql,

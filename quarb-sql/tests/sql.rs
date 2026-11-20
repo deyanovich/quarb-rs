@@ -1505,4 +1505,36 @@ fn a_plan_names_its_sums_over_a_column() {
     // the text stands in the statement, to be rewritten there
     let plan = quarb_sql::pushdown("/t/*::x @| sum", Some(quarb_sql::Dialect::Postgres)).unwrap();
     assert!(plan.sql.contains(&plan.sums[0].text), "{}", plan.sql);
+    // the order the scan adds in: the driver's key; after it the
+    // joined table's where every witness is bound, under its alias
+    // where the table is joined to itself; a first witness is one
+    // row a driver
+    let order = |q: &str| -> (String, Vec<(String, String)>) {
+        let s = quarb_sql::pushdown(q, Some(quarb_sql::Dialect::Postgres))
+            .unwrap_or_else(|| panic!("expected pushdown for {q}"))
+            .sums
+            .remove(0);
+        (s.table, s.order)
+    };
+    let pair = |a: &str, b: &str| (a.to_string(), b.to_string());
+    assert_eq!(
+        order("/t/*::x @| sum"),
+        ("t".to_string(), vec![pair("t", "t")])
+    );
+    assert_eq!(
+        order("/t/* <=>* /u/*[::t_id = $$0::id] | $$1::x @| sum"),
+        ("u".to_string(), vec![pair("t", "t"), pair("u", "u")])
+    );
+    assert_eq!(
+        order("/t/* <=>* /u/*[::t_id = $$0::id] | ::x @| sum"),
+        ("t".to_string(), vec![pair("t", "t"), pair("u", "u")])
+    );
+    assert_eq!(
+        order("/u/* <=> /t/*[::id = $$0::t_id] | $$1::x @| mean"),
+        ("t".to_string(), vec![pair("u", "u")])
+    );
+    assert_eq!(
+        order("/t/* <=>* /t/*[::boss = $$0::id] | $$1::x @| sum"),
+        ("t".to_string(), vec![pair("t", "t"), pair("t", "t_2")])
+    );
 }

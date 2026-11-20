@@ -206,3 +206,33 @@ fn text_comparisons_columns_and_arithmetic_answer_as_the_scan() {
         assert!(!plan.column_types.unmet(&catalog).is_empty(), "{q}");
     }
 }
+
+/// A first-witness join runs as SQL where the catalog shows that its
+/// ON binds the joined table by a unique key (0.72: the driver
+/// declined every such plan). Each track has one album by the
+/// album's primary key; an album has several tracks.
+#[test]
+#[ignore = "needs QUARB_MYSQL pointing at a music-store database"]
+fn a_first_witness_join_is_run_where_a_unique_key_binds() {
+    let config = std::env::var("QUARB_MYSQL").expect("QUARB_MYSQL");
+    let run = |q: &str| {
+        let plan = quarb_sql::pushdown(q, Some(quarb_sql::Dialect::MySql)).expect("pushes");
+        let join = plan
+            .join_left
+            .as_ref()
+            .map(|(t, c)| (t.as_str(), c.as_slice()));
+        assert!(join.is_some(), "{q}");
+        quarb_mysql::raw_query(&config, &plan.sql, &order_of(&plan), join)
+    };
+    let (_, rows) =
+        run("/tracks/* <=> /albums/*[::id = $$0::album_id] | %(t = ::id; a = $$1::id)").unwrap();
+    assert_eq!(rows.len(), 7);
+    let refusal = run("/albums/* <=> /tracks/*[::album_id = $$0::id] | %(a = ::id; t = $$1::id)")
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    assert!(
+        refusal.contains("join ON does not bind tracks by a unique key"),
+        "{refusal}"
+    );
+}

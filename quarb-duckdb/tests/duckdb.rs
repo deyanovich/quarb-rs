@@ -341,7 +341,9 @@ fn a_float_sum_is_asked_in_key_order() {
                       ((i * 104729) % 1000) / 8.0, i % 97
                FROM range(1, 20001) t(i);
              CREATE TABLE loose (x DOUBLE, f FLOAT);
-             INSERT INTO loose VALUES (0.1, 0.5), (0.2, 0.25);",
+             INSERT INTO loose VALUES (0.1, 0.5), (0.2, 0.25);
+             CREATE TABLE groups (id INTEGER PRIMARY KEY, rate DOUBLE);
+             INSERT INTO groups SELECT i, i / 10.0 FROM range(0, 5) t(i);",
         )
         .unwrap();
     }
@@ -350,6 +352,7 @@ fn a_float_sum_is_asked_in_key_order() {
         table,
         column,
         column_sql: column,
+        order: vec![(table, table)],
     };
     assert_eq!(
         quarb_duckdb::float_sum_forms(
@@ -387,11 +390,36 @@ fn a_float_sum_is_asked_in_key_order() {
     // the ordered form is the scan's sum, the careful one, on these
     // columns, and the same on every run
     let adapter = DuckdbAdapter::open(&path).unwrap();
+    // a plan that joins: the driver's key, then the joined table's
+    // where every witness is bound (0.72; such a sum was left as
+    // written)
+    let every = quarb_sql::pushdown(
+        "/groups/* <=>* /prices/*[::g = $$0::id] | $$1::x @| sum",
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        every.sums[0].order,
+        [
+            ("groups".to_string(), "groups".to_string()),
+            ("prices".to_string(), "prices".to_string())
+        ]
+    );
+    assert_eq!(every.sums[0].table, "prices");
     for (q, column) in [
         ("/prices/*::x @| sum", "x"),
         ("/prices/*[::g = 3]::x @| sum", "x"),
         ("/prices/*::x @| mean", "x"),
         ("/prices/*::f @| sum", "f"),
+        (
+            "/groups/* <=>* /prices/*[::g = $$0::id] | $$1::x @| sum",
+            "x",
+        ),
+        ("/prices/* <=> /groups/*[::id = $$0::g] | ::x @| sum", "x"),
+        (
+            "/prices/* <=> /groups/*[::id = $$0::g] | $$1::rate @| mean",
+            "rate",
+        ),
     ] {
         let plan = quarb_sql::pushdown(q, None).unwrap();
         let asked: Vec<_> = plan
@@ -402,6 +430,11 @@ fn a_float_sum_is_asked_in_key_order() {
                 table: &s.table,
                 column: &s.column,
                 column_sql: &s.column_sql,
+                order: s
+                    .order
+                    .iter()
+                    .map(|(t, n)| (t.as_str(), n.as_str()))
+                    .collect(),
             })
             .collect();
         let forms = quarb_duckdb::float_sum_forms(&path, &asked).unwrap();
@@ -417,9 +450,109 @@ fn a_float_sum_is_asked_in_key_order() {
             quarb::QueryResult::Nodes(_) => panic!("a value"),
         };
         for _ in 0..3 {
-            let (_, rows) = quarb_duckdb::raw_query(&path, &sql, &order_of(&plan), None).unwrap();
+            let join = plan
+                .join_left
+                .as_ref()
+                .map(|(t, c)| (t.as_str(), c.as_slice()));
+            let (_, rows) = quarb_duckdb::raw_query(&path, &sql, &order_of(&plan), join).unwrap();
             assert_eq!(rows[0][0].to_string(), scanned, "{q}: {sql}");
         }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A first-witness join runs as SQL where the catalog shows that its
+/// ON binds the joined table by a unique key (0.72: the driver
+/// declined every such plan): the primary key, a UNIQUE constraint,
+/// a key of two columns bound whole. Elsewhere the plan is
+/// declined, and the caller scans.
+#[test]
+fn a_first_witness_join_is_run_where_a_unique_key_binds() {
+    let dir = std::env::temp_dir().join(format!("quarb-duckdb-witness-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("t.duckdb");
+    let _ = std::fs::remove_file(&path);
+    {
+        let conn = duckdb::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE codes (id INTEGER PRIMARY KEY, code INTEGER UNIQUE, part INTEGER,
+               pair_a INTEGER, pair_b INTEGER, UNIQUE (pair_a, pair_b));
+             INSERT INTO codes VALUES (1,10,1,1,1), (2,20,2,1,2), (3,30,NULL,2,1), (4,NULL,3,2,2);
+             CREATE TABLE items (id INTEGER PRIMARY KEY, code INTEGER, part INTEGER, a INTEGER,
+               b INTEGER);
+             INSERT INTO items VALUES (1,10,1,1,1), (2,20,2,1,2), (3,20,9,2,1), (4,NULL,3,9,9),
+               (5,30,NULL,2,2), (6,99,1,1,1);",
+        )
+        .unwrap();
+    }
+    let adapter = DuckdbAdapter::open(&path).unwrap();
+    let run = |q: &str| {
+        let plan = quarb_sql::pushdown(q, None).unwrap_or_else(|| panic!("expected a plan: {q}"));
+        let join = plan
+            .join_left
+            .as_ref()
+            .map(|(t, c)| (t.as_str(), c.as_slice()));
+        assert!(join.is_some(), "{q}");
+        (
+            quarb_duckdb::raw_query(&path, &plan.sql, &order_of(&plan), join),
+            plan.sql.clone(),
+        )
+    };
+    for q in [
+        "/items/* <=> /codes/*[::id = $$0::id] | %(i = ::id; c = $$1::id)",
+        "/items/* <=> /codes/*[::code = $$0::code] | %(i = ::id; c = $$1::id)",
+        "/items/* <=>? /codes/*[::code = $$0::code] | %(i = ::id; c = $$1::id)",
+        "/items/* <=> /codes/*[::pair_a = $$0::a && ::pair_b = $$0::b] | %(i = ::id; c = $$1::id)",
+    ] {
+        let (answer, sql) = run(q);
+        let (_, rows) = answer.unwrap_or_else(|e| panic!("{q}: {e}: {sql}"));
+        let pushed: Vec<String> = rows
+            .iter()
+            .map(|r| {
+                r.iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join("|")
+            })
+            .collect();
+        let scanned: Vec<String> = match quarb::run(q, &adapter).unwrap() {
+            quarb::QueryResult::Values(vs) => vs
+                .iter()
+                .map(|v| match v {
+                    quarb::Value::Record(fields) => fields
+                        .iter()
+                        .map(|(_, v)| v.to_string())
+                        .collect::<Vec<_>>()
+                        .join("|"),
+                    other => other.to_string(),
+                })
+                .collect(),
+            quarb::QueryResult::Nodes(_) => panic!("values: {q}"),
+        };
+        assert!(!pushed.is_empty(), "{q}");
+        assert_eq!(pushed, scanned, "{q}: {sql}");
+    }
+    for (q, table) in [
+        // a column no key covers, half of a key, and the other way round
+        (
+            "/items/* <=> /codes/*[::part = $$0::part] | %(i = ::id; c = $$1::id)",
+            "codes",
+        ),
+        (
+            "/items/* <=> /codes/*[::pair_a = $$0::a] | %(i = ::id; c = $$1::id)",
+            "codes",
+        ),
+        (
+            "/codes/* <=> /items/*[::code = $$0::code] | %(c = ::id; i = $$1::id)",
+            "items",
+        ),
+    ] {
+        let (answer, _) = run(q);
+        let refusal = answer.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(
+            refusal.contains(&format!("join ON does not bind {table} by a unique key")),
+            "{q}: {refusal}"
+        );
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

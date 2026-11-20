@@ -121,12 +121,17 @@ fn the_level_flags_and_the_colour_gate_reach_the_session() {
     if out.contains("info ") {
         assert!(out.contains("\x1b[32minfo\x1b[0m "), "{out}");
     }
-    assert!(err.contains("\x1b[1;31merror\x1b[0m: "), "{err}");
+    // (from 0.72 an engine error is its coded line: the word painted,
+    // the code after it)
+    assert!(
+        err.contains("\x1b[1;31merror\x1b[0m SYNTAX (query): "),
+        "{err}"
+    );
     // A pipe is no terminal: the automatic rule leaves both plain.
     let (out, err) = quai_env(&dir, &["--info"], "/books/* | nope\n", &[]);
     assert!(
         !out.contains('\x1b') && !err.contains('\x1b'),
         "{out} {err}"
     );
-    assert!(err.contains("error: "), "{err}");
+    assert!(err.contains("error SYNTAX (query): "), "{err}");
 }

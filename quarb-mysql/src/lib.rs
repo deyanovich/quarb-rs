@@ -425,21 +425,47 @@ pub fn raw_query(
     order: &quarb_relational::PlanOrder<'_>,
     join_left: Option<(&str, &[String])>,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>), MysqlError> {
-    // Witness-JOIN plans carry a uniqueness obligation this
-    // driver does not yet verify against its catalog; decline
-    // so the caller falls back to the (sound) scan.
-    if join_left.is_some() {
-        return Err(MysqlError::Plan(
-            "witness-JOIN uniqueness not verified by this driver".into(),
-        ));
-    }
-
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     let opts = MySqlConnectOptions::from_str(config)?;
     rt.block_on(async {
         let mut conn = opts.connect().await?;
+        // A first-witness JOIN is the engine's only where the ON
+        // binds the joined table by a unique key (0.72: the catalog
+        // is asked; every such plan was declined before). The keys:
+        // the unique indexes, the primary key among them; one with a
+        // functional part (no column name) is no key here.
+        if let Some((table, cols)) = join_left {
+            let rows = sqlx::query(
+                "SELECT CAST(index_name AS CHAR), CAST(column_name AS CHAR) \
+                 FROM information_schema.statistics \
+                 WHERE table_schema = DATABASE() AND table_name = ? AND non_unique = 0 \
+                 ORDER BY index_name, seq_in_index",
+            )
+            .bind(table)
+            .fetch_all(&mut conn)
+            .await?;
+            let mut keys: Vec<(String, Option<Vec<String>>)> = Vec::new();
+            for r in &rows {
+                let index: String = r.get(0);
+                let column: Option<String> = r.get(1);
+                if keys.last().is_none_or(|(last, _)| *last != index) {
+                    keys.push((index, Some(Vec::new())));
+                }
+                let columns = &mut keys.last_mut().expect("just pushed").1;
+                match (column, columns.as_mut()) {
+                    (Some(c), Some(list)) => list.push(c),
+                    _ => *columns = None,
+                }
+            }
+            let keys: Vec<Vec<String>> = keys.into_iter().filter_map(|(_, c)| c).collect();
+            if !quarb_relational::binds_unique_key(&keys, cols) {
+                return Err(MysqlError::Plan(
+                    quarb_relational::not_bound_by_a_unique_key(table),
+                ));
+            }
+        }
         // The plan's order: its own sort where it has one, then
         // the primary keys the whole reads are ordered by. A plan
         // that needs a key a table lacks could not keep the scan's

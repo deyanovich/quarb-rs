@@ -460,15 +460,62 @@ pub fn quote_backtick(name: &str) -> String {
 /// rows is part of it, and the keys that decide the order are a
 /// catalog's to name: the driver looks them up and appends the
 /// clause ([`order_clause`]).
+/// Whether the columns a first-witness join binds on the joined
+/// table hold one of that table's unique keys whole: the condition
+/// for running such a join as SQL. The engine's `<=>` binds the
+/// first candidate of each driver; a SQL JOIN answers every
+/// candidate, so the two agree only where a driver can have one
+/// candidate at most, which a unique key under the ON's equalities
+/// says (a row whose key holds a NULL meets no value, so a nullable
+/// unique key serves). `keys` are the table's unique keys as its
+/// catalog lists them: the primary key and every unique constraint
+/// or index over plain columns, none partial.
+pub fn binds_unique_key(keys: &[Vec<String>], bound: &[String]) -> bool {
+    keys.iter().any(|key| {
+        !key.is_empty()
+            && key
+                .iter()
+                .all(|c| bound.iter().any(|b| b.eq_ignore_ascii_case(c)))
+    })
+}
+
+/// What a driver answers for a first-witness join it may not run.
+pub fn not_bound_by_a_unique_key(table: &str) -> String {
+    format!("join ON does not bind {table} by a unique key; the SQL JOIN would multiply rows")
+}
+
 /// A plan's sum or mean over a column, as a driver is asked for
 /// its ordered form (`quarb_sql::FloatSum`, borrowed): the table,
 /// the column's name, and the column as the statement writes it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `order` is what the scan adds by: the tables whose keys order the
+/// rows, each with the name the statement gives it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FloatSum<'a> {
     pub mean: bool,
     pub table: &'a str,
     pub column: &'a str,
     pub column_sql: &'a str,
+    pub order: Vec<(&'a str, &'a str)>,
+}
+
+impl FloatSum<'_> {
+    /// The ORDER BY of the sum's ordered form: each ordering table's
+    /// key under its name in the statement, as `column` writes one.
+    /// `None` where a table has no single-column key: the sum then
+    /// stays as written.
+    pub fn keys(
+        &self,
+        key_of: &dyn Fn(&str) -> Option<String>,
+        column: &dyn Fn(&str, &str) -> String,
+    ) -> Option<String> {
+        let keys: Option<Vec<String>> = self
+            .order
+            .iter()
+            .map(|(table, name)| key_of(table).map(|k| column(name, &k)))
+            .collect();
+        keys.filter(|k| !k.is_empty()).map(|k| k.join(", "))
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -2159,6 +2206,26 @@ impl RelationalModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A first-witness join runs as SQL where its ON binds the
+    /// joined table by one of its unique keys whole.
+    #[test]
+    fn a_unique_key_is_bound_whole() {
+        let s = |xs: &[&str]| xs.iter().map(|x| x.to_string()).collect::<Vec<String>>();
+        let keys = vec![s(&["id"]), s(&["pair_a", "pair_b"])];
+        assert!(binds_unique_key(&keys, &s(&["id"])));
+        // more than the key is bound: still at most one row
+        assert!(binds_unique_key(&keys, &s(&["id", "name"])));
+        assert!(binds_unique_key(&keys, &s(&["pair_b", "pair_a"])));
+        // names meet without regard to case, as a catalog folds them
+        assert!(binds_unique_key(&keys, &s(&["ID"])));
+        // part of a key, another column, nothing
+        assert!(!binds_unique_key(&keys, &s(&["pair_a"])));
+        assert!(!binds_unique_key(&keys, &s(&["name"])));
+        assert!(!binds_unique_key(&keys, &[]));
+        assert!(!binds_unique_key(&[], &s(&["id"])));
+        assert!(!binds_unique_key(&[vec![]], &s(&["id"])));
+    }
 
     #[test]
     fn a_plans_order_is_composed_from_its_parts() {

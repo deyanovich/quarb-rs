@@ -231,6 +231,7 @@ fn a_float_sum_is_asked_in_key_order() {
         table: "tracks",
         column,
         column_sql: column,
+        order: vec![("tracks", "tracks")],
     };
     assert_eq!(
         quarb_postgres::float_sum_forms(
@@ -275,4 +276,34 @@ fn a_float_sum_is_asked_in_key_order() {
         let (_, rows) = quarb_postgres::raw_query(&config, &sql, &order_of(&plan), None).unwrap();
         assert_eq!(rows[0][0], quarb::Value::Float(plain), "{sql}");
     }
+}
+
+/// A first-witness join runs as SQL where the catalog shows that its
+/// ON binds the joined table by a unique key (0.72: the driver
+/// declined every such plan). Each track has one album by the
+/// album's primary key; an album has several tracks.
+#[test]
+#[ignore = "needs QUARB_PG pointing at a music-store database"]
+fn a_first_witness_join_is_run_where_a_unique_key_binds() {
+    let config = std::env::var("QUARB_PG").expect("QUARB_PG");
+    let run = |q: &str| {
+        let plan = quarb_sql::pushdown(q, Some(quarb_sql::Dialect::Postgres)).expect("pushes");
+        let join = plan
+            .join_left
+            .as_ref()
+            .map(|(t, c)| (t.as_str(), c.as_slice()));
+        assert!(join.is_some(), "{q}");
+        quarb_postgres::raw_query(&config, &plan.sql, &order_of(&plan), join)
+    };
+    let (_, rows) =
+        run("/tracks/* <=> /albums/*[::id = $$0::album_id] | %(t = ::id; a = $$1::id)").unwrap();
+    assert_eq!(rows.len(), 7);
+    let refusal = run("/albums/* <=> /tracks/*[::album_id = $$0::id] | %(a = ::id; t = $$1::id)")
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    assert!(
+        refusal.contains("join ON does not bind tracks by a unique key"),
+        "{refusal}"
+    );
 }
